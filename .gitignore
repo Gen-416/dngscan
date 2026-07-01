@@ -7,7 +7,8 @@ venv/
 
 # Tony McMapface LUT and other local assets (download separately, do not commit)
 *.spi3d
-dngscan_assets/
+dngscan_assets/*
+!dngscan_assets/README.md
 
 # Raw inputs and generated outputs
 *.dng

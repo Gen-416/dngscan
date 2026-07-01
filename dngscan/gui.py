@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# A minimal local web GUI for dngscan.py. It starts a localhost server, opens the
+# A minimal local web GUI for dngscan. It starts a localhost server, opens the
 # browser, and lets you pick one DNG, choose one tone-mapping mode, set exposure /
 # quality, and export a JPEG. The analysis PNG is off by default. All heavy lifting
-# reuses dngscan.py -- this file only wires a UI onto it.
+# reuses dngscan.core -- this file only wires a UI onto it.
 from __future__ import annotations
 
 import base64
@@ -12,11 +12,12 @@ import io
 import json
 import math
 import socket
+import subprocess
 import sys
-import tempfile
 import threading
 import traceback
 import webbrowser
+from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -28,7 +29,17 @@ RAW_EXTS = {
     ".raw", ".pef", ".srw", ".x3f", ".iiq", ".3fr", ".mrw", ".dcr", ".kdc",
 }
 
-PREVIEW_CACHE: dict[tuple[str, int, str], tuple[dg.RawBundle, dg.Analysis]] = {}
+PROXY_LONG_EDGE = 1280
+
+
+@dataclass
+class PreviewEntry:
+    bundle: dg.RawBundle
+    analysis: dg.Analysis
+    proxy_scene: object
+
+
+PREVIEW_CACHE: dict[tuple[str, int, str], PreviewEntry] = {}
 PREVIEW_CACHE_LOCK = threading.Lock()
 RENDER_LOCK = threading.Lock()
 
@@ -65,7 +76,13 @@ button.preview:disabled{opacity:.5;cursor:default}
 #browser{display:none;margin-top:10px;border:1px solid #2b2f3a;border-radius:8px;max-height:260px;overflow:auto;background:#12141a}
 #browser div{padding:6px 10px;cursor:pointer;border-bottom:1px solid #20242e;font-size:13px}
 #browser div:hover{background:#1a2233}
-#preview{margin-top:12px;max-width:100%;border-radius:8px;display:none}
+#previewWrap{position:relative;margin-top:12px;min-height:0}
+#previewWrap.loading{min-height:240px}
+#preview{max-width:100%;border-radius:8px;display:none;transition:opacity .15s ease}
+#previewWrap.loading #preview{opacity:.4}
+#spinner{display:none;position:absolute;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;border:3px solid rgba(255,255,255,.22);border-top-color:#eef2ff;border-radius:50%;animation:spin .8s linear infinite}
+#previewWrap.loading #spinner{display:block}
+@keyframes spin{to{transform:rotate(360deg)}}
 .chk{display:flex;align-items:center;gap:8px}.chk input{width:auto}
 </style></head>
 <body><div class="wrap">
@@ -121,6 +138,18 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
+    <div style="flex:0;min-width:190px">
+      <label>输出格式</label>
+      <select id="format">
+        <option value="sdr">SDR JPEG</option>
+        <option value="ultrahdr">HDR gain-map JPEG</option>
+      </select>
+    </div>
+    <div style="min-width:220px">
+      <label>HDR headroom（仅 HDR 输出）</label>
+      <div class="evrow"><input type="range" id="hdrHeadroom" min="1" max="5" step="0.25" value="3"><span class="evval" id="hdrHeadroomVal">+3.00</span></div>
+      <div class="muted" id="hdrHint">微信/QQ 想保住 HDR：走原图或文件，别走朋友圈。</div>
+    </div>
   </div>
   <div style="margin-top:12px">
     <label>输出文件夹（留空=与源文件同目录）</label>
@@ -134,9 +163,10 @@ button.preview:disabled{opacity:.5;cursor:default}
 <div class="card">
   <button class="preview" id="previewBtn">预览</button>
   <button class="go" id="go">导出</button>
+  <button class="ghost" id="revealBtn" style="display:none">在 Finder 中显示</button>
   <span class="muted" id="modehint" style="margin-left:12px"></span>
   <div id="status"></div>
-  <img id="preview">
+  <div id="previewWrap"><img id="preview"><div id="spinner"></div></div>
 </div>
 
 <script>
@@ -144,27 +174,29 @@ const $=s=>document.querySelector(s);
 const STORE_KEY="dngscan.settings.v2";
 let mode="agx";
 function selMode(m){mode=m;document.querySelectorAll("#modes button").forEach(b=>b.classList.toggle("sel",b.dataset.m===m));
-  $("#modehint").textContent=m==="tony"?"tony 需要 ~/dngscan_assets/tony_mc_mapface.spi3d":"";}
+  $("#modehint").textContent=m==="tony"?"tony 需要 ./dngscan_assets/tony_mc_mapface.spi3d":"";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
-function fmtPct(v){return v<0.01?v.toFixed(4):v<1?v.toFixed(3):v.toFixed(2);}
+function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}
+function fmtPct(v){if(v===undefined||!isFinite(v))return "";if(v<=0)return "0%";if(v<0.005)return "<0.01%";if(v<1)return "~"+v.toFixed(2)+"%";return v.toFixed(1)+"%";}
 function fmtEv(v){return (v>=0?"+":"")+v.toFixed(2);}
 function metricText(j){
   if(!j.metrics)return "";
   const m=j.metrics;
   if(m.luma_p999_pct===undefined)return "";
   const room=m.safe_ev_remaining!==undefined?m.safe_ev_remaining:m.headroom_luma_ev;
-  const label=j.metrics_kind==="full"?" · 全分辨率真值":" · 预览估计(偏保守)";
-  const roomText=room!==undefined?" · 可再加约 "+fmtEv(room)+"EV":"";
+  const label=j.metrics_kind==="full"?" · 全分辨率真值":" · 预览估计";
+  const roomText=j.metrics_kind==="full"&&room!==undefined?" · 可再加约 "+fmtEv(room)+"EV":"";
   return label+
-    " · p99.9亮度 "+fmtPct(m.luma_p999_pct)+"%"+
-    " · 近白 "+fmtPct(m.near_white_pct)+"%"+
-    " · 顶白 "+fmtPct(m.clipped_channel_pct)+"%"+
+    " · p99.9亮度 "+fmtPct(m.luma_p999_pct)+
+    " · 近白 "+fmtPct(m.near_white_pct)+
+    " · 顶白 "+fmtPct(m.clipped_channel_pct)+
     roomText;
 }
 function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,mode,ev:$("#ev").value,quality:$("#quality").value,
-    highlight:$("#highlight").value,gamut:$("#gamut").value,outdir:$("#outdir").value,png:$("#png").checked
+    highlight:$("#highlight").value,gamut:$("#gamut").value,format:$("#format").value,
+    hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
 function restoreSettings(){
@@ -174,15 +206,20 @@ function restoreSettings(){
   if(s.quality)$("#quality").value=s.quality;
   if(s.highlight)$("#highlight").value=s.highlight;
   if(s.gamut)$("#gamut").value=s.gamut;
+  if(s.format)$("#format").value=s.format;
+  if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
-  selMode(s.mode||"agx");setEvLabel();
+  selMode(s.mode||"agx");setEvLabel();setHdrLabel();
 }
 document.querySelectorAll("#modes button").forEach(b=>b.onclick=()=>{selMode(b.dataset.m);saveSettings();});
 document.querySelectorAll("button[data-ev]").forEach(b=>b.onclick=()=>{$("#ev").value=b.dataset.ev;setEvLabel();saveSettings();});
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
+$("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$("#gamut").value="p3";saveSettings();});
 $("#ev").oninput=()=>{setEvLabel();saveSettings();};
+$("#hdrHeadroom").oninput=()=>{setHdrLabel();saveSettings();};
 restoreSettings();
+let lastSavedPath="";
 
 let curDir=INIT_DIR;
 async function listDir(d){
@@ -198,36 +235,57 @@ $("#browseBtn").onclick=()=>{const b=$("#browser");if(b.style.display==="block")
 function payload(){
   const input=$("#input").value.trim();
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
-  return {input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,ev:+$("#ev").value,quality:+$("#quality").value,outdir:$("#outdir").value.trim(),png:$("#png").checked};
+  return {
+    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,format:$("#format").value,
+    hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
+    outdir:$("#outdir").value.trim(),png:$("#png").checked
+  };
 }
 
 async function postJob(path, body){
   const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   return await r.json();
 }
+function beginBusy(){const w=$("#previewWrap");w.classList.add("loading");}
+function endBusy(){const w=$("#previewWrap");w.classList.remove("loading");}
+function setPreviewImage(b64, ondone){
+  const img=$("#preview");
+  img.onload=()=>{img.style.display="block";endBusy();if(ondone)ondone();};
+  img.onerror=()=>{endBusy();};
+  img.src="data:image/jpeg;base64,"+b64;
+}
 
 $("#previewBtn").onclick=async()=>{
   const body=payload();if(!body)return;
-  $("#previewBtn").disabled=true;setStatus("生成预览…（首次会建立缓存）","");$("#preview").style.display="none";
+  $("#previewBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("生成预览…（首次会建立缓存）","");
   try{
     const j=await postJob("/preview",body);
-    if(!j.ok){setStatus("错误："+j.error,"err");}
+    if(!j.ok){endBusy();setStatus("错误："+j.error,"err");}
     else{setStatus("预览：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+metricText(j),"ok");
-      $("#preview").src="data:image/jpeg;base64,"+j.preview;$("#preview").style.display="block";}
-  }catch(e){setStatus("请求失败："+e,"err");}
+      setPreviewImage(j.preview);}
+  }catch(e){endBusy();setStatus("请求失败："+e,"err");}
   $("#previewBtn").disabled=false;
 };
 
 $("#go").onclick=async()=>{
   const body=payload();if(!body)return;
-  $("#go").disabled=true;$("#previewBtn").disabled=true;setStatus("导出 full-res…","");$("#preview").style.display="none";
+  $("#go").disabled=true;$("#previewBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("导出 full-res…","");
   try{
     const j=await postJob("/export",body);
-    if(!j.ok){setStatus("错误："+j.error,"err");}
-    else{setStatus("已保存："+j.saved.join(" · ")+"（EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+metricText(j)+"）","ok");
-      $("#preview").src="data:image/jpeg;base64,"+j.preview;$("#preview").style.display="block";}
-  }catch(e){setStatus("请求失败："+e,"err");}
+    if(!j.ok){endBusy();setStatus("错误："+j.error,"err");}
+    else{setStatus("已保存："+j.saved.join(" · ")+"（"+j.format+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+metricText(j)+"）","ok");
+      lastSavedPath=j.saved[0]||"";$("#revealBtn").style.display=lastSavedPath?"inline-block":"none";setPreviewImage(j.preview);}
+  }catch(e){endBusy();setStatus("请求失败："+e,"err");}
   $("#go").disabled=false;$("#previewBtn").disabled=false;
+};
+$("#revealBtn").onclick=async()=>{
+  if(!lastSavedPath)return;
+  $("#revealBtn").disabled=true;
+  try{
+    const j=await postJob("/reveal",{path:lastSavedPath});
+    if(!j.ok)setStatus("Finder 打开失败："+j.error,"err");
+  }catch(e){setStatus("Finder 请求失败："+e,"err");}
+  $("#revealBtn").disabled=false;
 };
 function setStatus(t,c){const s=$("#status");s.textContent=t;s.className=c||"";}
 </script>
@@ -235,14 +293,36 @@ function setStatus(t,c){const s=$("#status");s.textContent=t;s.className=c||"";}
 """
 
 
-def make_preview_b64(path: Path, width: int = 1024, icc_profile: bytes | None = None) -> str:
+def downsample_mean(image: object, max_long_edge: int = PROXY_LONG_EDGE) -> object:
+    np = dg.np
+    if np is None:
+        return image
+    arr = np.asarray(image)
+    h, w = arr.shape[:2]
+    long_edge = max(h, w)
+    if long_edge <= max_long_edge:
+        return arr
+    factor = max(1, int(math.ceil(long_edge / max_long_edge)))
+    work = arr.astype(np.float32, copy=False)
+    row_starts = np.arange(0, h, factor)
+    col_starts = np.arange(0, w, factor)
+    reduced = np.add.reduceat(work, row_starts, axis=0)
+    reduced = np.add.reduceat(reduced, col_starts, axis=1)
+    row_counts = np.diff(np.append(row_starts, h)).astype(np.float32)
+    col_counts = np.diff(np.append(col_starts, w)).astype(np.float32)
+    reduced = reduced / row_counts[:, None, None]
+    reduced = reduced / col_counts[None, :, None]
+    return reduced.astype(np.float32, copy=False)
+
+
+def make_preview_b64(path: Path, width: int | None = 1280, icc_profile: bytes | None = None) -> str:
     from PIL import Image
 
-    src = Image.open(path)
-    if icc_profile is None:
-        icc_profile = src.info.get("icc_profile")
-    im = src.convert("RGB")
-    if im.width > width:
+    with Image.open(path) as src:
+        if icc_profile is None:
+            icc_profile = src.info.get("icc_profile")
+        im = src.convert("RGB")
+    if width is not None and im.width > width:
         im = im.resize((width, round(im.height * width / im.width)))
     buf = io.BytesIO()
     save_kwargs = {"format": "JPEG", "quality": 85}
@@ -252,6 +332,38 @@ def make_preview_b64(path: Path, width: int = 1024, icc_profile: bytes | None = 
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def preview_b64_from_u8(rgb_u8: object, icc_profile: bytes | None = None) -> str:
+    from PIL import Image
+
+    im = Image.fromarray(rgb_u8, "RGB")
+    buf = io.BytesIO()
+    save_kwargs = {"format": "JPEG", "quality": 85}
+    if icc_profile:
+        save_kwargs["icc_profile"] = icc_profile
+    im.save(buf, **save_kwargs)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def preview_metrics_from_u8(rgb_u8: object, gamut: str) -> dict[str, float]:
+    np = dg.np
+    if np is None:
+        return {}
+    rgb = np.asarray(rgb_u8, dtype=np.uint8)
+    flat_u8 = rgb.reshape(-1, 3)
+    max_channel = np.max(flat_u8, axis=1)
+    weights = dg.RGB_TO_XYZ[dg.output_gamut_space(gamut)][1].astype(np.float32)
+    y_u8 = (
+        weights[0] * flat_u8[:, 0].astype(np.float32)
+        + weights[1] * flat_u8[:, 1].astype(np.float32)
+        + weights[2] * flat_u8[:, 2].astype(np.float32)
+    )
+    return {
+        "luma_p999_pct": float(np.percentile(y_u8, 99.9) / 255.0 * 100.0),
+        "near_white_pct": float(np.mean(max_channel >= 250) * 100.0),
+        "clipped_channel_pct": float(np.mean(max_channel >= 254) * 100.0),
+    }
+
+
 def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, float]:
     from PIL import Image
 
@@ -259,8 +371,10 @@ def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, flo
     if np is None:
         return {}
     im = Image.open(path).convert("RGB")
-    encoded = np.asarray(im, dtype=np.float32) / np.float32(255.0)
+    encoded_u8 = np.asarray(im, dtype=np.uint8)
+    encoded = encoded_u8.astype(np.float32) / np.float32(255.0)
     flat = encoded.reshape(-1, 3)
+    max_channel_u8 = np.max(encoded_u8.reshape(-1, 3), axis=1)
     linear = np.where(flat <= 0.04045, flat / 12.92, np.power((flat + 0.055) / 1.055, 2.4))
     matrix = dg.RGB_TO_XYZ[dg.output_gamut_space(gamut)]
     y = matrix[1, 0] * linear[:, 0] + matrix[1, 1] * linear[:, 1] + matrix[1, 2] * linear[:, 2]
@@ -276,8 +390,8 @@ def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, flo
         "luma_p99_pct": y_p99 * 100.0,
         "luma_p999_pct": y_p999 * 100.0,
         "max_channel_p999_pct": max_p999 * 100.0,
-        "near_white_pct": float(np.mean(np.max(flat, axis=1) >= (250.0 / 255.0)) * 100.0),
-        "clipped_channel_pct": float(np.mean(np.any(flat >= (254.5 / 255.0), axis=1)) * 100.0),
+        "near_white_pct": float(np.mean(max_channel_u8 >= 250) * 100.0),
+        "clipped_channel_pct": float(np.mean(max_channel_u8 >= 254) * 100.0),
         "headroom_luma_ev": float(headroom_luma_ev),
         "headroom_rgb_ev": float(headroom_rgb_ev),
         "estimated_ev_before_luma_limit": float(ev + headroom_luma_ev),
@@ -425,7 +539,7 @@ def list_dir(raw: str) -> dict:
     return {"cwd": str(p), "parent": str(p.parent), "dirs": dirs, "files": files}
 
 
-def parse_job_params(params: dict) -> tuple[Path, str, str, str, float, int, bool, Path | None]:
+def parse_job_params(params: dict) -> tuple[Path, str, str, str, str, float, float, int, bool, Path | None]:
     inp = Path(str(params["input"])).expanduser()
     if not inp.is_file():
         raise FileNotFoundError(f"文件不存在：{inp}")
@@ -438,13 +552,21 @@ def parse_job_params(params: dict) -> tuple[Path, str, str, str, float, int, boo
     gamut = str(params.get("gamut", "srgb"))
     if gamut not in ("srgb", "p3"):
         raise ValueError(f"未知输出色域：{gamut}")
+    output_format = str(params.get("format", "sdr"))
+    if output_format not in dg.JPEG_OUTPUT_FORMATS:
+        raise ValueError(f"未知输出格式：{output_format}")
+    if output_format == "ultrahdr":
+        gamut = "p3"
     ev = float(params.get("ev", 0.0))
+    hdr_headroom = float(params.get("hdrHeadroom", dg.DEFAULT_HDR_HEADROOM_EV))
+    if hdr_headroom <= 0:
+        raise ValueError("HDR headroom 必须大于 0")
     quality = int(params.get("quality", 100))
     if not 1 <= quality <= 100:
         raise ValueError("质量需在 1-100 之间")
     want_png = bool(params.get("png", False))
     outdir = Path(str(params["outdir"])).expanduser() if params.get("outdir") else None
-    return inp, mode, highlight, gamut, ev, quality, want_png, outdir
+    return inp, mode, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir
 
 
 def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, mode: str, gamut: str) -> dg.ToneCompressionPlan | None:
@@ -468,35 +590,29 @@ def export_preview_jpeg(
     if cached is None:
         bundle = dg.load_raw(inp, highlight, scene_half_size=True)
         analysis, _, _ = dg.analyze(bundle, 4)
+        proxy_scene = downsample_mean(bundle.scene_rec2020_render, PROXY_LONG_EDGE)
+        cached = PreviewEntry(bundle=bundle, analysis=analysis, proxy_scene=proxy_scene)
         with PREVIEW_CACHE_LOCK:
             PREVIEW_CACHE.clear()
-            PREVIEW_CACHE[key] = (bundle, analysis)
-    else:
-        bundle, analysis = cached
+            PREVIEW_CACHE[key] = cached
 
+    proxy_bundle = replace(
+        cached.bundle,
+        scene_rec2020_render=cached.proxy_scene,
+        exposure_gain=dg.compute_exposure_gain(mode, ev),
+    )
     with RENDER_LOCK:
-        bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
-        tone_plan = plan_for_bundle(bundle, analysis, mode, gamut)
+        tone_plan = plan_for_bundle(proxy_bundle, cached.analysis, mode, gamut)
         icc_profile = dg.output_icc_profile_bytes(gamut)
-        tmp = tempfile.NamedTemporaryFile(prefix="dngscan_preview_", suffix=".jpg", delete=False)
-        tmp_path = Path(tmp.name)
-        tmp.close()
-        try:
-            dg.export_srgb_jpeg(inp, tmp_path, quality, mode, bundle, analysis, None, tone_plan, gamut)
-            metrics = output_luminance_metrics(tmp_path, gamut, ev)
-            metrics.update(estimate_ev_headroom(bundle, analysis, mode, gamut, ev))
-            preview = make_preview_b64(tmp_path, width=max_width, icc_profile=icc_profile)
-        finally:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+        rgb_u8 = dg.render_output_u8(proxy_bundle, cached.analysis, mode, gamut, None, tone_plan)
+        metrics = preview_metrics_from_u8(rgb_u8, gamut)
+        preview = preview_b64_from_u8(rgb_u8, icc_profile=icc_profile)
     return {
         "ok": True,
         "preview": preview,
         "metrics": metrics,
         "metrics_kind": "preview",
-        "gain": bundle.exposure_gain,
+        "gain": proxy_bundle.exposure_gain,
         "ev": ev,
         "highlight": dg.highlight_mode_cn(highlight),
         "gamut": dg.output_gamut_label(gamut),
@@ -504,13 +620,13 @@ def export_preview_jpeg(
 
 
 def run_preview(params: dict) -> dict:
-    inp, mode, highlight, gamut, ev, quality, _, _ = parse_job_params(params)
+    inp, mode, highlight, gamut, _, ev, _, quality, _, _ = parse_job_params(params)
     return export_preview_jpeg(inp, mode, highlight, gamut, ev, min(quality, 95))
 
 
 def run_export(params: dict) -> dict:
     dg.require_dependencies()
-    inp, mode, highlight, gamut, ev, quality, want_png, outdir_arg = parse_job_params(params)
+    inp, mode, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir_arg = parse_job_params(params)
     outdir = outdir_arg if outdir_arg is not None else inp.parent
     outdir.mkdir(parents=True, exist_ok=True)
 
@@ -528,12 +644,27 @@ def run_export(params: dict) -> dict:
         suffix_parts.append(highlight)
     if gamut != "srgb":
         suffix_parts.append(gamut)
+    if output_format == "ultrahdr":
+        suffix_parts.append("hdr")
     suffix = "_".join(suffix_parts)
     jpg_path = outdir / f"{inp.stem}_{suffix}.jpg"
     with RENDER_LOCK:
         bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
         icc_profile = dg.output_icc_profile_bytes(gamut)
-        dg.export_srgb_jpeg(inp, jpg_path, quality, mode, bundle, analysis, None, tone_plan, gamut)
+        dg.export_jpeg(
+            inp,
+            jpg_path,
+            quality,
+            mode,
+            bundle,
+            analysis,
+            None,
+            tone_plan,
+            gamut,
+            output_format,
+            hdr_headroom,
+            dg.DEFAULT_GAINMAP_SCALE,
+        )
         metrics = output_luminance_metrics(jpg_path, gamut, ev)
         metrics.update(estimate_ev_headroom(bundle, analysis, mode, gamut, ev, max_samples=600_000))
         preview = make_preview_b64(jpg_path, icc_profile=icc_profile)
@@ -552,9 +683,22 @@ def run_export(params: dict) -> dict:
         "metrics_kind": "full",
         "gain": bundle.exposure_gain,
         "ev": ev,
+        "format": "HDR gain-map JPEG" if output_format == "ultrahdr" else "SDR JPEG",
+        "hdr_headroom": hdr_headroom if output_format == "ultrahdr" else 0.0,
         "highlight": dg.highlight_mode_cn(highlight),
         "gamut": dg.output_gamut_label(gamut),
     }
+
+
+def reveal_path(params: dict) -> dict:
+    path = Path(str(params.get("path", ""))).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"文件不存在：{path}")
+    result = subprocess.run(["open", "-R", str(path)], check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise RuntimeError(detail or "open -R failed")
+    return {"ok": True}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -583,13 +727,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/export", "/preview"):
+        if path not in ("/export", "/preview", "/reveal"):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", 0))
         try:
             params = json.loads(self.rfile.read(length) or b"{}")
-            self._json(run_preview(params) if path == "/preview" else run_export(params))
+            if path == "/preview":
+                result = run_preview(params)
+            elif path == "/export":
+                result = run_export(params)
+            else:
+                result = reveal_path(params)
+            self._json(result)
         except Exception as exc:  # surface any pipeline error to the UI
             traceback.print_exc()
             self._json({"ok": False, "error": str(exc)}, code=200)

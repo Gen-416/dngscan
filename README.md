@@ -24,9 +24,11 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
     Rec.2020. The inset/outset channel crosstalk gives AgX's smooth highlight
     desaturation instead of hard per-channel clipping.
   - `tony` — the Tony McMapface display-referred 3D LUT.
-- **Local web GUI** (`dngscan_gui.py`) — pick a file, mode, exposure and quality;
+- **Local web GUI** (`python -m dngscan.gui`) — pick a file, mode, exposure and quality;
   live preview; per-file exposure-headroom estimate; sRGB or Display P3 output;
   highlight handling (clip / blend / reconstruct). Browser-based, no Tk required.
+- **Optional Ultra HDR JPEG** — writes JPEG-based gain-map HDR output with a normal
+  SDR fallback image plus an ISO/Ultra HDR gain map. SDR JPEG remains the default.
 
 ## Design notes
 
@@ -40,6 +42,9 @@ A few choices worth knowing:
   space so saturated highlights are not clipped to sRGB before tone mapping. AgX's
   inset/outset are conjugated into Rec.2020 so neutrals stay neutral.
 - **TPDF-dithered 8-bit quantization** to avoid banding in smooth gradients.
+- **Gain-map HDR is additive.** The SDR base image is the same rendered output, while
+  the HDR numerator keeps midtones equal to SDR and releases only highlight headroom.
+  HDR output is forced to Display P3 and defaults to +3 EV headroom.
 - **Per-channel analysis** — full-well and clip thresholds are reconstructed per
   channel (empirical saturation pile when present, metadata white level as a
   fallback for unclipped scenes).
@@ -48,6 +53,9 @@ Metrics are single-frame estimates (not photon-transfer measurements); bit depth
 not the same as usable dynamic range.
 
 ## Install
+
+dngscan does not bundle Python or Homebrew dependencies inside the repo. Keep the
+system environment normal, and keep project-specific assets in this project folder.
 
 Requires Python 3.10+ and:
 
@@ -58,32 +66,61 @@ pip install -r requirements.txt
 (`numpy`, `rawpy`, `matplotlib`, `pillow`.) The GUI runs in your browser and does
 **not** need Tkinter.
 
+Ultra HDR output uses macOS ImageIO/PyObjC when available, and falls back to Google's
+`libultrahdr` CLI if installed:
+
+```bash
+brew install libultrahdr
+```
+
+Project layout:
+
+```text
+dngscan/
+  __main__.py           # CLI entry point: python -m dngscan
+  core.py               # RAW analysis, tone planning, Tony/export pipeline
+  agx.py                # AgX inset/outset, log curve and sigmoid core
+  gui.py                # GUI entry point: python -m dngscan.gui
+dngscan_assets/
+  README.md             # local asset notes
+  tony_mc_mapface.spi3d # local Tony LUT, not committed
+  darktable_agx.*       # local AgX reference copies, not committed
+```
+
 ## Usage
 
 Command line:
 
 ```bash
 # Diagnostic PNG only
-python dngscan.py photo.dng
+python -m dngscan photo.dng
 
 # Export a JPEG with the AgX pipeline, +0.5 EV, Display P3
-python dngscan.py photo.dng --jpeg out.jpg --jpeg-mode agx --ev 0.5 --output-gamut p3
+python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx --ev 0.5 --output-gamut p3
+
+# Export an ISO/Ultra HDR gain-map JPEG. The SDR base is forced to Display P3.
+python -m dngscan photo.dng --jpeg out_hdr.jpg --jpeg-mode agx --highlight-mode reconstruct \
+  --output-format ultrahdr --hdr-headroom 3
 
 # Faithful reference, also write the diagnostic PNG and a metrics CSV
-python dngscan.py photo.dng --jpeg out.jpg --jpeg-mode neutral --scan --csv metrics.csv
+python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode neutral --scan --csv metrics.csv
 ```
 
 Local GUI:
 
 ```bash
-python dngscan_gui.py   # starts a localhost server and opens the browser
+python -m dngscan.gui   # starts a localhost server and opens the browser
 ```
+
+For WeChat/QQ delivery, use original-file or file transfer if you want the HDR gain
+map to survive. Moments/feed-style uploads usually recompress to SDR and strip the
+gain map.
 
 ## Tony McMapface LUT
 
-The `tony` mode needs `tony_mc_mapface.spi3d`, which is **not** bundled. Download it
-from [h3r2tic/tony-mc-mapface](https://github.com/h3r2tic/tony-mc-mapface/tree/main/OCIO/LUTs)
-and place it at `~/dngscan_assets/tony_mc_mapface.spi3d`, or pass `--tony-lut PATH`.
+The `tony` mode needs `tony_mc_mapface.spi3d`. Keep it at
+`./dngscan_assets/tony_mc_mapface.spi3d`, or pass `--tony-lut PATH`. The LUT remains
+a local asset and is not committed to the repo.
 
 ## License & attribution
 

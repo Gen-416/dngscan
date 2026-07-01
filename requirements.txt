@@ -2,3 +2,4 @@ numpy>=1.24
 rawpy>=0.18
 matplotlib>=3.6
 pillow>=9.2
+pyobjc-framework-Quartz>=12.0; platform_system == "Darwin"

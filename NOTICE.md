@@ -23,3 +23,13 @@ The `tony` mode samples `tony_mc_mapface.spi3d`, an external asset from:
 It is dual-licensed under Apache-2.0 OR MIT. The LUT file is **not** redistributed
 with this repository; download it from the upstream project and place it at
 `~/dngscan_assets/tony_mc_mapface.spi3d` (or pass `--tony-lut`).
+
+## libultrahdr (Apache-2.0)
+
+Ultra HDR export can optionally call Google's `ultrahdr_app` from:
+
+- https://github.com/google/libultrahdr
+
+libultrahdr is licensed under Apache-2.0. It is **not** redistributed with this
+repository; install it separately (for example `brew install libultrahdr`) if the
+macOS ImageIO gain-map backend is not sufficient.

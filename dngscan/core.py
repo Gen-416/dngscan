@@ -9,11 +9,16 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import platform
+import shutil
+import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+from . import agx as agx_engine
 
 IMPORT_ERRORS: list[str] = []
 
@@ -61,6 +66,10 @@ CEILING_MIN_PILE_PIXELS = 256
 CEILING_MIN_PILE_FRACTION = 2e-5
 OUTPUT_GAMUT_SPACES = {"srgb": "sRGB", "p3": "P3"}
 OUTPUT_GAMUT_LABELS = {"srgb": "sRGB", "p3": "Display P3"}
+JPEG_OUTPUT_FORMATS = ("sdr", "ultrahdr")
+DEFAULT_HDR_HEADROOM_EV = 3.0
+DEFAULT_GAINMAP_SCALE = 2
+TONY_LUT_CACHE: dict[tuple[str, int, int], Any] = {}
 
 XYZ_TO_RGB = {
     "sRGB": np.array(  # type: ignore[union-attr]
@@ -99,33 +108,8 @@ SRGB_TO_REC2020 = (
     else None
 )
 
-# Reference AgX inset/outset from Troy Sobotka's AgX family, expressed for
-# sRGB/Rec.709 primaries. We map this reference transform into Rec.2020 below so
-# the script can keep the AgX view transform in the same wide scene-linear space
-# used by the RAW export buffer.
-AGX_REFERENCE_INSET = (
-    np.array(  # type: ignore[union-attr]
-        [
-            [0.842479062253094, 0.0784335999999992, 0.0792237451477643],
-            [0.0423282422610123, 0.878468636469772, 0.0791661274605434],
-            [0.0423756549057051, 0.0784336, 0.879142973793104],
-        ],
-        dtype=np.float64,
-    )
-    if np is not None
-    else None
-)
-
-AGX_INSET = (
-    (SRGB_TO_REC2020 @ AGX_REFERENCE_INSET @ REC2020_TO_SRGB).astype(np.float64)
-    if np is not None
-    else None
-)
-if np is not None and AGX_INSET is not None:
-    AGX_INSET = (AGX_INSET / AGX_INSET.sum(axis=1, keepdims=True)).astype(np.float64)
-AGX_OUTSET = (
-    np.linalg.inv(AGX_INSET).astype(np.float64) if np is not None and AGX_INSET is not None else None
-)
+AGX_REFERENCE_INSET = agx_engine.REFERENCE_INSET
+AGX_INSET, AGX_OUTSET = agx_engine.build_inset_outset(SRGB_TO_REC2020, REC2020_TO_SRGB)
 
 
 @dataclass
@@ -209,6 +193,17 @@ class ToneCompressionPlan:
     tony_hdr_gain: float
 
 
+@dataclass
+class GainMapMetadata:
+    headroom: float
+    gamma: float = 1.0
+    min_gain: float = 0.0
+    max_gain: float = DEFAULT_HDR_HEADROOM_EV
+    hdr_capacity_min: float = 0.0
+    hdr_capacity_max: float = DEFAULT_HDR_HEADROOM_EV
+    gainmap_scale: int = DEFAULT_GAINMAP_SCALE
+
+
 def require_dependencies() -> None:
     if IMPORT_ERRORS:
         joined = "\n  ".join(IMPORT_ERRORS)
@@ -272,6 +267,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="JPEG 质量 1-100；默认 100，并使用 4:4:4 色度采样",
     )
     parser.add_argument(
+        "--output-format",
+        choices=JPEG_OUTPUT_FORMATS,
+        default="sdr",
+        help="JPEG 输出格式: sdr=普通 JPEG；ultrahdr=ISO 21496-1 gain-map HDR JPEG（强制 Display P3 底图）",
+    )
+    parser.add_argument(
+        "--hdr-headroom",
+        type=float,
+        default=DEFAULT_HDR_HEADROOM_EV,
+        help="Ultra HDR gain map 的 HDR headroom（档），默认 +3EV",
+    )
+    parser.add_argument(
+        "--hdr-gainmap-scale",
+        type=int,
+        choices=(1, 2, 4),
+        default=DEFAULT_GAINMAP_SCALE,
+        help="gain map 降采样倍率；1=全分辨率，2/4=更小体积，默认 2",
+    )
+    parser.add_argument(
         "--ev",
         type=float,
         default=0.0,
@@ -299,13 +313,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--tony-lut",
         type=Path,
         default=None,
-        help="Tony McMapface .spi3d LUT 路径；默认查找 ~/dngscan_assets/tony_mc_mapface.spi3d",
+        help="Tony McMapface .spi3d LUT 路径；默认查找 ./dngscan_assets/tony_mc_mapface.spi3d",
     )
     args = parser.parse_args(argv)
     if args.margin < 0:
         parser.error("--margin must be >= 0")
     if not 1 <= args.jpeg_quality <= 100:
         parser.error("--jpeg-quality must be between 1 and 100")
+    if args.hdr_headroom <= 0:
+        parser.error("--hdr-headroom must be > 0")
     return args
 
 
@@ -723,12 +739,23 @@ def dither_quantize_u8(encoded: Any, rng: Any) -> Any:
     return np.clip(np.floor(scaled + np.float32(0.5) + noise), 0, 255).astype(np.uint8)
 
 
-def scene_render_to_neutral_u8(bundle: RawBundle, output_gamut: str = "srgb") -> Any:
+def output_linear_to_u8(rgb_linear: Any) -> Any:
+    flat = rgb_linear.reshape(-1, 3)
+    out = np.empty((flat.shape[0], 3), dtype=np.uint8)
+    rng = np.random.default_rng(0)
+    chunk = 1_000_000
+    for start in range(0, flat.shape[0], chunk):
+        end = min(start + chunk, flat.shape[0])
+        encoded = srgb_encode(np.clip(flat[start:end], 0.0, 1.0))
+        out[start:end] = dither_quantize_u8(encoded, rng)
+    return out.reshape(rgb_linear.shape[:2] + (3,))
+
+
+def scene_render_to_neutral_linear(bundle: RawBundle, output_gamut: str = "srgb") -> Any:
     scene = bundle.scene_rec2020_render
     h, w = scene.shape[:2]
     flat_scene = scene.reshape(-1, scene.shape[-1])
-    out = np.empty((flat_scene.shape[0], 3), dtype=np.uint8)
-    rng = np.random.default_rng(0)
+    out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
 
     for start in range(0, flat_scene.shape[0], chunk):
@@ -736,20 +763,22 @@ def scene_render_to_neutral_u8(bundle: RawBundle, output_gamut: str = "srgb") ->
         rec = scene_rec2020_to_float(flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain)
         output_linear = rec2020_to_output(rec, output_gamut)
         output_linear = np.nan_to_num(output_linear, nan=0.0, posinf=1e6, neginf=-1e6)
-        encoded = srgb_encode(np.clip(output_linear, 0.0, 1.0))
-        out[start:end] = dither_quantize_u8(encoded, rng)
+        out[start:end] = output_linear.astype(np.float32, copy=False)
 
     return out.reshape(h, w, 3)
 
 
-def scene_render_to_smart_u8(
+def scene_render_to_neutral_u8(bundle: RawBundle, output_gamut: str = "srgb") -> Any:
+    return output_linear_to_u8(scene_render_to_neutral_linear(bundle, output_gamut))
+
+
+def scene_render_to_smart_linear(
     bundle: RawBundle, analysis: Analysis, plan: ToneCompressionPlan, output_gamut: str = "srgb"
 ) -> Any:
     scene = bundle.scene_rec2020_render
     h, w = scene.shape[:2]
     flat_scene = scene.reshape(-1, scene.shape[-1])
-    out = np.empty((flat_scene.shape[0], 3), dtype=np.uint8)
-    rng = np.random.default_rng(0)
+    out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
 
     for start in range(0, flat_scene.shape[0], chunk):
@@ -757,172 +786,19 @@ def scene_render_to_smart_u8(
         rec = scene_rec2020_to_float(flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain)
         output_linear = rec2020_to_output(rec, output_gamut)
         output_linear = compress_linear_output_rgb_for_jpeg(output_linear, analysis, plan, output_gamut)
-        encoded = srgb_encode(output_linear)
-        out[start:end] = dither_quantize_u8(encoded, rng)
+        out[start:end] = output_linear.astype(np.float32, copy=False)
 
     return out.reshape(h, w, 3)
 
 
-@lru_cache(maxsize=32)
-def agx_curve_params(
-    black_ev: float = -10.0,
-    white_ev: float = 6.5,
-    contrast: float = 3.0,
-    toe_power: float = 1.5,
-    shoulder_power: float = 3.3,
-) -> dict[str, float | bool]:
-    # Derived from darktable's GPLv3 AgX implementation:
-    # https://github.com/darktable-org/darktable/blob/master/src/iop/agx.c
-    # and its OpenCL kernel:
-    # https://github.com/darktable-org/darktable/blob/master/data/kernels/agx.cl
-    default_gamma = 2.2
-    black_ev = float(black_ev)
-    white_ev = float(white_ev)
-    range_ev = max(1.0, white_ev - black_ev)
-    pivot_x = clamp_float(-black_ev / range_ev, EPS, 1.0 - EPS)
-    pivot_y_linear = 0.18
-    pivot_y = pivot_y_linear ** (1.0 / default_gamma)
-    target_black = 0.0
-    target_white = 1.0
-    range_adjusted_slope = contrast * (range_ev / 16.5)
-    pivot_y_default = pivot_y
-    derivative_current = default_gamma * max(EPS, pivot_y) ** (default_gamma - 1.0)
-    derivative_default = default_gamma * max(EPS, pivot_y_default) ** (default_gamma - 1.0)
-    slope = range_adjusted_slope / (derivative_current / derivative_default)
-
-    toe_transition_x = max(EPS, pivot_x)
-    toe_transition_y = pivot_y
-    inverse_toe_limit_x = 1.0
-    inverse_toe_limit_y = 1.0 - target_black
-    inverse_toe_transition_x = 1.0 - toe_transition_x
-    inverse_toe_transition_y = 1.0 - toe_transition_y
-    toe_scale = -agx_scale(
-        inverse_toe_limit_x,
-        inverse_toe_limit_y,
-        inverse_toe_transition_x,
-        inverse_toe_transition_y,
-        slope,
-        toe_power,
-    )
-    toe_length_x = toe_transition_x
-    toe_dy = max(EPS, toe_transition_y - target_black)
-    toe_slope_to_limit = toe_dy / toe_length_x
-    need_convex_toe = toe_slope_to_limit > slope
-    toe_fallback_power = slope * toe_length_x / toe_dy
-    toe_fallback_coefficient = toe_dy / max(EPS, toe_length_x) ** toe_fallback_power
-    intercept = toe_transition_y - slope * toe_transition_x
-
-    shoulder_transition_x = min(1.0 - EPS, pivot_x)
-    shoulder_transition_y = pivot_y
-    shoulder_scale = agx_scale(1.0, target_white, shoulder_transition_x, shoulder_transition_y, slope, shoulder_power)
-    shoulder_length_x = 1.0 - shoulder_transition_x
-    shoulder_dy = max(EPS, target_white - shoulder_transition_y)
-    shoulder_slope_to_limit = shoulder_dy / shoulder_length_x
-    need_concave_shoulder = shoulder_slope_to_limit > slope
-    shoulder_fallback_power = slope * shoulder_length_x / shoulder_dy
-    shoulder_fallback_coefficient = shoulder_dy / max(EPS, shoulder_length_x) ** shoulder_fallback_power
-    return {
-        "black_ev": black_ev,
-        "range_ev": range_ev,
-        "gamma": default_gamma,
-        "target_black": target_black,
-        "target_white": target_white,
-        "toe_power": toe_power,
-        "toe_transition_x": toe_transition_x,
-        "toe_transition_y": toe_transition_y,
-        "toe_scale": toe_scale,
-        "need_convex_toe": need_convex_toe,
-        "toe_fallback_power": toe_fallback_power,
-        "toe_fallback_coefficient": toe_fallback_coefficient,
-        "slope": slope,
-        "intercept": intercept,
-        "shoulder_power": shoulder_power,
-        "shoulder_transition_x": shoulder_transition_x,
-        "shoulder_transition_y": shoulder_transition_y,
-        "shoulder_scale": shoulder_scale,
-        "need_concave_shoulder": need_concave_shoulder,
-        "shoulder_fallback_power": shoulder_fallback_power,
-        "shoulder_fallback_coefficient": shoulder_fallback_coefficient,
-    }
-
-
-def agx_scale(limit_x: float, limit_y: float, transition_x: float, transition_y: float, slope: float, power: float) -> float:
-    projected_rise = slope * max(EPS, limit_x - transition_x)
-    actual_rise = max(EPS, limit_y - transition_y)
-    base = max(EPS, actual_rise ** (-power) - projected_rise ** (-power))
-    return min(1e9, base ** (-1.0 / power))
-
-
-def agx_sigmoid(x: Any, power: float) -> Any:
-    return x / np.power(1.0 + np.power(x, power), 1.0 / power)
-
-
-def agx_scaled_sigmoid(x: Any, scale: float, slope: float, power: float, transition_x: float, transition_y: float) -> Any:
-    return scale * agx_sigmoid(slope * (x - transition_x) / scale, power) + transition_y
-
-
-def agx_apply_curve(x: Any, params: dict[str, float | bool]) -> Any:
-    x = np.asarray(x, dtype=np.float32)
-    out = np.empty_like(x)
-    toe = x < float(params["toe_transition_x"])
-    shoulder = x > float(params["shoulder_transition_x"])
-    mid = ~(toe | shoulder)
-    if np.any(toe):
-        if bool(params["need_convex_toe"]):
-            out[toe] = float(params["target_black"]) + np.maximum(
-                0.0,
-                float(params["toe_fallback_coefficient"]) * np.power(np.maximum(x[toe], 0.0), float(params["toe_fallback_power"])),
-            )
-        else:
-            out[toe] = agx_scaled_sigmoid(
-                x[toe],
-                float(params["toe_scale"]),
-                float(params["slope"]),
-                float(params["toe_power"]),
-                float(params["toe_transition_x"]),
-                float(params["toe_transition_y"]),
-            )
-    if np.any(mid):
-        out[mid] = float(params["slope"]) * x[mid] + float(params["intercept"])
-    if np.any(shoulder):
-        if bool(params["need_concave_shoulder"]):
-            out[shoulder] = float(params["target_white"]) - np.maximum(
-                0.0,
-                float(params["shoulder_fallback_coefficient"])
-                * np.power(np.maximum(1.0 - x[shoulder], 0.0), float(params["shoulder_fallback_power"])),
-            )
-        else:
-            out[shoulder] = agx_scaled_sigmoid(
-                x[shoulder],
-                float(params["shoulder_scale"]),
-                float(params["slope"]),
-                float(params["shoulder_power"]),
-                float(params["shoulder_transition_x"]),
-                float(params["shoulder_transition_y"]),
-            )
-    return np.clip(out, float(params["target_black"]), float(params["target_white"]))
+def scene_render_to_smart_u8(
+    bundle: RawBundle, analysis: Analysis, plan: ToneCompressionPlan, output_gamut: str = "srgb"
+) -> Any:
+    return output_linear_to_u8(scene_render_to_smart_linear(bundle, analysis, plan, output_gamut))
 
 
 def agx_compress_into_gamut(rgb: Any) -> Any:
-    coeff = np.asarray([0.2658180370250449, 0.59846986045365, 0.1357121025213052], dtype=np.float32)
-    input_y = coeff[0] * rgb[:, 0] + coeff[1] * rgb[:, 1] + coeff[2] * rgb[:, 2]
-    max_rgb = np.max(rgb, axis=1)
-    opponent = max_rgb[:, None] - rgb
-    opponent_y = coeff[0] * opponent[:, 0] + coeff[1] * opponent[:, 1] + coeff[2] * opponent[:, 2]
-    max_opponent = np.max(opponent, axis=1)
-    y_compensate_negative = max_opponent - opponent_y + input_y
-    offset = np.maximum(-np.min(rgb, axis=1), 0.0)
-    rgb_offset = rgb + offset[:, None]
-    max_offset = np.max(rgb_offset, axis=1)
-    opponent_offset = max_offset[:, None] - rgb_offset
-    max_inverse = np.max(opponent_offset, axis=1)
-    y_inverse = coeff[0] * opponent_offset[:, 0] + coeff[1] * opponent_offset[:, 1] + coeff[2] * opponent_offset[:, 2]
-    y_new = coeff[0] * rgb_offset[:, 0] + coeff[1] * rgb_offset[:, 1] + coeff[2] * rgb_offset[:, 2]
-    y_new = max_inverse - y_inverse + y_new
-    ratio = np.ones_like(y_new)
-    mask = (y_new > y_compensate_negative) & (y_new > EPS)
-    ratio[mask] = y_compensate_negative[mask] / y_new[mask]
-    return rgb_offset * ratio[:, None]
+    return agx_engine.compress_into_gamut(rgb)
 
 
 def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
@@ -932,28 +808,14 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     filmic curve; the darktable-derived sigmoid supplies the curve shape, while the plan's
     black/white EV keep the log2 window anchored on the exposure we set.
     """
-    params = agx_curve_params(
-        round(plan.black_ev, 3),
-        round(plan.white_ev, 3),
-        round(plan.contrast, 3),
-        round(plan.toe_power, 3),
-        round(plan.shoulder_power, 3),
-    )
-    rgb = agx_compress_into_gamut(rgb_rec2020.astype(np.float32, copy=False))
-    inset = apply_rgb_matrix3(rgb, AGX_INSET)
-    log_encoded = (np.log2(np.maximum(inset / 0.18, EPS)) - float(params["black_ev"])) / float(params["range_ev"])
-    log_encoded = np.clip(log_encoded, 0.0, 1.0)
-    curved = agx_apply_curve(log_encoded, params)
-    curved = apply_rgb_matrix3(curved, AGX_OUTSET)
-    return np.power(np.maximum(curved, 0.0), float(params["gamma"])).astype(np.float32)
+    return agx_engine.apply_core(rgb_rec2020, plan, AGX_INSET, AGX_OUTSET)
 
 
-def scene_render_to_agx_u8(bundle: RawBundle, plan: ToneCompressionPlan, output_gamut: str = "srgb") -> Any:
+def scene_render_to_agx_linear(bundle: RawBundle, plan: ToneCompressionPlan, output_gamut: str = "srgb") -> Any:
     scene = bundle.scene_rec2020_render
     h, w = scene.shape[:2]
     flat_scene = scene.reshape(-1, scene.shape[-1])
-    out = np.empty((flat_scene.shape[0], 3), dtype=np.uint8)
-    rng = np.random.default_rng(0)
+    out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
 
     for start in range(0, flat_scene.shape[0], chunk):
@@ -961,21 +823,31 @@ def scene_render_to_agx_u8(bundle: RawBundle, plan: ToneCompressionPlan, output_
         rec = scene_rec2020_to_float(flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain)
         mapped_rec = apply_agx_core(rec, plan)
         output_linear = rec2020_to_output(mapped_rec, output_gamut)
-        encoded = srgb_encode(np.clip(output_linear, 0.0, 1.0))
-        out[start:end] = dither_quantize_u8(encoded, rng)
+        output_linear = np.nan_to_num(output_linear, nan=0.0, posinf=1e6, neginf=-1e6)
+        out[start:end] = output_linear.astype(np.float32, copy=False)
     return out.reshape(h, w, 3)
 
 
+def scene_render_to_agx_u8(bundle: RawBundle, plan: ToneCompressionPlan, output_gamut: str = "srgb") -> Any:
+    return output_linear_to_u8(scene_render_to_agx_linear(bundle, plan, output_gamut))
+
+
 def default_tony_lut_path() -> Path:
-    return Path.home() / "dngscan_assets" / "tony_mc_mapface.spi3d"
+    return Path(__file__).resolve().parents[1] / "dngscan_assets" / "tony_mc_mapface.spi3d"
 
 
 def load_tony_spi3d(path: Path) -> Any:
+    path = path.expanduser()
     if not path.exists():
         raise FileNotFoundError(
             f"Tony LUT not found: {path}. Download tony_mc_mapface.spi3d from "
             "https://github.com/h3r2tic/tony-mc-mapface/tree/main/OCIO/LUTs or pass --tony-lut."
         )
+    stat = path.stat()
+    key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size))
+    cached = TONY_LUT_CACHE.get(key)
+    if cached is not None:
+        return cached
     entries: list[tuple[int, int, int, float, float, float]] = []
     dims: tuple[int, int, int] | None = None
     with path.open("r", encoding="utf-8") as fh:
@@ -1009,6 +881,8 @@ def load_tony_spi3d(path: Path) -> Any:
         filled[ri, gi, bi] = True
     if not bool(filled.all()):
         raise RuntimeError(f"Tony LUT is missing {int((~filled).sum())} grid points; file may be truncated")
+    TONY_LUT_CACHE.clear()
+    TONY_LUT_CACHE[key] = lut
     return lut
 
 
@@ -1040,15 +914,14 @@ def sample_tony_lut(rgb: Any, lut: Any) -> Any:
     return c0 * (1.0 - fz) + c1 * fz
 
 
-def scene_render_to_tony_u8(
+def scene_render_to_tony_linear(
     bundle: RawBundle, plan: ToneCompressionPlan, lut_path: Path, output_gamut: str = "srgb"
 ) -> Any:
     lut = load_tony_spi3d(lut_path)
     scene = bundle.scene_rec2020_render
     h, w = scene.shape[:2]
     flat_scene = scene.reshape(-1, scene.shape[-1])
-    out = np.empty((flat_scene.shape[0], 3), dtype=np.uint8)
-    rng = np.random.default_rng(0)
+    out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
     for start in range(0, flat_scene.shape[0], chunk):
         end = min(start + chunk, flat_scene.shape[0])
@@ -1058,9 +931,148 @@ def scene_render_to_tony_u8(
         srgb_linear = precondition_tonemapper_rgb(srgb_linear, y, plan, for_tony=True)
         mapped_linear = sample_tony_lut(srgb_linear, lut)
         output_linear = srgb_to_output(mapped_linear, output_gamut)
-        encoded = srgb_encode(np.clip(output_linear, 0.0, 1.0))
-        out[start:end] = dither_quantize_u8(encoded, rng)
+        output_linear = np.nan_to_num(output_linear, nan=0.0, posinf=1e6, neginf=-1e6)
+        out[start:end] = output_linear.astype(np.float32, copy=False)
     return out.reshape(h, w, 3)
+
+
+def scene_render_to_tony_u8(
+    bundle: RawBundle, plan: ToneCompressionPlan, lut_path: Path, output_gamut: str = "srgb"
+) -> Any:
+    return output_linear_to_u8(scene_render_to_tony_linear(bundle, plan, lut_path, output_gamut))
+
+
+def scene_render_to_output_linear(
+    bundle: RawBundle,
+    analysis: Analysis,
+    mode: str,
+    output_gamut: str = "srgb",
+    tony_lut_path: Path | None = None,
+    tone_plan: ToneCompressionPlan | None = None,
+) -> Any:
+    if mode == "smart":
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        return scene_render_to_smart_linear(bundle, analysis, plan, output_gamut)
+    if mode == "agx":
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        return scene_render_to_agx_linear(bundle, plan, output_gamut)
+    if mode == "tony":
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        lut_path = tony_lut_path if tony_lut_path is not None else default_tony_lut_path()
+        return scene_render_to_tony_linear(bundle, plan, lut_path, output_gamut)
+    return scene_render_to_neutral_linear(bundle, output_gamut)
+
+
+def render_output_u8(
+    bundle: RawBundle,
+    analysis: Analysis | None,
+    mode: str,
+    output_gamut: str = "srgb",
+    tony_lut_path: Path | None = None,
+    tone_plan: ToneCompressionPlan | None = None,
+) -> Any:
+    if mode == "smart":
+        if analysis is None:
+            raise ValueError("smart mode requires analysis")
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        return scene_render_to_smart_u8(bundle, analysis, plan, output_gamut)
+    if mode == "agx":
+        if analysis is None:
+            raise ValueError("agx mode requires analysis")
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        return scene_render_to_agx_u8(bundle, plan, output_gamut)
+    if mode == "tony":
+        if analysis is None:
+            raise ValueError("tony mode requires analysis")
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        lut_path = tony_lut_path if tony_lut_path is not None else default_tony_lut_path()
+        return scene_render_to_tony_u8(bundle, plan, lut_path, output_gamut)
+    if mode != "neutral":
+        raise ValueError(f"unknown JPEG mode: {mode}")
+    return scene_render_to_neutral_u8(bundle, output_gamut)
+
+
+def scene_render_to_reference_linear(bundle: RawBundle, output_gamut: str = "p3") -> Any:
+    """Unclipped scene-linear output-space reference used as the HDR reservoir."""
+    return scene_render_to_neutral_linear(bundle, output_gamut)
+
+
+def hdr_highlight_weight(sdr_base_linear: Any, hdr_reference_linear: Any, output_gamut: str) -> Any:
+    base_y = luminance_from_rgb_space(np.clip(sdr_base_linear.reshape(-1, 3), 0.0, 1.0), output_gamut)
+    ref_y = luminance_from_rgb_space(np.clip(hdr_reference_linear.reshape(-1, 3), 0.0, None), output_gamut)
+    base_y = np.nan_to_num(base_y, nan=0.0, posinf=1.0, neginf=0.0)
+    ref_y = np.nan_to_num(ref_y, nan=0.0, posinf=1e6, neginf=0.0)
+    bright = smoothstep(np.float32(0.55), np.float32(0.98), base_y)
+    extra = smoothstep(np.float32(0.02), np.float32(0.50), np.maximum(ref_y - base_y, 0.0))
+    ref_bright = smoothstep(np.float32(0.70), np.float32(1.20), ref_y)
+    return np.maximum(bright, extra * ref_bright).reshape(sdr_base_linear.shape[:2])
+
+
+def render_hdr_numerator_linear(
+    bundle: RawBundle,
+    sdr_linear: Any,
+    output_gamut: str,
+    hdr_headroom: float,
+) -> Any:
+    hdr_limit = np.float32(2.0 ** hdr_headroom)
+    sdr_base = np.clip(np.nan_to_num(sdr_linear, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    reference = np.clip(
+        np.nan_to_num(scene_render_to_reference_linear(bundle, output_gamut), nan=0.0, posinf=float(hdr_limit), neginf=0.0),
+        0.0,
+        float(hdr_limit),
+    )
+    candidate = np.maximum(reference, sdr_base)
+    weight = hdr_highlight_weight(sdr_base, reference, output_gamut).astype(np.float32, copy=False)
+    hdr = sdr_base + weight[:, :, None] * (candidate - sdr_base)
+    return np.maximum(sdr_base, np.clip(hdr, 0.0, float(hdr_limit))).astype(np.float32, copy=False)
+
+
+def resize_gainmap_u8(gain_u8: Any, scale: int) -> Any:
+    if scale <= 1:
+        return gain_u8
+    from PIL import Image
+
+    h, w = gain_u8.shape[:2]
+    target = (max(1, round(w / scale)), max(1, round(h / scale)))
+    im = Image.fromarray(gain_u8)
+    return np.asarray(im.resize(target, Image.Resampling.LANCZOS), dtype=np.uint8)
+
+
+def compute_gainmap_u8(
+    sdr_linear: Any,
+    hdr_linear: Any,
+    output_gamut: str,
+    hdr_headroom: float,
+    gamma: float = 1.0,
+    scale: int = DEFAULT_GAINMAP_SCALE,
+) -> Any:
+    sdr_base = np.clip(np.nan_to_num(sdr_linear.reshape(-1, 3), nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
+    hdr = np.clip(
+        np.nan_to_num(hdr_linear.reshape(-1, 3), nan=0.0, posinf=2.0 ** hdr_headroom, neginf=0.0),
+        0.0,
+        2.0 ** hdr_headroom,
+    )
+    sdr_y = luminance_from_rgb_space(sdr_base, output_gamut)
+    hdr_y = luminance_from_rgb_space(np.maximum(hdr, sdr_base), output_gamut)
+    gain_stops = np.log2(np.maximum(hdr_y, sdr_y + EPS) / np.maximum(sdr_y, EPS))
+    gain_stops = np.clip(np.nan_to_num(gain_stops, nan=0.0, posinf=hdr_headroom, neginf=0.0), 0.0, hdr_headroom)
+    normalized = gain_stops.reshape(sdr_linear.shape[:2]) / max(hdr_headroom, EPS)
+    if gamma != 1.0:
+        normalized = np.power(np.clip(normalized, 0.0, 1.0), 1.0 / gamma)
+    gain_u8 = np.clip(np.round(normalized * 255.0), 0, 255).astype(np.uint8)
+    return resize_gainmap_u8(gain_u8, scale)
+
+
+def build_gainmap_metadata(hdr_headroom: float, scale: int) -> GainMapMetadata:
+    return GainMapMetadata(
+        headroom=float(hdr_headroom),
+        gamma=1.0,
+        min_gain=0.0,
+        max_gain=float(hdr_headroom),
+        hdr_capacity_min=0.0,
+        hdr_capacity_max=float(hdr_headroom),
+        gainmap_scale=int(scale),
+    )
 
 
 def save_jpeg_array(rgb_u8: Any, out_path: Path, quality: int, output_gamut: str = "srgb") -> bool:
@@ -1084,6 +1096,295 @@ def save_jpeg_array(rgb_u8: Any, out_path: Path, quality: int, output_gamut: str
         pil_kwargs=pil_kwargs,
     )
     return icc_profile is not None
+
+
+def imageio_gainmap_backend_status() -> tuple[bool, str]:
+    if platform.system() != "Darwin":
+        return False, "ISO gain-map JPEG 写入当前只实现了 macOS ImageIO 后端"
+    try:
+        import Quartz  # type: ignore
+    except Exception as exc:
+        return False, f"缺少 PyObjC Quartz 绑定：{exc}；请安装 pyobjc-framework-Quartz"
+    required = [
+        "CGImageDestinationCreateWithURL",
+        "CGImageDestinationAddImage",
+        "CGImageDestinationAddAuxiliaryDataInfo",
+        "CGImageDestinationFinalize",
+        "kCGImageAuxiliaryDataTypeISOGainMap",
+    ]
+    missing = [name for name in required if not hasattr(Quartz, name)]
+    if missing:
+        return False, "当前 macOS/PyObjC ImageIO 不暴露 ISO gain-map API：" + ", ".join(missing)
+    return True, "macOS ImageIO ISO gain-map backend available"
+
+
+def _nsdata_from_bytes(data: bytes) -> Any:
+    from Foundation import NSData  # type: ignore
+
+    return NSData.dataWithBytes_length_(data, len(data))
+
+
+def _cgimage_from_rgba_u8(rgba: Any, color_space: Any) -> Any:
+    import Quartz  # type: ignore
+
+    h, w = rgba.shape[:2]
+    provider = Quartz.CGDataProviderCreateWithCFData(_nsdata_from_bytes(rgba.tobytes(order="C")))
+    bitmap_info = Quartz.kCGImageAlphaLast | Quartz.kCGBitmapByteOrder32Big
+    image = Quartz.CGImageCreate(
+        w,
+        h,
+        8,
+        32,
+        w * 4,
+        color_space,
+        bitmap_info,
+        provider,
+        None,
+        False,
+        Quartz.kCGRenderingIntentDefault,
+    )
+    if image is None:
+        raise RuntimeError("无法创建 SDR 底图 CGImage")
+    return image
+
+
+def _cgimage_from_gray_u8(gray: Any, color_space: Any) -> Any:
+    import Quartz  # type: ignore
+
+    h, w = gray.shape[:2]
+    provider = Quartz.CGDataProviderCreateWithCFData(_nsdata_from_bytes(gray.tobytes(order="C")))
+    image = Quartz.CGImageCreate(
+        w,
+        h,
+        8,
+        8,
+        w,
+        color_space,
+        Quartz.kCGImageAlphaNone,
+        provider,
+        None,
+        False,
+        Quartz.kCGRenderingIntentDefault,
+    )
+    if image is None:
+        raise RuntimeError("无法创建 gain map CGImage")
+    return image
+
+
+def _display_color_space(output_gamut: str) -> Any:
+    import Quartz  # type: ignore
+
+    if output_gamut == "p3":
+        name = getattr(Quartz, "kCGColorSpaceDisplayP3", None)
+    else:
+        name = getattr(Quartz, "kCGColorSpaceSRGB", None)
+    if name is not None:
+        cs = Quartz.CGColorSpaceCreateWithName(name)
+        if cs is not None:
+            return cs
+    return Quartz.CGColorSpaceCreateDeviceRGB()
+
+
+def _gainmap_aux_description(gainmap_u8: Any, meta: GainMapMetadata) -> dict[str, Any]:
+    import Quartz  # type: ignore
+
+    h, w = gainmap_u8.shape[:2]
+    description: dict[str, Any] = {
+        Quartz.kCGImagePropertyWidth: int(w),
+        Quartz.kCGImagePropertyHeight: int(h),
+        Quartz.kCGImagePropertyBytesPerRow: int(w),
+        # ISO 21496-1 stores logarithmic gain. These string keys are kept in the
+        # description so non-ImageIO fallback backends can map the same metadata.
+        "HDRCapacityMin": float(meta.hdr_capacity_min),
+        "HDRCapacityMax": float(meta.hdr_capacity_max),
+        "BaseHeadroom": 0.0,
+        "AlternateHeadroom": float(meta.headroom),
+        "GainMapMin": float(meta.min_gain),
+        "GainMapMax": float(meta.max_gain),
+        "GainMapGamma": float(meta.gamma),
+        "GainMapScale": int(meta.gainmap_scale),
+    }
+    if hasattr(Quartz, "kCGImagePropertyPixelFormat"):
+        description[Quartz.kCGImagePropertyPixelFormat] = "L008"
+    return description
+
+
+def write_gainmap_jpeg(
+    base_rgb_u8: Any,
+    gainmap_u8: Any,
+    meta: GainMapMetadata,
+    out_path: Path,
+    quality: int,
+    output_gamut: str = "p3",
+) -> bool:
+    ok, reason = imageio_gainmap_backend_status()
+    if not ok:
+        raise RuntimeError(reason)
+
+    import Quartz  # type: ignore
+    from Foundation import NSURL  # type: ignore
+
+    if output_gamut != "p3":
+        raise RuntimeError("Ultra HDR JPEG 当前强制使用 Display P3 SDR 底图")
+    if base_rgb_u8.dtype != np.uint8:
+        base_rgb_u8 = np.clip(base_rgb_u8, 0, 255).astype(np.uint8)
+    if gainmap_u8.dtype != np.uint8:
+        gainmap_u8 = np.clip(gainmap_u8, 0, 255).astype(np.uint8)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    color_space = _display_color_space(output_gamut)
+    gray_space = Quartz.CGColorSpaceCreateDeviceGray()
+    alpha = np.full(base_rgb_u8.shape[:2] + (1,), 255, dtype=np.uint8)
+    base_image = _cgimage_from_rgba_u8(np.concatenate([base_rgb_u8, alpha], axis=2), color_space)
+    gain_image = _cgimage_from_gray_u8(gainmap_u8, gray_space)
+
+    url = NSURL.fileURLWithPath_(str(out_path))
+    dest = Quartz.CGImageDestinationCreateWithURL(url, "public.jpeg", 1, None)
+    if dest is None:
+        raise RuntimeError(f"无法创建 JPEG 写入目标：{out_path}")
+
+    props: dict[Any, Any] = {
+        Quartz.kCGImageDestinationLossyCompressionQuality: float(quality) / 100.0,
+        Quartz.kCGImagePropertyColorModel: Quartz.kCGImagePropertyColorModelRGB,
+    }
+    icc_profile = output_icc_profile_bytes(output_gamut)
+    if icc_profile is not None:
+        props[Quartz.kCGImagePropertyProfileName] = output_gamut_label(output_gamut)
+    Quartz.CGImageDestinationAddImage(dest, base_image, props)
+
+    aux_info: dict[Any, Any] = {
+        Quartz.kCGImageAuxiliaryDataInfoData: _nsdata_from_bytes(gainmap_u8.tobytes(order="C")),
+        Quartz.kCGImageAuxiliaryDataInfoDataDescription: _gainmap_aux_description(gainmap_u8, meta),
+        Quartz.kCGImageAuxiliaryDataInfoColorSpace: gray_space,
+    }
+    if hasattr(Quartz, "kCGImageAuxiliaryDataInfoImage"):
+        aux_info[getattr(Quartz, "kCGImageAuxiliaryDataInfoImage")] = gain_image
+    Quartz.CGImageDestinationAddAuxiliaryDataInfo(dest, Quartz.kCGImageAuxiliaryDataTypeISOGainMap, aux_info)
+    if not Quartz.CGImageDestinationFinalize(dest):
+        raise RuntimeError("ImageIO 写入 ISO gain-map JPEG 失败")
+    return True
+
+
+def ultrahdr_app_path() -> Path | None:
+    candidates = [
+        shutil.which("ultrahdr_app"),
+        "/opt/homebrew/opt/libultrahdr/bin/ultrahdr_app",
+        "/usr/local/opt/libultrahdr/bin/ultrahdr_app",
+    ]
+    for candidate in candidates:
+        if candidate:
+            path = Path(candidate)
+            if path.is_file():
+                return path
+    return None
+
+
+def write_ultrahdr_jpeg_libultrahdr(
+    base_rgb_u8: Any,
+    hdr_linear: Any,
+    meta: GainMapMetadata,
+    out_path: Path,
+    quality: int,
+    output_gamut: str = "p3",
+) -> bool:
+    app = ultrahdr_app_path()
+    if app is None:
+        raise RuntimeError("未找到 ultrahdr_app；可安装 Homebrew libultrahdr 作为 fallback")
+    if output_gamut != "p3":
+        raise RuntimeError("Ultra HDR JPEG 当前强制使用 Display P3 SDR 底图")
+    if base_rgb_u8.dtype != np.uint8:
+        base_rgb_u8 = np.clip(base_rgb_u8, 0, 255).astype(np.uint8)
+
+    h, w = base_rgb_u8.shape[:2]
+    hdr_limit = np.float32(2.0 ** meta.headroom)
+    hdr = np.clip(np.nan_to_num(hdr_linear, nan=0.0, posinf=float(hdr_limit), neginf=0.0), 0.0, float(hdr_limit))
+    rgba = np.empty((h, w, 4), dtype=np.float16)
+    rgba[:, :, :3] = hdr.astype(np.float16, copy=False)
+    rgba[:, :, 3] = np.float16(1.0)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="dngscan_ultrahdr_") as td:
+        temp_dir = Path(td)
+        base_path = temp_dir / "base_p3.jpg"
+        hdr_path = temp_dir / "hdr_rgba_half.raw"
+        save_jpeg_array(base_rgb_u8, base_path, quality, output_gamut)
+        hdr_path.write_bytes(rgba.tobytes(order="C"))
+        cmd = [
+            str(app),
+            "-m",
+            "0",
+            "-p",
+            str(hdr_path),
+            "-i",
+            str(base_path),
+            "-w",
+            str(w),
+            "-h",
+            str(h),
+            "-a",
+            "4",  # rgba half float
+            "-t",
+            "0",  # linear
+            "-C",
+            "1",  # HDR intent P3
+            "-c",
+            "1",  # SDR intent P3
+            "-s",
+            str(max(1, int(meta.gainmap_scale))),
+            "-M",
+            "0",  # single-channel gain map
+            "-Q",
+            str(int(quality)),
+            "-q",
+            str(int(quality)),
+            "-G",
+            f"{meta.gamma:.6g}",
+            "-k",
+            "1.0",
+            "-K",
+            f"{2.0 ** meta.headroom:.6g}",
+            "-z",
+            str(out_path),
+        ]
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"ultrahdr_app 编码失败：{detail}")
+    if not out_path.exists() or out_path.stat().st_size <= 0:
+        raise RuntimeError("ultrahdr_app 未生成输出 JPEG")
+    return True
+
+
+def export_ultrahdr_jpeg(
+    path: Path,
+    out_path: Path,
+    quality: int,
+    mode: str,
+    bundle: RawBundle,
+    analysis: Analysis,
+    tony_lut_path: Path | None = None,
+    tone_plan: ToneCompressionPlan | None = None,
+    hdr_headroom: float = DEFAULT_HDR_HEADROOM_EV,
+    gainmap_scale: int = DEFAULT_GAINMAP_SCALE,
+) -> bool:
+    output_gamut = "p3"
+    try:
+        sdr_linear = scene_render_to_output_linear(bundle, analysis, mode, output_gamut, tony_lut_path, tone_plan)
+        hdr_linear = render_hdr_numerator_linear(bundle, sdr_linear, output_gamut, hdr_headroom)
+        base_u8 = output_linear_to_u8(sdr_linear)
+        meta = build_gainmap_metadata(hdr_headroom, gainmap_scale)
+        if ultrahdr_app_path() is not None:
+            return write_ultrahdr_jpeg_libultrahdr(base_u8, hdr_linear, meta, out_path, quality, output_gamut)
+        gainmap = compute_gainmap_u8(sdr_linear, hdr_linear, output_gamut, hdr_headroom, meta.gamma, gainmap_scale)
+        try:
+            return write_gainmap_jpeg(base_u8, gainmap, meta, out_path, quality, output_gamut)
+        except Exception as imageio_exc:
+            try:
+                return write_ultrahdr_jpeg_libultrahdr(base_u8, hdr_linear, meta, out_path, quality, output_gamut)
+            except Exception as fallback_exc:
+                raise RuntimeError(f"ImageIO 后端失败：{imageio_exc}; libultrahdr fallback 也失败：{fallback_exc}") from fallback_exc
+    except Exception as exc:
+        raise RuntimeError(f"Cannot export Ultra HDR gain-map JPEG: {exc}") from exc
 
 
 def plan_for_mode(
@@ -1116,21 +1417,42 @@ def export_srgb_jpeg(
     output_gamut: str = "srgb",
 ) -> bool:
     try:
-        if mode == "smart":
-            plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-            rgb = scene_render_to_smart_u8(bundle, analysis, plan, output_gamut)
-        elif mode == "agx":
-            plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-            rgb = scene_render_to_agx_u8(bundle, plan, output_gamut)
-        elif mode == "tony":
-            plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-            lut_path = tony_lut_path if tony_lut_path is not None else default_tony_lut_path()
-            rgb = scene_render_to_tony_u8(bundle, plan, lut_path, output_gamut)
-        else:
-            rgb = scene_render_to_neutral_u8(bundle, output_gamut)
+        rgb = render_output_u8(bundle, analysis, mode, output_gamut, tony_lut_path, tone_plan)
         return save_jpeg_array(rgb, out_path, quality, output_gamut)
     except Exception as exc:
         raise RuntimeError(f"Cannot export 8-bit {output_gamut_label(output_gamut)} JPEG: {exc}") from exc
+
+
+def export_jpeg(
+    path: Path,
+    out_path: Path,
+    quality: int,
+    mode: str,
+    bundle: RawBundle,
+    analysis: Analysis,
+    tony_lut_path: Path | None = None,
+    tone_plan: ToneCompressionPlan | None = None,
+    output_gamut: str = "srgb",
+    output_format: str = "sdr",
+    hdr_headroom: float = DEFAULT_HDR_HEADROOM_EV,
+    gainmap_scale: int = DEFAULT_GAINMAP_SCALE,
+) -> bool:
+    if output_format == "ultrahdr":
+        return export_ultrahdr_jpeg(
+            path,
+            out_path,
+            quality,
+            mode,
+            bundle,
+            analysis,
+            tony_lut_path,
+            tone_plan,
+            hdr_headroom,
+            gainmap_scale,
+        )
+    if output_format != "sdr":
+        raise ValueError(f"unknown output format: {output_format}")
+    return export_srgb_jpeg(path, out_path, quality, mode, bundle, analysis, tony_lut_path, tone_plan, output_gamut)
 
 
 def load_raw(path: Path, scene_highlight_mode: str = "clip", scene_half_size: bool = False) -> RawBundle:
@@ -2620,13 +2942,14 @@ def main(argv: list[str]) -> int:
 
         jpeg_path = args.jpeg
         jpeg_icc_embedded = False
+        jpeg_output_gamut = "p3" if args.output_format == "ultrahdr" else args.output_gamut
         tone_plan = (
-            plan_for_mode(bundle, analysis, args.jpeg_mode, args.output_gamut)
+            plan_for_mode(bundle, analysis, args.jpeg_mode, jpeg_output_gamut)
             if jpeg_path is not None and args.jpeg_mode != "neutral"
             else None
         )
         if jpeg_path is not None:
-            jpeg_icc_embedded = export_srgb_jpeg(
+            jpeg_icc_embedded = export_jpeg(
                 args.path,
                 jpeg_path,
                 args.jpeg_quality,
@@ -2635,7 +2958,10 @@ def main(argv: list[str]) -> int:
                 analysis,
                 args.tony_lut,
                 tone_plan,
-                args.output_gamut,
+                jpeg_output_gamut,
+                args.output_format,
+                args.hdr_headroom,
+                args.hdr_gainmap_scale,
             )
 
         row = csv_row(
@@ -2648,7 +2974,7 @@ def main(argv: list[str]) -> int:
             jpeg_icc_embedded,
             args.ev,
             tone_plan,
-            args.output_gamut,
+            jpeg_output_gamut,
         )
         if args.csv is not None:
             write_csv(args.csv, row)
@@ -2663,8 +2989,10 @@ def main(argv: list[str]) -> int:
             jpeg_icc_embedded,
             args.ev,
             tone_plan,
-            args.output_gamut,
+            jpeg_output_gamut,
         )
+        if jpeg_path is not None and args.output_format == "ultrahdr":
+            print(f"JPEG HDR: ISO 21496-1 gain-map；headroom=+{args.hdr_headroom:.2f}EV；gain map scale=1/{args.hdr_gainmap_scale}")
         return 0
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
