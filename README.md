@@ -82,9 +82,10 @@ dngscan/
   agx.py                # AgX inset/outset, log curve and sigmoid core
   gui.py                # GUI entry point: python -m dngscan.gui
 dngscan_assets/
-  README.md             # local asset notes
-  tony_mc_mapface.spi3d # local Tony LUT, not committed
-  darktable_agx.*       # local AgX reference copies, not committed
+  README.md             # asset notes
+  TONY_LICENSE-MIT.md   # Tony McMapface MIT license text
+  tony_mc_mapface.spi3d # Tony LUT
+  darktable_agx.*       # local AgX reference copies
 ```
 
 ## Usage
@@ -119,8 +120,9 @@ gain map.
 ## Tony McMapface LUT
 
 The `tony` mode needs `tony_mc_mapface.spi3d`. Keep it at
-`./dngscan_assets/tony_mc_mapface.spi3d`, or pass `--tony-lut PATH`. The LUT remains
-a local asset and is not committed to the repo.
+`./dngscan_assets/tony_mc_mapface.spi3d`, or pass `--tony-lut PATH`. The bundled LUT
+is redistributed under the upstream MIT license in
+`dngscan_assets/TONY_LICENSE-MIT.md`.
 
 ## License & attribution
 
