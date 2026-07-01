@@ -264,7 +264,13 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--jpeg-quality",
         type=int,
         default=100,
-        help="JPEG 质量 1-100；默认 100，并使用 4:4:4 色度采样",
+        help="JPEG 质量 1-100（默认 100）",
+    )
+    parser.add_argument(
+        "--chroma",
+        choices=CHROMA_CHOICES,
+        default="444",
+        help="色度采样: 444=满色度(最高保真、体积最大，默认)；422/420=更小体积（420 最小，投递推荐）",
     )
     parser.add_argument(
         "--output-format",
@@ -1189,7 +1195,17 @@ def build_gainmap_metadata(hdr_headroom: float, scale: int) -> GainMapMetadata:
     )
 
 
-def save_jpeg_array(rgb_u8: Any, out_path: Path, quality: int, output_gamut: str = "srgb") -> bool:
+CHROMA_CHOICES = ("444", "422", "420")
+
+
+def chroma_to_subsampling(name: str) -> int:
+    # PIL subsampling: 0 = 4:4:4 (full chroma), 1 = 4:2:2, 2 = 4:2:0 (smallest).
+    return {"444": 0, "422": 1, "420": 2}.get(name, 0)
+
+
+def save_jpeg_array(
+    rgb_u8: Any, out_path: Path, quality: int, output_gamut: str = "srgb", subsampling: int = 0
+) -> bool:
     if mpimg is None:
         raise RuntimeError("matplotlib.image is not available; cannot write JPEG")
     try:
@@ -1199,7 +1215,7 @@ def save_jpeg_array(rgb_u8: Any, out_path: Path, quality: int, output_gamut: str
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if rgb_u8.dtype != np.uint8:
         rgb_u8 = np.clip(rgb_u8, 0, 255).astype(np.uint8)
-    pil_kwargs: dict[str, Any] = {"quality": int(quality), "subsampling": 0, "optimize": True}
+    pil_kwargs: dict[str, Any] = {"quality": int(quality), "subsampling": int(subsampling), "optimize": True}
     icc_profile = output_icc_profile_bytes(output_gamut)
     if icc_profile is not None:
         pil_kwargs["icc_profile"] = icc_profile
@@ -1529,10 +1545,11 @@ def export_srgb_jpeg(
     tony_lut_path: Path | None = None,
     tone_plan: ToneCompressionPlan | None = None,
     output_gamut: str = "srgb",
+    subsampling: int = 0,
 ) -> bool:
     try:
         rgb = render_output_u8(bundle, analysis, mode, output_gamut, tony_lut_path, tone_plan)
-        return save_jpeg_array(rgb, out_path, quality, output_gamut)
+        return save_jpeg_array(rgb, out_path, quality, output_gamut, subsampling)
     except Exception as exc:
         raise RuntimeError(f"Cannot export 8-bit {output_gamut_label(output_gamut)} JPEG: {exc}") from exc
 
@@ -1550,6 +1567,7 @@ def export_jpeg(
     output_format: str = "sdr",
     hdr_headroom: float = DEFAULT_HDR_HEADROOM_EV,
     gainmap_scale: int = DEFAULT_GAINMAP_SCALE,
+    subsampling: int = 0,
 ) -> bool:
     if output_format == "ultrahdr":
         return export_ultrahdr_jpeg(
@@ -1566,7 +1584,9 @@ def export_jpeg(
         )
     if output_format != "sdr":
         raise ValueError(f"unknown output format: {output_format}")
-    return export_srgb_jpeg(path, out_path, quality, mode, bundle, analysis, tony_lut_path, tone_plan, output_gamut)
+    return export_srgb_jpeg(
+        path, out_path, quality, mode, bundle, analysis, tony_lut_path, tone_plan, output_gamut, subsampling
+    )
 
 
 def load_raw(
@@ -3081,6 +3101,7 @@ def main(argv: list[str]) -> int:
                 args.output_format,
                 args.hdr_headroom,
                 args.hdr_gainmap_scale,
+                chroma_to_subsampling(args.chroma),
             )
 
         row = csv_row(

@@ -123,6 +123,14 @@ button.preview:disabled{opacity:.5;cursor:default}
       <label>JPEG 质量</label>
       <input type="number" id="quality" min="1" max="100" value="100">
     </div>
+    <div style="flex:0;min-width:150px">
+      <label>色度采样</label>
+      <select id="chroma" title="444=满色度、最高保真、体积最大；420=最小体积、投递推荐">
+        <option value="444">4:4:4 · 满色度</option>
+        <option value="422">4:2:2</option>
+        <option value="420">4:2:0 · 最小</option>
+      </select>
+    </div>
     <div style="flex:0;min-width:160px">
       <label>高光处理</label>
       <select id="highlight">
@@ -207,7 +215,7 @@ function metricText(j){
 function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,mode,ev:$("#ev").value,quality:$("#quality").value,
-    highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,format:$("#format").value,
+    highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -219,6 +227,7 @@ function restoreSettings(){
   if(s.highlight)$("#highlight").value=s.highlight;
   if(s.gamut)$("#gamut").value=s.gamut;
   if(s.demosaic)$("#demosaic").value=s.demosaic;
+  if(s.chroma)$("#chroma").value=s.chroma;
   if(s.format)$("#format").value=s.format;
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
@@ -249,7 +258,7 @@ function payload(){
   const input=$("#input").value.trim();
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
-    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,format:$("#format").value,
+    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -644,6 +653,7 @@ def run_export(params: dict) -> dict:
     outdir.mkdir(parents=True, exist_ok=True)
 
     demosaic = str(params.get("demosaic", "auto"))
+    chroma = str(params.get("chroma", "444"))
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic)
     bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
 
@@ -678,6 +688,7 @@ def run_export(params: dict) -> dict:
             output_format,
             hdr_headroom,
             dg.DEFAULT_GAINMAP_SCALE,
+            dg.chroma_to_subsampling(chroma),
         )
         metrics = output_luminance_metrics(jpg_path, gamut, ev)
         metrics.update(estimate_ev_headroom(bundle, analysis, mode, gamut, ev, max_samples=600_000))
