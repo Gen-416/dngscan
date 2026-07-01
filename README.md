@@ -17,16 +17,23 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
   full-well / clip / black-level / white-balance readouts.
 - **Four export pipelines** (`--jpeg-mode`):
   - `neutral` — minimal-loss reference: scene-linear → display encode, no tone curve.
-    Faithful, but hard-clips highlights; meant as a baseline, not a finished look.
+    Faithful, but clips highlights (no shoulder); meant as a baseline, not a finished look.
   - `smart` — analysis-driven highlight shoulder + hue-preserving chroma easing,
     computed in the output color space with same-space luminance.
   - `agx` — AgX view transform (inset → log2 → sigmoid → outset), run natively in
     Rec.2020. The inset/outset channel crosstalk gives AgX's smooth highlight
     desaturation instead of hard per-channel clipping.
   - `tony` — the Tony McMapface display-referred 3D LUT.
-- **Local web GUI** (`python -m dngscan.gui`) — pick a file, mode, exposure and quality;
-  live preview; per-file exposure-headroom estimate; sRGB or Display P3 output;
-  highlight handling (clip / blend / reconstruct). Browser-based, no Tk required.
+- **Hue-preserving gamut fit** — every mode ends by fitting out-of-gamut colors into the
+  output space with Oklab adaptive-L0 clipping (hold hue, reduce chroma) instead of
+  per-channel clipping, which skews hue on saturated colors. Works for sRGB and Display P3.
+- **High-quality demosaic on export** — full-res exports use `--demosaic auto` (DHT
+  preferred, libraw-native for non-Bayer sensors) or a manual algorithm; the fast preview
+  uses a light demosaic. This selects interpolation *quality* only — no noise reduction is
+  ever applied.
+- **Local web GUI** (`python -m dngscan.gui`) — pick a file, mode, exposure, quality,
+  demosaic and output gamut; live preview; per-file exposure-headroom estimate; sRGB or
+  Display P3 output; highlight handling (clip / blend / reconstruct). Browser-based, no Tk.
 - **Optional Ultra HDR JPEG** — writes JPEG-based gain-map HDR output with a normal
   SDR fallback image plus an ISO/Ultra HDR gain map. SDR JPEG remains the default.
 
@@ -107,6 +114,9 @@ python -m dngscan photo.dng
 
 # Export a JPEG with the AgX pipeline, +0.5 EV, Display P3
 python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx --ev 0.5 --output-gamut p3
+
+# Force a specific demosaic algorithm (default is auto -> DHT; export only)
+python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx --demosaic dht
 
 # Export an ISO/Ultra HDR gain-map JPEG. The SDR base is forced to Display P3.
 python -m dngscan photo.dng --jpeg out_hdr.jpg --jpeg-mode agx --highlight-mode reconstruct \
