@@ -359,16 +359,20 @@ def highlight_mode_cn(name: str) -> str:
     }.get(name, name)
 
 
-def render_to_xyz(raw: Any) -> Any:
+def render_to_xyz(raw: Any, highlight_mode_name: str = "clip", demosaic: Any = None, half_size: bool = False) -> Any:
     if not hasattr(rawpy.ColorSpace, "XYZ"):
         raise RuntimeError("rawpy.ColorSpace.XYZ is not available; cannot make device-independent EV/gamut metrics")
-    output_color = rawpy.ColorSpace.XYZ
+    # Render-dependent analysis (luminance, EV, gamut risk) uses the SAME demosaic and
+    # highlight mode as the export buffer, so the stats match the image you actually get.
+    # user_flip=0 keeps it unrotated and aligned with the raw-domain CFA maps.
     return raw.postprocess(
-        output_color=output_color,
+        output_color=rawpy.ColorSpace.XYZ,
         gamma=(1, 1),
+        half_size=half_size,
+        demosaic_algorithm=(None if half_size else demosaic),
         no_auto_bright=True,
         use_camera_wb=True,
-        highlight_mode=rawpy_highlight_mode("clip"),
+        highlight_mode=rawpy_highlight_mode(highlight_mode_name),
         output_bps=16,
         user_flip=0,
     )
@@ -1589,12 +1593,13 @@ def load_raw(
             else:
                 white_level = int(white_level)
 
-            xyz_render = render_to_xyz(raw)
+            demosaic_alg = resolve_demosaic_algorithm(raw, demosaic)
+            xyz_render = render_to_xyz(raw, scene_highlight_mode, demosaic_alg, scene_half_size)
             if xyz_render.ndim != 3 or xyz_render.shape[2] < 3:
                 raise RuntimeError("XYZ render did not produce a 3-channel image")
 
             scene_rec2020_render = render_to_scene_rec2020(
-                raw, scene_highlight_mode, scene_half_size, resolve_demosaic_algorithm(raw, demosaic)
+                raw, scene_highlight_mode, scene_half_size, demosaic_alg
             )
             if scene_rec2020_render.ndim != 3 or scene_rec2020_render.shape[2] < 3:
                 raise RuntimeError("scene Rec.2020 render did not produce a 3-channel image")

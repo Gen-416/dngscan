@@ -64,6 +64,11 @@ A few choices worth knowing:
 - **Per-channel analysis** — full-well and clip thresholds are reconstructed per
   channel (empirical saturation pile when present, metadata white level as a
   fallback for unclipped scenes).
+- **Analysis matches the export.** Render-dependent stats (luminance/EV distribution,
+  gamut-overflow risk, and the auto tone plan's inputs) are measured on a render that uses
+  the same demosaic and highlight mode as your export, so they describe the image you
+  actually get. Raw/CFA-domain analysis (clip %, saturation pile, SNR, noise floor) stays
+  independent of demosaic and highlight — it reports what the sensor physically captured.
 
 Metrics are single-frame estimates (not photon-transfer measurements); bit depth is
 not the same as usable dynamic range.
