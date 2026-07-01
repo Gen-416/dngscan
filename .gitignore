@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Tony McMapface LUT and other local assets (download separately, do not commit)
+*.spi3d
+dngscan_assets/
+
+# Raw inputs and generated outputs
+*.dng
+*.DNG
+*.arw
+*.ARW
+*.cr2
+*.cr3
+*.nef
+*.raf
+*.rw2
+*.orf
+*_scan.png
+*_neutral*.jpg
+*_smart*.jpg
+*_agx*.jpg
+*_tony*.jpg
+
+# Editor / OS / tooling
+.claude/
+.DS_Store

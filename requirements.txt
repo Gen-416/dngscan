@@ -1,0 +1,4 @@
+numpy>=1.24
+rawpy>=0.18
+matplotlib>=3.6
+pillow>=9.2
