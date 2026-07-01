@@ -97,7 +97,6 @@ def curve_params(
     need_convex_toe = toe_slope_to_limit > slope
     toe_fallback_power = slope * toe_length_x / toe_dy
     toe_fallback_coefficient = toe_dy / max(EPS, toe_length_x) ** toe_fallback_power
-    intercept = toe_transition_y - slope * toe_transition_x
 
     shoulder_transition_x = min(1.0 - EPS, pivot_x)
     shoulder_transition_y = pivot_y
@@ -122,7 +121,6 @@ def curve_params(
         "toe_fallback_power": toe_fallback_power,
         "toe_fallback_coefficient": toe_fallback_coefficient,
         "slope": slope,
-        "intercept": intercept,
         "shoulder_power": shoulder_power,
         "shoulder_transition_x": shoulder_transition_x,
         "shoulder_transition_y": shoulder_transition_y,
@@ -151,9 +149,11 @@ def scaled_sigmoid(x: Any, scale_value: float, slope: float, power: float, trans
 def apply_curve(x: Any, params: dict[str, float | bool]) -> Any:
     x = np.asarray(x, dtype=np.float32)
     out = np.empty_like(x)
+    # Pure AgX sigmoid: no linear latitude. Toe and shoulder meet at the pivot, so every value
+    # is either toe (below pivot) or shoulder (>= pivot); both halves pass through pivot_y, so
+    # the split is continuous. (darktable's latitude control is intentionally not used.)
     toe = x < float(params["toe_transition_x"])
-    shoulder = x > float(params["shoulder_transition_x"])
-    mid = ~(toe | shoulder)
+    shoulder = ~toe
     if np.any(toe):
         if bool(params["need_convex_toe"]):
             out[toe] = float(params["target_black"]) + np.maximum(
@@ -169,8 +169,6 @@ def apply_curve(x: Any, params: dict[str, float | bool]) -> Any:
                 float(params["toe_transition_x"]),
                 float(params["toe_transition_y"]),
             )
-    if np.any(mid):
-        out[mid] = float(params["slope"]) * x[mid] + float(params["intercept"])
     if np.any(shoulder):
         if bool(params["need_concave_shoulder"]):
             out[shoulder] = float(params["target_white"]) - np.maximum(
@@ -191,7 +189,9 @@ def apply_curve(x: Any, params: dict[str, float | bool]) -> Any:
 
 
 def compress_into_gamut(rgb: Any) -> Any:
-    coeff = np.asarray([0.2658180370250449, 0.59846986045365, 0.1357121025213052], dtype=np.float32)
+    # Rec.2020 luminance weights: this gamut compression runs on Rec.2020 data (pre-inset),
+    # so preserving Rec.2020 Y keeps the luminance it protects consistent with the working space.
+    coeff = np.asarray([0.2627, 0.6780, 0.0593], dtype=np.float32)
     input_y = coeff[0] * rgb[:, 0] + coeff[1] * rgb[:, 1] + coeff[2] * rgb[:, 2]
     max_rgb = np.max(rgb, axis=1)
     opponent = max_rgb[:, None] - rgb

@@ -304,6 +304,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="JPEG 导出缓存的高光处理: clip=硬剪切；blend=libraw 高光混合；reconstruct=libraw 默认高光重建",
     )
     parser.add_argument(
+        "--demosaic",
+        choices=DEMOSAIC_CHOICES,
+        default="auto",
+        help="去马赛克插值算法（画质，非降噪；本工具不做任何降噪。仅全分辨率导出生效): auto=自动选最佳可用(DHT优先，非Bayer走原生)；其余为手动指定",
+    )
+    parser.add_argument(
         "--output-gamut",
         choices=("srgb", "p3"),
         default="srgb",
@@ -368,13 +374,50 @@ def render_to_xyz(raw: Any) -> Any:
     )
 
 
-def render_to_scene_rec2020(raw: Any, highlight_mode_name: str = "clip", half_size: bool = False) -> Any:
+DEMOSAIC_CHOICES = ("auto", "dht", "dcb", "ahd", "aahd", "vng", "ppg")
+DEMOSAIC_AUTO_PREFERENCE = ("DHT", "DCB", "AHD")
+
+
+def resolve_demosaic_algorithm(raw: Any, requested: str) -> Any:
+    """Pick a DemosaicAlgorithm for the full-res export, or None (libraw default).
+
+    Non-Bayer sensors (e.g. X-Trans) keep libraw's native path. 'auto' takes the best
+    available Bayer detail algorithm (DHT preferred); an explicit request is honored when
+    the build supports it, else it falls back to auto."""
+    if rawpy is None:
+        return None
+    pattern = getattr(raw, "raw_pattern", None)
+    is_bayer = pattern is not None and getattr(pattern, "shape", None) == (2, 2)
+    if not is_bayer:
+        return None
+
+    def supported(name: str) -> Any:
+        alg = getattr(rawpy.DemosaicAlgorithm, name.upper(), None)
+        if alg is not None and getattr(alg, "isSupported", False):
+            return alg
+        return None
+
+    if requested and requested != "auto":
+        chosen = supported(requested)
+        if chosen is not None:
+            return chosen
+    for name in DEMOSAIC_AUTO_PREFERENCE:
+        chosen = supported(name)
+        if chosen is not None:
+            return chosen
+    return None
+
+
+def render_to_scene_rec2020(
+    raw: Any, highlight_mode_name: str = "clip", half_size: bool = False, demosaic: Any = None
+) -> Any:
     if not hasattr(rawpy.ColorSpace, "Rec2020"):
         raise RuntimeError("rawpy.ColorSpace.Rec2020 is not available; cannot make scene-linear export buffer")
     return raw.postprocess(
         output_color=rawpy.ColorSpace.Rec2020,
         gamma=(1, 1),
         half_size=half_size,
+        demosaic_algorithm=(None if half_size else demosaic),
         no_auto_bright=True,
         use_camera_wb=True,
         highlight_mode=rawpy_highlight_mode(highlight_mode_name),
@@ -519,6 +562,82 @@ def luminance_from_rgb_space(rgb: Any, output_gamut: str) -> Any:
         np.float32, copy=False
     )
     return np.clip(np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=0.0), 0.0, None)
+
+
+# Oklab (Björn Ottosson), expressed from XYZ(D65) so it is correct for any output
+# primaries (sRGB or Display P3), not just Rec.709.
+OKLAB_M1 = (
+    np.array(  # XYZ(D65) -> LMS
+        [
+            [0.8189330101, 0.3618667424, -0.1288597137],
+            [0.0329845436, 0.9293118715, 0.0361456387],
+            [0.0482003018, 0.2643662691, 0.6338517070],
+        ],
+        dtype=np.float64,
+    )
+    if np is not None
+    else None
+)
+OKLAB_M2 = (
+    np.array(  # LMS' -> Oklab
+        [
+            [0.2104542553, 0.7936177850, -0.0040720468],
+            [1.9779984951, -2.4285922050, 0.4505937099],
+            [0.0259040371, 0.7827717662, -0.8086757660],
+        ],
+        dtype=np.float64,
+    )
+    if np is not None
+    else None
+)
+OKLAB_M1_INV = np.linalg.inv(OKLAB_M1).astype(np.float64) if np is not None and OKLAB_M1 is not None else None
+OKLAB_M2_INV = np.linalg.inv(OKLAB_M2).astype(np.float64) if np is not None and OKLAB_M2 is not None else None
+
+
+def rgb_to_oklab(rgb: Any, output_gamut: str) -> tuple[Any, Any, Any]:
+    space = output_gamut_space(output_gamut)
+    xyz = apply_rgb_matrix3(rgb, RGB_TO_XYZ[space])
+    lms = apply_rgb_matrix3(xyz, OKLAB_M1)
+    lab = apply_rgb_matrix3(np.cbrt(lms), OKLAB_M2)
+    return lab[:, 0], lab[:, 1], lab[:, 2]
+
+
+def oklab_to_output_rgb(lab_l: Any, lab_a: Any, lab_b: Any, output_gamut: str) -> Any:
+    space = output_gamut_space(output_gamut)
+    lab = np.stack([lab_l, lab_a, lab_b], axis=1)
+    lms_ = apply_rgb_matrix3(lab, OKLAB_M2_INV)
+    xyz = apply_rgb_matrix3(lms_ * lms_ * lms_, OKLAB_M1_INV)
+    return apply_rgb_matrix3(xyz, XYZ_TO_RGB[space])
+
+
+def fit_to_output_gamut(rgb: Any, output_gamut: str, alpha: float = 0.05, iters: int = 16) -> Any:
+    """Bring out-of-gamut linear RGB into [0,1] with Oklab adaptive-L0 clipping: hold hue,
+    trade a little lightness for saturation only at the extremes. In-gamut pixels are left
+    untouched. Replaces per-channel clipping, which skews hue on saturated colors."""
+    rgb = np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
+    tol = np.float32(1e-4)
+    oog = (np.min(rgb, axis=1) < -tol) | (np.max(rgb, axis=1) > 1.0 + tol)
+    if not np.any(oog):
+        return np.clip(rgb, 0.0, 1.0)
+    sub = rgb[oog]
+    lab_l, lab_a, lab_b = rgb_to_oklab(sub, output_gamut)
+    chroma = np.hypot(lab_a, lab_b)
+    ld = lab_l - np.float32(0.5)
+    abs_ld = np.abs(ld)
+    e1 = np.float32(0.5) + abs_ld + np.float32(alpha) * chroma
+    l0 = np.float32(0.5) * (1.0 + np.sign(ld) * (e1 - np.sqrt(np.maximum(e1 * e1 - 2.0 * abs_ld, 0.0))))
+    lo = np.zeros_like(lab_l)
+    hi = np.ones_like(lab_l)
+    for _ in range(iters):
+        t = 0.5 * (lo + hi)
+        rgb_t = oklab_to_output_rgb(l0 * (1.0 - t) + t * lab_l, t * lab_a, t * lab_b, output_gamut)
+        inside = (np.min(rgb_t, axis=1) >= -tol) & (np.max(rgb_t, axis=1) <= 1.0 + tol)
+        lo = np.where(inside, t, lo)
+        hi = np.where(inside, hi, t)
+    fit = oklab_to_output_rgb(l0 * (1.0 - lo) + lo * lab_l, lo * lab_a, lo * lab_b, output_gamut)
+    out = rgb.copy()
+    out[oog] = fit
+    return np.clip(out, 0.0, 1.0)
 
 
 def smooth_highlight_shoulder(y: Any, knee: float) -> Any:
@@ -692,7 +811,7 @@ def compress_linear_output_rgb_for_jpeg(
 ) -> Any:
     strength = smart_mapping_strength(analysis, plan)
     if strength <= 0.0:
-        return np.clip(rgb, 0.0, 1.0)
+        return np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
 
     rgb = np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
     # Anchor on this pixel's own output-space luminance, so the luminance-preserving math
@@ -716,20 +835,9 @@ def compress_linear_output_rgb_for_jpeg(
         weight = np.maximum(high_luma, high_chroma)
         rgb = anchor[:, None] + (1.0 - 0.30 * strength * weight)[:, None] * chroma
 
-    # Fold any residual out-of-[0,1] back along the luminance-anchored axis, so clipping
-    # never skews hue the way naive per-channel clamping would.
-    rgb_min = np.min(rgb, axis=1)
-    rgb_max = np.max(rgb, axis=1)
-    clamp_scale = np.ones(rgb.shape[0], dtype=np.float32)
-    high = (rgb_max > 1.0) & (rgb_max > anchor + EPS)
-    if np.any(high):
-        clamp_scale[high] = np.minimum(clamp_scale[high], (1.0 - anchor[high]) / (rgb_max[high] - anchor[high]))
-    low = (rgb_min < 0.0) & (rgb_min < anchor - EPS)
-    if np.any(low):
-        clamp_scale[low] = np.minimum(clamp_scale[low], (0.0 - anchor[low]) / (rgb_min[low] - anchor[low]))
-    clamp_scale = np.clip(clamp_scale, 0.0, 1.0)
-    rgb = anchor[:, None] + clamp_scale[:, None] * (rgb - anchor[:, None])
-    return np.clip(rgb, 0.0, 1.0)
+    # Out-of-gamut is handled downstream by the shared Oklab gamut fit, so return the
+    # tone-shaped linear RGB unclipped (hue preservation happens in Oklab, not per-channel).
+    return np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
 
 
 def dither_quantize_u8(encoded: Any, rng: Any) -> Any:
@@ -739,14 +847,16 @@ def dither_quantize_u8(encoded: Any, rng: Any) -> Any:
     return np.clip(np.floor(scaled + np.float32(0.5) + noise), 0, 255).astype(np.uint8)
 
 
-def output_linear_to_u8(rgb_linear: Any) -> Any:
+def output_linear_to_u8(rgb_linear: Any, output_gamut: str = "srgb") -> Any:
     flat = rgb_linear.reshape(-1, 3)
     out = np.empty((flat.shape[0], 3), dtype=np.uint8)
     rng = np.random.default_rng(0)
     chunk = 1_000_000
     for start in range(0, flat.shape[0], chunk):
         end = min(start + chunk, flat.shape[0])
-        encoded = srgb_encode(np.clip(flat[start:end], 0.0, 1.0))
+        # Oklab hue-preserving gamut fit replaces per-channel clipping for every mode.
+        fitted = fit_to_output_gamut(flat[start:end], output_gamut)
+        encoded = srgb_encode(fitted)
         out[start:end] = dither_quantize_u8(encoded, rng)
     return out.reshape(rgb_linear.shape[:2] + (3,))
 
@@ -769,7 +879,7 @@ def scene_render_to_neutral_linear(bundle: RawBundle, output_gamut: str = "srgb"
 
 
 def scene_render_to_neutral_u8(bundle: RawBundle, output_gamut: str = "srgb") -> Any:
-    return output_linear_to_u8(scene_render_to_neutral_linear(bundle, output_gamut))
+    return output_linear_to_u8(scene_render_to_neutral_linear(bundle, output_gamut), output_gamut)
 
 
 def scene_render_to_smart_linear(
@@ -794,7 +904,7 @@ def scene_render_to_smart_linear(
 def scene_render_to_smart_u8(
     bundle: RawBundle, analysis: Analysis, plan: ToneCompressionPlan, output_gamut: str = "srgb"
 ) -> Any:
-    return output_linear_to_u8(scene_render_to_smart_linear(bundle, analysis, plan, output_gamut))
+    return output_linear_to_u8(scene_render_to_smart_linear(bundle, analysis, plan, output_gamut), output_gamut)
 
 
 def agx_compress_into_gamut(rgb: Any) -> Any:
@@ -829,7 +939,7 @@ def scene_render_to_agx_linear(bundle: RawBundle, plan: ToneCompressionPlan, out
 
 
 def scene_render_to_agx_u8(bundle: RawBundle, plan: ToneCompressionPlan, output_gamut: str = "srgb") -> Any:
-    return output_linear_to_u8(scene_render_to_agx_linear(bundle, plan, output_gamut))
+    return output_linear_to_u8(scene_render_to_agx_linear(bundle, plan, output_gamut), output_gamut)
 
 
 def default_tony_lut_path() -> Path:
@@ -939,7 +1049,7 @@ def scene_render_to_tony_linear(
 def scene_render_to_tony_u8(
     bundle: RawBundle, plan: ToneCompressionPlan, lut_path: Path, output_gamut: str = "srgb"
 ) -> Any:
-    return output_linear_to_u8(scene_render_to_tony_linear(bundle, plan, lut_path, output_gamut))
+    return output_linear_to_u8(scene_render_to_tony_linear(bundle, plan, lut_path, output_gamut), output_gamut)
 
 
 def scene_render_to_output_linear(
@@ -1455,7 +1565,9 @@ def export_jpeg(
     return export_srgb_jpeg(path, out_path, quality, mode, bundle, analysis, tony_lut_path, tone_plan, output_gamut)
 
 
-def load_raw(path: Path, scene_highlight_mode: str = "clip", scene_half_size: bool = False) -> RawBundle:
+def load_raw(
+    path: Path, scene_highlight_mode: str = "clip", scene_half_size: bool = False, demosaic: str = "auto"
+) -> RawBundle:
     if not path.exists():
         raise FileNotFoundError(f"Input file does not exist: {path}")
     if not path.is_file():
@@ -1481,7 +1593,9 @@ def load_raw(path: Path, scene_highlight_mode: str = "clip", scene_half_size: bo
             if xyz_render.ndim != 3 or xyz_render.shape[2] < 3:
                 raise RuntimeError("XYZ render did not produce a 3-channel image")
 
-            scene_rec2020_render = render_to_scene_rec2020(raw, scene_highlight_mode, scene_half_size)
+            scene_rec2020_render = render_to_scene_rec2020(
+                raw, scene_highlight_mode, scene_half_size, resolve_demosaic_algorithm(raw, demosaic)
+            )
             if scene_rec2020_render.ndim != 3 or scene_rec2020_render.shape[2] < 3:
                 raise RuntimeError("scene Rec.2020 render did not produce a 3-channel image")
 
@@ -2934,7 +3048,7 @@ def main(argv: list[str]) -> int:
         scan_requested = bool(args.scan or args.out is not None or (args.jpeg is None and args.csv is None))
         out_path = args.out if args.out is not None else (default_png_path(args.path) if scan_requested else None)
 
-        bundle = load_raw(args.path, args.highlight_mode)
+        bundle = load_raw(args.path, args.highlight_mode, demosaic=args.demosaic)
         bundle.exposure_gain = compute_exposure_gain(args.jpeg_mode, args.ev)
         analysis, y, ev = analyze(bundle, args.margin)
         if out_path is not None:

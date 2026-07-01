@@ -138,6 +138,18 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
+    <div style="flex:0;min-width:170px">
+      <label>去马赛克（画质·非降噪）</label>
+      <select id="demosaic" title="彩色重建的插值算法，仅影响细节画质、仅全分辨率导出生效；本工具不做任何降噪">
+        <option value="auto">auto · 自动(DHT优先)</option>
+        <option value="dht">DHT</option>
+        <option value="dcb">DCB</option>
+        <option value="ahd">AHD</option>
+        <option value="aahd">AAHD</option>
+        <option value="vng">VNG</option>
+        <option value="ppg">PPG</option>
+      </select>
+    </div>
     <div style="flex:0;min-width:190px">
       <label>输出格式</label>
       <select id="format">
@@ -195,7 +207,7 @@ function metricText(j){
 function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,mode,ev:$("#ev").value,quality:$("#quality").value,
-    highlight:$("#highlight").value,gamut:$("#gamut").value,format:$("#format").value,
+    highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,format:$("#format").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -206,6 +218,7 @@ function restoreSettings(){
   if(s.quality)$("#quality").value=s.quality;
   if(s.highlight)$("#highlight").value=s.highlight;
   if(s.gamut)$("#gamut").value=s.gamut;
+  if(s.demosaic)$("#demosaic").value=s.demosaic;
   if(s.format)$("#format").value=s.format;
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
@@ -236,7 +249,7 @@ function payload(){
   const input=$("#input").value.trim();
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
-    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,format:$("#format").value,
+    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,format:$("#format").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -630,7 +643,8 @@ def run_export(params: dict) -> dict:
     outdir = outdir_arg if outdir_arg is not None else inp.parent
     outdir.mkdir(parents=True, exist_ok=True)
 
-    bundle = dg.load_raw(inp, highlight)
+    demosaic = str(params.get("demosaic", "auto"))
+    bundle = dg.load_raw(inp, highlight, demosaic=demosaic)
     bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
 
     analysis = None

@@ -42,6 +42,15 @@ A few choices worth knowing:
   space so saturated highlights are not clipped to sRGB before tone mapping. AgX's
   inset/outset are conjugated into Rec.2020 so neutrals stay neutral.
 - **TPDF-dithered 8-bit quantization** to avoid banding in smooth gradients.
+- **Hue-preserving gamut fit.** Colors outside the output gamut are brought in with Oklab
+  adaptive-L0 clipping (hold hue, reduce chroma) rather than per-channel clipping, which
+  skews hue on saturated colors. Applied in every mode, for both sRGB and Display P3.
+- **Demosaicing is reconstruction, not denoising.** Every raw must be demosaiced
+  (interpolating the two missing colors at each Bayer pixel) — it is mandatory, never
+  optional. `--demosaic` only selects interpolation *quality* (default `auto` → DHT on the
+  full-res export, libraw-native for non-Bayer sensors); it applies no smoothing. The
+  pipeline performs **no noise reduction at all** (FBDD off, no median filtering): a
+  high-quality demosaic preserves detail and noise, it never removes them.
 - **Gain-map HDR is additive.** The SDR base image is the same rendered output, while
   the HDR numerator keeps midtones equal to SDR and releases only highlight headroom.
   HDR output is forced to Display P3 and defaults to +3 EV headroom.
