@@ -190,7 +190,13 @@ def measure_look_field(lab_a: np.ndarray, lab_r: np.ndarray) -> LookField:
     C_r = np.hypot(lab_r[:, 1], lab_r[:, 2])
     h_r = np.degrees(np.arctan2(lab_r[:, 2], lab_r[:, 1])) % 360.0
     dh = (h_r - h_a + 180.0) % 360.0 - 180.0
-    cr = C_r / np.maximum(C_a, 1e-5)
+    # L-normalized SATURATION ratio, not raw chroma ratio: in Oklab a pure exposure
+    # change scales L and C together (both k^(1/3)), and ARRI renders darker than our
+    # AgX (ΔL ~ -0.06). Raw C_r/C_a conflates that tone difference with intrinsic
+    # desaturation; applying it without the darkening double-desaturates (zombie skin).
+    # (C/L) is exposure-invariant, so this isolates the intrinsic chromatic move.
+    l_ratio = np.maximum(L_r, 0.02) / np.maximum(L_a, 0.02)
+    cr = (C_r / np.maximum(C_a, 1e-5)) / np.maximum(l_ratio, 1e-3)
 
     mid = (L_a > 0.35) & (L_a < 0.75) & (C_a > 0.05) & (C_a < 0.20)
     hue_rot: list[float] = []
@@ -227,8 +233,13 @@ def measure_look_field(lab_a: np.ndarray, lab_r: np.ndarray) -> LookField:
         mid_chroma_ratio=round(mid_chroma, 3),
         shadow_chroma_ratio=round(shadow_chroma, 3),
         highlight_chroma_ratio=round(highlight_chroma, 3),
-        shadow_cool_a=round(_median_or(0.0, (lab_r[shad_n, 1] - lab_a[shad_n, 1])), 4) if np.count_nonzero(shad_n) >= 4 else 0.0,
-        shadow_cool_b=round(_median_or(0.0, (lab_r[shad_n, 2] - lab_a[shad_n, 2])), 4) if np.count_nonzero(shad_n) >= 4 else 0.0,
+        # Exposure-match the tint too: compare a/b as if ARRI's render were at our L.
+        shadow_cool_a=round(_median_or(0.0, (lab_r[shad_n, 1] / np.maximum(l_ratio[shad_n], 1e-3) - lab_a[shad_n, 1])), 4)
+        if np.count_nonzero(shad_n) >= 4
+        else 0.0,
+        shadow_cool_b=round(_median_or(0.0, (lab_r[shad_n, 2] / np.maximum(l_ratio[shad_n], 1e-3) - lab_a[shad_n, 2])), 4)
+        if np.count_nonzero(shad_n) >= 4
+        else 0.0,
         shadow_l_lo=0.10,
         shadow_l_hi=round(shadow_l_hi, 2),
         highlight_l_lo=0.75,
@@ -250,7 +261,8 @@ def print_report(title: str, field: LookField, lab_a: np.ndarray, lab_r: np.ndar
     C_r = np.hypot(lab_r[:, 1], lab_r[:, 2])
     h_r = np.degrees(np.arctan2(lab_r[:, 2], lab_r[:, 1])) % 360.0
     dh = (h_r - h_a + 180.0) % 360.0 - 180.0
-    cr = C_r / np.maximum(C_a, 1e-5)
+    l_ratio = np.maximum(lab_r[:, 0], 0.02) / np.maximum(L_a, 0.02)
+    cr = (C_r / np.maximum(C_a, 1e-5)) / np.maximum(l_ratio, 1e-3)  # L-normalized saturation ratio
     mid = (L_a > 0.35) & (L_a < 0.75) & (C_a > 0.05) & (C_a < 0.20)
 
     print(f"\n===== {title} =====")
