@@ -38,6 +38,10 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
 
 ## Processing pipeline
 
+Everything through AgX is fixed. `--grade` picks **one** post-AgX path — the Oklab and
+log-encode branches are mutually exclusive implementations for two different LUT families,
+not two layers you can stack.
+
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │ ① RAW restore                                               │
@@ -50,26 +54,40 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ③ AgX                                                       │
+│ ③ AgX  (always)                                             │
 │    scene Rec.2020 ──► AgX core ──► mapped Rec.2020          │
 └────────────────────────────┬────────────────────────────────┘
                              ▼
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-           [none]      chromatic look    display filter
-                      │                  │
-              rec2020_to_output    log encode → .cube → decode
-                      │                  │
-              Oklab + LookField      Kodak: Cineon + Rec.709
-              (L untouched)          RED: Log3G10 + RWG
-                      │                  │
-              └──────────────┬───────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ ③b grade  `--grade` · pick exactly one · same AgX input     │
+│                                                             │
+│   none ──────────────► rec2020_to_output (AgX display only) │
+│                                                             │
+│   chromatic look ────► rec2020_to_output                    │
+│        (Fujifilm / ARRI)   └──► Oklab + LookField           │
+│                              hue / chroma / skin only; L fixed│
+│                              (pre-measured; no .cube at run) │
+│                                                             │
+│   display filter ────► log encode ──► sample .cube ──► decode│
+│        (Kodak / RED)     Cineon+709  or  Log3G10+RWG        │
+│                          full output transform; tone+color  │
+│                          blended with AgX display at strength│
+│                                                             │
+│   ✕ never chromatic look + display filter on the same export │
+└────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ ④ Display encode                                            │
 │    gamut fit · sRGB/P3 OETF + TPDF dither · JPEG / Ultra HDR│
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Why two grade mechanisms?** Both choices sit on the same AgX render. Fujifilm / ARRI
+official LUTs were **measured** into Oklab LookFields — they only describe chromatic
+geometry relative to AgX, so runtime work stays in Oklab with **L untouched**. Kodak /
+RED cubes are **full** log-in → display-out transforms (tone and saturation together);
+they must be sampled after the correct log encode. Feeding those cubes through the
+LookField extractor collapses saturation, so they get a separate log → `.cube` path instead.
 
 ## Design notes
 
