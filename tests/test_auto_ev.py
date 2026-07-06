@@ -106,7 +106,7 @@ def test_resolve_export_ev_manual():
         camera_white_levels=[16383.0, 16383.0, 16383.0, 16383.0],
     )
     analysis = _minimal_analysis(-1.0)
-    ev, auto = resolve_export_ev(0.5, bundle, analysis, "agx", "p3")
+    ev, auto = resolve_export_ev(0.5, bundle, analysis, "p3")
     assert ev == 0.5
     assert auto is None
 
@@ -133,7 +133,7 @@ def test_compute_auto_ev_boost_only_high_key():
     analysis = _minimal_analysis(+1.5)
     bundle = _minimal_bundle()
     with patch("dngscan.auto_ev.max_safe_ev", return_value=3.0):
-        result = compute_auto_ev(bundle, analysis, "neutral", "p3")
+        result = compute_auto_ev(bundle, analysis, "p3")
     assert result.ev_median_target < 0
     assert result.ev == 0.0
     assert result.ev_boost == 0.0
@@ -144,7 +144,7 @@ def test_compute_auto_ev_caps_upward_boost():
     analysis = _minimal_analysis(-2.0)
     bundle = _minimal_bundle()
     with patch("dngscan.auto_ev.max_safe_ev", return_value=0.5):
-        result = compute_auto_ev(bundle, analysis, "agx", "p3")
+        result = compute_auto_ev(bundle, analysis, "p3")
     assert result.ev == 0.5
     assert result.highlight_limited is True
     assert result.ev_median_target > 0.5

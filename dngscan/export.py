@@ -17,7 +17,7 @@ from .render import (
     output_linear_to_u8,
     render_hdr_numerator_linear,
     render_output_u8,
-    scene_render_to_output_linear,
+    scene_render_to_agx_linear,
 )
 
 def resize_gainmap_u8(gain_u8: Any, scale: int) -> Any:
@@ -359,17 +359,19 @@ def export_ultrahdr_jpeg(
     path: Path,
     out_path: Path,
     quality: int,
-    mode: str,
     bundle: RawBundle,
     analysis: Analysis,
-    tony_lut_path: Path | None = None,
     tone_plan: ToneCompressionPlan | None = None,
     hdr_headroom: float = DEFAULT_HDR_HEADROOM_EV,
     gainmap_scale: int = DEFAULT_GAINMAP_SCALE,
 ) -> bool:
     output_gamut = "p3"
     try:
-        sdr_linear = scene_render_to_output_linear(bundle, analysis, mode, output_gamut, tony_lut_path, tone_plan)
+        from .grade import RENDER_MODE
+        from .tone import plan_for_mode
+
+        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, RENDER_MODE, output_gamut)
+        sdr_linear = scene_render_to_agx_linear(bundle, plan, output_gamut)
         hdr_linear = render_hdr_numerator_linear(bundle, sdr_linear, output_gamut, hdr_headroom)
         base_u8 = output_linear_to_u8(sdr_linear)
         meta = build_gainmap_metadata(hdr_headroom, gainmap_scale)
@@ -391,18 +393,21 @@ def export_srgb_jpeg(
     path: Path,
     out_path: Path,
     quality: int,
-    mode: str,
     bundle: RawBundle,
     analysis: Analysis,
-    tony_lut_path: Path | None = None,
     tone_plan: ToneCompressionPlan | None = None,
     output_gamut: str = "srgb",
     subsampling: int = 0,
     look: str = "none",
     look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
 ) -> bool:
     try:
-        rgb = render_output_u8(bundle, analysis, mode, output_gamut, tony_lut_path, tone_plan, look, look_strength)
+        rgb = render_output_u8(
+            bundle, analysis, output_gamut, tone_plan,
+            look, look_strength, display_filter, filter_strength,
+        )
         return save_jpeg_array(rgb, out_path, quality, output_gamut, subsampling)
     except Exception as exc:
         raise RuntimeError(f"Cannot export 8-bit {output_gamut_label(output_gamut)} JPEG: {exc}") from exc
@@ -412,10 +417,8 @@ def export_jpeg(
     path: Path,
     out_path: Path,
     quality: int,
-    mode: str,
     bundle: RawBundle,
     analysis: Analysis,
-    tony_lut_path: Path | None = None,
     tone_plan: ToneCompressionPlan | None = None,
     output_gamut: str = "srgb",
     output_format: str = "sdr",
@@ -424,18 +427,18 @@ def export_jpeg(
     subsampling: int = 0,
     look: str = "none",
     look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
 ) -> bool:
     if output_format == "ultrahdr":
-        if look != "none":
-            raise ValueError("look 暂不支持 Ultra HDR 输出（SDR/HDR 底图一致性优先）")
+        if look != "none" or display_filter != "none":
+            raise ValueError("成片风格暂不支持 Ultra HDR 输出（SDR/HDR 底图一致性优先）")
         return export_ultrahdr_jpeg(
             path,
             out_path,
             quality,
-            mode,
             bundle,
             analysis,
-            tony_lut_path,
             tone_plan,
             hdr_headroom,
             gainmap_scale,
@@ -443,7 +446,7 @@ def export_jpeg(
     if output_format != "sdr":
         raise ValueError(f"unknown output format: {output_format}")
     return export_srgb_jpeg(
-        path, out_path, quality, mode, bundle, analysis, tony_lut_path, tone_plan, output_gamut, subsampling,
-        look, look_strength
+        path, out_path, quality, bundle, analysis, tone_plan, output_gamut, subsampling,
+        look, look_strength, display_filter, filter_strength,
     )
 

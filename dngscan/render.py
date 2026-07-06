@@ -7,6 +7,7 @@ from typing import Any
 
 from ._deps import np
 from . import agx as agx_engine
+from . import display_filter as filter_engine
 from . import look as look_engine
 from .color import (
     apply_rgb_matrix3, fit_to_output_gamut, luminance_from_rec2020, luminance_from_rgb_space,
@@ -111,7 +112,13 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     return agx_engine.apply_core(rgb_rec2020, plan, AGX_INSET, AGX_OUTSET)
 
 
-def scene_render_to_agx_linear(bundle: RawBundle, plan: ToneCompressionPlan, output_gamut: str = "srgb") -> Any:
+def scene_render_to_agx_linear(
+    bundle: RawBundle,
+    plan: ToneCompressionPlan,
+    output_gamut: str = "srgb",
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
+) -> Any:
     scene = bundle.scene_rec2020_render
     h, w = scene.shape[:2]
     flat_scene = scene.reshape(-1, scene.shape[-1])
@@ -122,7 +129,12 @@ def scene_render_to_agx_linear(bundle: RawBundle, plan: ToneCompressionPlan, out
         end = min(start + chunk, flat_scene.shape[0])
         rec = scene_rec2020_to_float(flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain)
         mapped_rec = apply_agx_core(rec, plan)
-        output_linear = rec2020_to_output(mapped_rec, output_gamut)
+        if display_filter != "none" and filter_strength > 0.0:
+            output_linear = filter_engine.apply_display_filter_rec2020(
+                mapped_rec, output_gamut, display_filter, filter_strength
+            )
+        else:
+            output_linear = rec2020_to_output(mapped_rec, output_gamut)
         output_linear = np.nan_to_num(output_linear, nan=0.0, posinf=1e6, neginf=-1e6)
         out[start:end] = output_linear.astype(np.float32, copy=False)
     return out.reshape(h, w, 3)
@@ -134,9 +146,14 @@ def scene_render_to_agx_u8(
     output_gamut: str = "srgb",
     look: str = "none",
     look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
 ) -> Any:
     return output_linear_to_u8(
-        scene_render_to_agx_linear(bundle, plan, output_gamut), output_gamut, look, look_strength
+        scene_render_to_agx_linear(bundle, plan, output_gamut, display_filter, filter_strength),
+        output_gamut,
+        look,
+        look_strength,
     )
 
 
@@ -274,34 +291,21 @@ def scene_render_to_output_linear(
 def render_output_u8(
     bundle: RawBundle,
     analysis: Analysis | None,
-    mode: str,
     output_gamut: str = "srgb",
-    tony_lut_path: Path | None = None,
     tone_plan: ToneCompressionPlan | None = None,
     look: str = "none",
     look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
 ) -> Any:
-    if look != "none" and mode != "agx":
-        raise ValueError("look 目前仅支持 agx 模式（它以 AgX 渲染为基座）")
-    if mode == "smart":
-        if analysis is None:
-            raise ValueError("smart mode requires analysis")
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-        return scene_render_to_smart_u8(bundle, analysis, plan, output_gamut)
-    if mode == "agx":
-        if analysis is None:
-            raise ValueError("agx mode requires analysis")
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-        return scene_render_to_agx_u8(bundle, plan, output_gamut, look, look_strength)
-    if mode == "tony":
-        if analysis is None:
-            raise ValueError("tony mode requires analysis")
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-        lut_path = tony_lut_path if tony_lut_path is not None else default_tony_lut_path()
-        return scene_render_to_tony_u8(bundle, plan, lut_path, output_gamut)
-    if mode != "neutral":
-        raise ValueError(f"unknown JPEG mode: {mode}")
-    return scene_render_to_neutral_u8(bundle, output_gamut)
+    if look != "none" and display_filter != "none":
+        raise ValueError("色度 look 与输出滤镜不能同时启用")
+    if analysis is None:
+        raise ValueError("AgX 导出需要分析结果")
+    plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, "agx", output_gamut)
+    return scene_render_to_agx_u8(
+        bundle, plan, output_gamut, look, look_strength, display_filter, filter_strength
+    )
 
 
 def scene_render_to_reference_linear(bundle: RawBundle, output_gamut: str = "p3") -> Any:

@@ -122,7 +122,10 @@ LOOK_CHOICES = ("none",) + tuple(LOOK_FIELDS)
 
 
 def _smoothstep(edge0: float, edge1: float, x: Any) -> Any:
-    t = np.clip((x - edge0) / max(edge1 - edge0, 1e-9), 0.0, 1.0)
+    denom = edge1 - edge0
+    if abs(denom) < 1e-9:
+        return np.zeros_like(np.asarray(x, dtype=np.float32))
+    t = np.clip((x - np.float32(edge0)) / np.float32(denom), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
 
 

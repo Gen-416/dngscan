@@ -9,22 +9,8 @@ from ._deps import np
 from .color import RGB_TO_XYZ, luminance_from_rec2020, output_gamut_space
 from .constants import EPS
 from .models import Analysis, AutoEvResult, RawBundle, ToneCompressionPlan
-from .render import (
-    apply_agx_core,
-    default_tony_lut_path,
-    load_tony_spi3d,
-    rec2020_to_output,
-    rec2020_to_srgb,
-    sample_tony_lut,
-    srgb_to_output,
-)
-from .tone import (
-    compress_linear_output_rgb_for_jpeg,
-    compute_exposure_gain,
-    plan_for_mode,
-    precondition_tonemapper_rgb,
-    scene_rec2020_to_float,
-)
+from .render import apply_agx_core, rec2020_to_output
+from .tone import compute_exposure_gain, plan_for_mode, scene_rec2020_to_float
 
 EV_AUTO_TOKEN = "auto"
 
@@ -92,68 +78,47 @@ def output_highlight_margin(
 def render_sample_linear_output(
     bundle: RawBundle,
     analysis: Analysis | None,
-    mode: str,
     gamut: str,
     ev: float,
     sample_rec2020: Any,
-    tony_lut: Any | None = None,
     tone_plan: ToneCompressionPlan | None = None,
 ) -> Any:
-    bundle.exposure_gain = compute_exposure_gain(mode, ev)
+    from .grade import RENDER_MODE
+
+    bundle.exposure_gain = compute_exposure_gain(RENDER_MODE, ev)
     rec = scene_rec2020_to_float(sample_rec2020, bundle.scene_scale, bundle.exposure_gain)
-    if mode == "smart":
-        plan = tone_plan if tone_plan is not None else (
-            plan_for_mode(bundle, analysis, mode, gamut) if analysis is not None else None
-        )
-        out = rec2020_to_output(rec, gamut)
-        return compress_linear_output_rgb_for_jpeg(out, analysis, plan, gamut)
-    if mode == "agx":
-        plan = tone_plan if tone_plan is not None else (
-            plan_for_mode(bundle, analysis, mode, gamut) if analysis is not None else None
-        )
-        return rec2020_to_output(apply_agx_core(rec, plan), gamut)
-    if mode == "tony":
-        plan = tone_plan if tone_plan is not None else (
-            plan_for_mode(bundle, analysis, mode, gamut) if analysis is not None else None
-        )
-        lut = tony_lut if tony_lut is not None else load_tony_spi3d(default_tony_lut_path())
-        y = luminance_from_rec2020(rec)
-        srgb = rec2020_to_srgb(rec)
-        srgb = precondition_tonemapper_rgb(srgb, y, plan, for_tony=True)
-        return srgb_to_output(sample_tony_lut(srgb, lut), gamut)
-    return rec2020_to_output(rec, gamut)
+    plan = tone_plan if tone_plan is not None else (
+        plan_for_mode(bundle, analysis, RENDER_MODE, gamut) if analysis is not None else None
+    )
+    return rec2020_to_output(apply_agx_core(rec, plan), gamut)
 
 
 def max_safe_ev(
     bundle: RawBundle,
     analysis: Analysis | None,
-    mode: str,
     gamut: str,
     from_ev: float = 0.0,
     max_samples: int = 220_000,
     search_hi: float = 3.0,
 ) -> float:
     """Largest EV (>= from_ev) whose preview-scale output stays below highlight thresholds."""
+    from .grade import RENDER_MODE
+
     if np is None:
         return float(from_ev)
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
     sample_rgb = flat[::step, :3]
-    tony_lut = load_tony_spi3d(default_tony_lut_path()) if mode == "tony" else None
     original_gain = bundle.exposure_gain
 
     baseline_stats: tuple[float, float, float, float] | None = None
 
     def margin_at(ev: float) -> float:
-        rgb = render_sample_linear_output(
-            bundle, analysis, mode, gamut, ev, sample_rgb, tony_lut=tony_lut
-        )
+        rgb = render_sample_linear_output(bundle, analysis, gamut, ev, sample_rgb)
         return output_highlight_margin(rgb, gamut, baseline_stats)
 
     try:
-        baseline_rgb = render_sample_linear_output(
-            bundle, analysis, mode, gamut, from_ev, sample_rgb, tony_lut=tony_lut
-        )
+        baseline_rgb = render_sample_linear_output(bundle, analysis, gamut, from_ev, sample_rgb)
         baseline_stats = output_highlight_stats(baseline_rgb, gamut)
         if output_highlight_margin(baseline_rgb, gamut, baseline_stats) <= 0.0:
             return float(from_ev)
@@ -181,7 +146,6 @@ def max_safe_ev(
 def compute_auto_ev(
     bundle: RawBundle,
     analysis: Analysis,
-    mode: str,
     gamut: str = "p3",
     baseline_ev: float = 0.0,
 ) -> AutoEvResult:
@@ -191,8 +155,11 @@ def compute_auto_ev(
     (negative median_align target) stay at baseline_ev — auto does not gray-world
     snow/high-key into mid gray.
     """
+    from .grade import RENDER_MODE
+
+    mode = RENDER_MODE
     target = median_align_ev(mode, analysis)
-    cap = max_safe_ev(bundle, analysis, mode, gamut, from_ev=baseline_ev)
+    cap = max_safe_ev(bundle, analysis, gamut, from_ev=baseline_ev)
     boost_target = max(target, baseline_ev)
     ev = min(boost_target, cap)
     limited = boost_target > cap + 1e-6
@@ -210,12 +177,11 @@ def resolve_export_ev(
     ev: str | float,
     bundle: RawBundle,
     analysis: Analysis,
-    mode: str,
     gamut: str,
 ) -> tuple[float, AutoEvResult | None]:
     if not is_ev_auto(ev):
         return float(ev), None
-    result = compute_auto_ev(bundle, analysis, mode, gamut)
+    result = compute_auto_ev(bundle, analysis, gamut)
     return result.ev, result
 
 

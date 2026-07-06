@@ -48,7 +48,7 @@ button.preview:disabled{opacity:.5;cursor:default}
 .chk{display:flex;align-items:center;gap:8px}.chk input{width:auto}
 </style></head>
 <body><div class="wrap">
-<h1>dngscan · RAW → JPEG</h1>
+<h1>dngscan · AgX RAW → JPEG</h1>
 
 <div class="card">
   <label>DNG / RAW 文件</label>
@@ -57,16 +57,6 @@ button.preview:disabled{opacity:.5;cursor:default}
     <div style="flex:0"><button class="ghost" id="browseBtn">浏览…</button></div>
   </div>
   <div id="browser"></div>
-</div>
-
-<div class="card">
-  <label>处理方式</label>
-  <div class="modes" id="modes">
-    <button data-m="neutral"><span class="m">neutral</span><br><span class="d">数学参考，最少损失</span></button>
-    <button data-m="smart"><span class="m">smart</span><br><span class="d">分析驱动高光肩+色度</span></button>
-    <button data-m="agx"><span class="m">agx</span><br><span class="d">AgX 曲线，柔和高光</span></button>
-    <button data-m="tony"><span class="m">tony</span><br><span class="d">Tony McMapface LUT</span></button>
-  </div>
 </div>
 
 <div class="card">
@@ -109,15 +99,15 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
-    <div id="lookBlock" style="flex:0;min-width:170px">
-      <label>Look（仅 agx）</label>
-      <select id="look" title="AgX 之上的色度 look：实测官方 LUT 的 Oklab 几何场；纯色度、不改色调">
-LOOK_OPTIONS
+    <div style="flex:0;min-width:220px">
+      <label>成片风格</label>
+      <select id="grade" title="色度 Look（Fujifilm/ARRI）与输出滤镜（Kodak/RED）互斥，一次只能选一种">
+GRADE_OPTIONS
       </select>
     </div>
-    <div id="lookStrengthBlock" style="flex:0;min-width:180px;display:none">
-      <label>Look 强度</label>
-      <div class="evrow"><input type="range" id="lookStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="lookStrengthVal">1.00</span></div>
+    <div id="gradeStrengthBlock" style="flex:0;min-width:180px;display:none">
+      <label>风格强度</label>
+      <div class="evrow"><input type="range" id="gradeStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="gradeStrengthVal">1.00</span></div>
     </div>
     <div style="flex:0;min-width:150px">
       <label>白平衡</label>
@@ -164,20 +154,15 @@ LOOK_OPTIONS
   <button class="preview" id="previewBtn">预览</button>
   <button class="go" id="go">导出</button>
   <button class="ghost" id="revealBtn" style="display:none">在 Finder 中显示</button>
-  <span class="muted" id="modehint" style="margin-left:12px"></span>
   <div id="status"></div>
   <div id="previewWrap"><img id="preview"><div id="spinner"></div></div>
 </div>
 
 <script>
 const $=s=>document.querySelector(s);
-const STORE_KEY="dngscan.settings.v3";
-let mode="agx";
-function selMode(m){mode=m;document.querySelectorAll("#modes button").forEach(b=>b.classList.toggle("sel",b.dataset.m===m));
-  $("#lookBlock").classList.toggle("dim",m!=="agx");if(m!=="agx")$("#look").value="none";updateLookUi();
-  $("#modehint").textContent=m==="tony"?"tony 需要 ./dngscan_assets/tony_mc_mapface.spi3d":"";}
-function setLookStrengthLabel(){const v=+$("#lookStrength").value;$("#lookStrengthVal").textContent=v.toFixed(2);}
-function updateLookUi(){$("#lookStrengthBlock").style.display=(mode==="agx"&&$("#look").value!=="none")?"block":"none";}
+const STORE_KEY="dngscan.settings.v4";
+function setGradeStrengthLabel(){const v=+$("#gradeStrength").value;$("#gradeStrengthVal").textContent=v.toFixed(2);}
+function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").value!=="none"?"block":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
 function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}
 function fmtPct(v){if(v===undefined||!isFinite(v))return "";if(v<=0)return "0%";if(v<0.005)return "<0.01%";if(v<1)return "~"+v.toFixed(2)+"%";return v.toFixed(1)+"%";}
@@ -207,9 +192,9 @@ function applyJobEv(j){
 }
 function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
-    input:$("#input").value,mode,ev:$("#ev").value,quality:$("#quality").value,
+    input:$("#input").value,ev:$("#ev").value,quality:$("#quality").value,
     highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
-    look:$("#look").value,lookStrength:$("#lookStrength").value,
+    grade:$("#grade").value,gradeStrength:$("#gradeStrength").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -223,23 +208,26 @@ function restoreSettings(){
   if(s.wb)$("#wb").value=s.wb;
   if(s.demosaic)$("#demosaic").value=s.demosaic;
   if(s.chroma)$("#chroma").value=s.chroma;
-  if(s.look&&[...$("#look").options].some(o=>o.value===s.look))$("#look").value=s.look;
-  if(s.lookStrength!==undefined)$("#lookStrength").value=s.lookStrength;
+  if(s.grade&&[...$("#grade").options].some(o=>o.value===s.grade))$("#grade").value=s.grade;
+  else if(s.filter&&s.filter!=="none"&&[...$("#grade").options].some(o=>o.value===s.filter))$("#grade").value=s.filter;
+  else if(s.look&&s.look!=="none"&&[...$("#grade").options].some(o=>o.value===s.look))$("#grade").value=s.look;
+  if(s.gradeStrength!==undefined)$("#gradeStrength").value=s.gradeStrength;
+  else if(s.filterStrength!==undefined&&s.filter&&s.filter!=="none")$("#gradeStrength").value=s.filterStrength;
+  else if(s.lookStrength!==undefined)$("#gradeStrength").value=s.lookStrength;
   if(s.format)$("#format").value=s.format;
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
-  selMode(s.mode||"agx");setEvLabel();setHdrLabel();setLookStrengthLabel();updateLookUi();
+  setEvLabel();setHdrLabel();setGradeStrengthLabel();updateGradeUi();
 }
-document.querySelectorAll("#modes button").forEach(b=>b.onclick=()=>{selMode(b.dataset.m);saveSettings();});
-document.querySelectorAll("button[data-ev]").forEach(b=>b.onclick=()=>{$("#ev").value=b.dataset.ev;setEvLabel();saveSettings();});
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
-["wb","demosaic","chroma","look"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateLookUi();saveSettings();}));
+["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
 $("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$("#gamut").value="p3";saveSettings();});
 $("#ev").oninput=()=>{setEvLabel();saveSettings();};
 $("#hdrHeadroom").oninput=()=>{setHdrLabel();saveSettings();};
-$("#lookStrength").oninput=()=>{setLookStrengthLabel();saveSettings();};
+$("#gradeStrength").oninput=()=>{setGradeStrengthLabel();saveSettings();};
 restoreSettings();
+document.querySelectorAll("button[data-ev]").forEach(b=>b.onclick=()=>{$("#ev").value=b.dataset.ev;setEvLabel();saveSettings();});
 let lastSavedPath="";
 
 let curDir=INIT_DIR;
@@ -257,8 +245,8 @@ function payload(){
   const input=$("#input").value.trim();
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
-    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
-    look:$("#look").value,lookStrength:+$("#lookStrength").value,
+    input,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    grade:$("#grade").value,gradeStrength:+$("#gradeStrength").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -332,19 +320,30 @@ function setStatus(t,c){const s=$("#status");s.textContent=t;s.className=c||"";}
 """
 
 
-_LOOK_LABELS = {"none": "无", "classic": "Classic 709 几何", "reveal": "Reveal 709 几何"}
+_LOOK_LABELS = {"classic": "ARRI Classic 709", "reveal": "ARRI Reveal 709"}
 
 
-def _look_options_html() -> str:
+def _grade_options_html() -> str:
+    from ..display_filter import DISPLAY_FILTERS, FILTER_CHOICES
     from ..look import LOOK_CHOICES
 
-    lines = []
+    lines = ['        <option value="none">无</option>']
+    lines.append('        <optgroup label="色度 Look（Fujifilm / ARRI）">')
     for name in LOOK_CHOICES:
-        label = _LOOK_LABELS.get(name, name)
-        lines.append(f'        <option value="{name}">{label}</option>')
+        if name == "none":
+            continue
+        label = _LOOK_LABELS.get(name, name.replace("fuji_", "Fujifilm ").replace("_", " "))
+        lines.append(f'          <option value="{name}">{label}</option>')
+    lines.append("        </optgroup>")
+    lines.append('        <optgroup label="输出滤镜（Kodak / RED IPP2）">')
+    for name in FILTER_CHOICES:
+        if name == "none":
+            continue
+        lines.append(f'          <option value="{name}">{DISPLAY_FILTERS[name].label}</option>')
+    lines.append("        </optgroup>")
     return "\n".join(lines)
 
 
 def render_page(init_dir: str) -> bytes:
-    html = PAGE.replace("INIT_DIR", json.dumps(init_dir)).replace("LOOK_OPTIONS", _look_options_html())
+    html = PAGE.replace("INIT_DIR", json.dumps(init_dir)).replace("GRADE_OPTIONS", _grade_options_html())
     return html.encode("utf-8")

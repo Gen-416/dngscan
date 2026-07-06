@@ -122,9 +122,38 @@ def flog2_encode(x: np.ndarray) -> np.ndarray:  # Fujifilm F-Log2 (F-Gamut = BT.
     return np.where(x >= 0.000889, c * np.log10(np.maximum(a * x + b, 1e-9)) + d, e * x + f)
 
 
+def cineon_encode(x: np.ndarray) -> np.ndarray:
+    """Minimal Cineon Film Log (Resolve FPE LUTs): 18% scene-linear -> ~0.5 code."""
+    x = np.maximum(x, 1e-10)
+    return np.clip((np.log2(x / 0.18) + 1.0) * 0.5, 0.0, 1.0)
+
+
+_LOG3G10_A = 0.224282
+_LOG3G10_B = 155.975327
+_LOG3G10_C = 0.01
+_LOG3G10_G = 15.1927
+
+
+def log3g10_encode(x: np.ndarray) -> np.ndarray:  # RED Log3G10 (IPP2 white paper)
+    x = np.asarray(x, dtype=np.float64) + _LOG3G10_C
+    lo = x * _LOG3G10_G
+    hi = _LOG3G10_A * np.log10(np.maximum(x * _LOG3G10_B + 1.0, 1e-10))
+    return np.where(x < 0.0, lo, hi)
+
+
+RWG_TO_XYZ = np.array(
+    [
+        [0.735275, 0.068609, 0.146571],
+        [0.286694, 0.842979, -0.129673],
+        [-0.079682, -0.347343, 1.516745],
+    ]
+)
+
+
 def _sources() -> dict[str, tuple[Any, np.ndarray, float]]:
     """source name -> (scene-linear->log encode, XYZ->camera-gamut matrix, gray anchor)."""
     rec2020_from_xyz = np.asarray(dg.XYZ_TO_RGB["Rec2020"], dtype=np.float64)
+    rec709_from_xyz = np.asarray(dg.XYZ_TO_RGB["sRGB"], dtype=np.float64)
     return {
         "logc3": (logc3_encode, XYZ_TO_AWG3, 0.391),
         "logc4": (logc4_encode, XYZ_TO_AWG4, 0.278),
@@ -132,6 +161,8 @@ def _sources() -> dict[str, tuple[Any, np.ndarray, float]]:
         "vlog": (vlog_encode, np.linalg.inv(VGAMUT_TO_XYZ), 0.423),
         "flog": (flog_encode, rec2020_from_xyz, 0.459),
         "flog2": (flog2_encode, rec2020_from_xyz, 0.391),
+        "cineon": (cineon_encode, rec709_from_xyz, 0.500),
+        "log3g10": (log3g10_encode, np.linalg.inv(RWG_TO_XYZ), 1.0 / 3.0),
     }
 
 
@@ -150,7 +181,7 @@ def load_cube(path: Path) -> np.ndarray:
             if line.startswith("LUT_3D_SIZE"):
                 size = int(line.split()[1])
                 continue
-            if line.startswith(("DOMAIN_MIN", "DOMAIN_MAX", "LUT_1D")):
+            if line.startswith(("DOMAIN_MIN", "DOMAIN_MAX", "LUT_1D", "LUT_3D_INPUT_RANGE")):
                 continue
             parts = line.split()
             if len(parts) == 3:
@@ -214,7 +245,7 @@ def render_arri_oklab(scene_xyz: np.ndarray, lut_path: Path, enc: str, display_g
     encode, xyz_to_cam, _ = _sources()[enc]
     lut = load_cube(lut_path)
     cam = scene_xyz @ xyz_to_cam.T
-    if enc in ("logc3", "slog3", "flog", "flog2"):
+    if enc in ("logc3", "slog3", "flog", "flog2", "cineon", "log3g10"):
         cam = np.maximum(cam, 0.0)  # these curves have no meaningful negative-domain toe
     encoded = encode(cam)
     disp = sample_cube(lut, np.clip(encoded, 0.0, 1.0))
@@ -486,6 +517,12 @@ def main() -> int:
         print(f"[sanity] max |a,b| on neutral ladder: {tint:.4f} (should be ~<0.01; higher means wrong --source/--display-gamma)")
         field = measure_look_field(lab_a, lab_r)
         measured[look_id] = field
+        if field.mid_chroma_ratio < 0.25:
+            print(
+                f"[warn] mid_chroma_ratio={field.mid_chroma_ratio:.3f} — 这是完整输出变换 LUT，"
+                "不适合导入为 LookField（会严重去饱和）。请改用 dngscan display filter 管线。",
+                file=sys.stderr,
+            )
         print_report(title, field, lab_a, lab_r)
         if args.validate:
             stats = validate_fit(look_id, field, lab_a, lab_r)

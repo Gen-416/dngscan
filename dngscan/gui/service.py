@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import dngscan as dg
-from dngscan.look import LOOK_CHOICES
+from dngscan.grade import RENDER_MODE, resolve_grade_params
 
 from .constants import PROXY_LONG_EDGE, RAW_EXTS
 
@@ -210,14 +210,13 @@ def output_metrics_from_linear(rgb_linear: object, gamut: str) -> dict[str, floa
 def estimate_ev_headroom(
     bundle: dg.RawBundle,
     analysis: dg.Analysis | None,
-    mode: str,
     gamut: str,
     current_ev: float,
     max_samples: int = 220_000,
 ) -> dict[str, float | str]:
     if analysis is None:
         return {}
-    safe_ev = dg.max_safe_ev(bundle, analysis, mode, gamut, from_ev=current_ev, max_samples=max_samples)
+    safe_ev = dg.max_safe_ev(bundle, analysis, gamut, from_ev=current_ev, max_samples=max_samples)
     return {
         "safe_ev_remaining": max(0.0, float(safe_ev - current_ev)),
         "estimated_safe_ev": float(safe_ev),
@@ -247,13 +246,10 @@ def list_dir(raw: str) -> dict:
     return {"cwd": str(p), "parent": str(p.parent), "dirs": dirs, "files": files}
 
 
-def parse_job_params(params: dict) -> tuple[Path, str, str, str, str, float, float, int, bool, Path | None, bool]:
+def parse_job_params(params: dict) -> tuple[Path, str, str, str, float, float, int, bool, Path | None, bool]:
     inp = Path(str(params["input"])).expanduser()
     if not inp.is_file():
         raise FileNotFoundError(f"文件不存在：{inp}")
-    mode = str(params.get("mode", "neutral"))
-    if mode not in ("neutral", "smart", "agx", "tony"):
-        raise ValueError(f"未知模式：{mode}")
     highlight = str(params.get("highlight", "clip"))
     if highlight not in ("clip", "blend", "reconstruct"):
         raise ValueError(f"未知高光处理：{highlight}")
@@ -275,16 +271,15 @@ def parse_job_params(params: dict) -> tuple[Path, str, str, str, str, float, flo
     want_png = bool(params.get("png", False))
     outdir = Path(str(params["outdir"])).expanduser() if params.get("outdir") else None
     ev_auto = bool(params.get("evAuto", False))
-    return inp, mode, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir, ev_auto
+    return inp, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir, ev_auto
 
 
-def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, mode: str, gamut: str) -> dg.ToneCompressionPlan | None:
-    return dg.plan_for_mode(bundle, analysis, mode, gamut) if mode != "neutral" else None
+def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, gamut: str) -> dg.ToneCompressionPlan:
+    return dg.plan_for_mode(bundle, analysis, RENDER_MODE, gamut)
 
 
 def export_preview_jpeg(
     inp: Path,
-    mode: str,
     highlight: str,
     gamut: str,
     ev: float,
@@ -293,6 +288,8 @@ def export_preview_jpeg(
     wb: str = "camera",
     look: str = "none",
     look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
     auto_ev: dg.AutoEvResult | None = None,
 ) -> dict:
     dg.require_dependencies()
@@ -312,13 +309,14 @@ def export_preview_jpeg(
     proxy_bundle = replace(
         cached.bundle,
         scene_rec2020_render=cached.proxy_scene,
-        exposure_gain=dg.compute_exposure_gain(mode, ev),
+        exposure_gain=dg.compute_exposure_gain(RENDER_MODE, ev),
     )
     with RENDER_LOCK:
-        tone_plan = plan_for_bundle(proxy_bundle, cached.analysis, mode, gamut)
+        tone_plan = plan_for_bundle(proxy_bundle, cached.analysis, gamut)
         icc_profile = dg.output_icc_profile_bytes(gamut)
         rgb_u8 = dg.render_output_u8(
-            proxy_bundle, cached.analysis, mode, gamut, None, tone_plan, look, look_strength
+            proxy_bundle, cached.analysis, gamut, tone_plan,
+            look, look_strength, display_filter, filter_strength,
         )
         if auto_ev is not None:
             rgb_u8 = annotate_preview_rgb_u8(rgb_u8, dg.auto_ev_overlay_lines(auto_ev))
@@ -338,22 +336,19 @@ def export_preview_jpeg(
     return payload
 
 
-def parse_look(params: dict, mode: str) -> tuple[str, float]:
-    look = str(params.get("look", "none"))
-    if look not in LOOK_CHOICES:
-        raise ValueError(f"未知 look：{look}")
-    if look != "none" and mode != "agx":
-        raise ValueError("look 目前仅支持 agx 模式")
-    strength = float(params.get("lookStrength", 1.0))
-    return look, max(0.0, min(1.5, strength))
+def parse_grade(params: dict) -> tuple[str, float, str, float]:
+    look, look_strength, display_filter, filter_strength = resolve_grade_params(params)
+    if display_filter != "none" and str(params.get("format", "sdr")) == "ultrahdr":
+        raise ValueError("输出滤镜暂不支持 Ultra HDR（SDR 底图一致性优先）")
+    return look, look_strength, display_filter, filter_strength
 
 
 def run_preview(params: dict) -> dict:
-    inp, mode, highlight, gamut, _, ev, _, quality, _, _, ev_auto = parse_job_params(params)
+    inp, highlight, gamut, _, ev, _, quality, _, _, ev_auto = parse_job_params(params)
     wb = str(params.get("wb", "camera"))
     if wb not in dg.WB_CHOICES:
         raise ValueError(f"未知白平衡模式：{wb}")
-    look, look_strength = parse_look(params, mode)
+    look, look_strength, display_filter, filter_strength = parse_grade(params)
     auto_ev_result = None
     if ev_auto:
         stat = inp.stat()
@@ -368,11 +363,10 @@ def run_preview(params: dict) -> dict:
             with PREVIEW_CACHE_LOCK:
                 PREVIEW_CACHE.clear()
                 PREVIEW_CACHE[key] = cached
-        auto_ev_result = dg.compute_auto_ev(cached.bundle, cached.analysis, mode, gamut)
+        auto_ev_result = dg.compute_auto_ev(cached.bundle, cached.analysis, gamut)
         ev = auto_ev_result.ev
     return export_preview_jpeg(
         inp,
-        mode,
         highlight,
         gamut,
         ev,
@@ -380,13 +374,15 @@ def run_preview(params: dict) -> dict:
         wb=wb,
         look=look,
         look_strength=look_strength,
+        display_filter=display_filter,
+        filter_strength=filter_strength,
         auto_ev=auto_ev_result,
     )
 
 
 def run_export(params: dict) -> dict:
     dg.require_dependencies()
-    inp, mode, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir_arg, ev_auto = parse_job_params(
+    inp, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir_arg, ev_auto = parse_job_params(
         params
     )
     outdir = outdir_arg if outdir_arg is not None else inp.parent
@@ -397,23 +393,18 @@ def run_export(params: dict) -> dict:
     wb = str(params.get("wb", "camera"))
     if wb not in dg.WB_CHOICES:
         raise ValueError(f"未知白平衡模式：{wb}")
-    look, look_strength = parse_look(params, mode)
+    look, look_strength, display_filter, filter_strength = parse_grade(params)
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
 
-    analysis = None
-    y = ev_img = None
-    if mode != "neutral" or want_png or ev_auto:
-        analysis, y, ev_img = dg.analyze(bundle, 4)
+    analysis, y, ev_img = dg.analyze(bundle, 4)
     auto_ev_result = None
     if ev_auto:
-        if analysis is None:
-            analysis, y, ev_img = dg.analyze(bundle, 4)
-        auto_ev_result = dg.compute_auto_ev(bundle, analysis, mode, gamut)
+        auto_ev_result = dg.compute_auto_ev(bundle, analysis, gamut)
         ev = auto_ev_result.ev
-    bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
-    tone_plan = plan_for_bundle(bundle, analysis, mode, gamut) if analysis is not None else None
+    bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
+    tone_plan = plan_for_bundle(bundle, analysis, gamut)
 
-    suffix_parts = [mode]
+    suffix_parts = ["agx"]
     if highlight != "clip":
         suffix_parts.append(highlight)
     if gamut != "srgb":
@@ -423,16 +414,14 @@ def run_export(params: dict) -> dict:
     suffix = "_".join(suffix_parts)
     jpg_path = outdir / f"{inp.stem}_{suffix}.jpg"
     with RENDER_LOCK:
-        bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
+        bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
         icc_profile = dg.output_icc_profile_bytes(gamut)
         dg.export_jpeg(
             inp,
             jpg_path,
             quality,
-            mode,
             bundle,
             analysis,
-            None,
             tone_plan,
             gamut,
             output_format,
@@ -441,9 +430,11 @@ def run_export(params: dict) -> dict:
             dg.chroma_to_subsampling(chroma),
             look,
             look_strength,
+            display_filter,
+            filter_strength,
         )
         metrics = output_luminance_metrics(jpg_path, gamut, ev)
-        metrics.update(estimate_ev_headroom(bundle, analysis, mode, gamut, ev, max_samples=600_000))
+        metrics.update(estimate_ev_headroom(bundle, analysis, gamut, ev, max_samples=600_000))
         preview = make_preview_b64(jpg_path, icc_profile=icc_profile)
         if auto_ev_result is not None:
             from PIL import Image

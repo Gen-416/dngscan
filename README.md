@@ -1,10 +1,12 @@
 # dngscan
 
-A physically-grounded RAW/DNG analyzer and tone-mapping exporter. It reads a camera
-raw file, measures what the sensor actually captured (dynamic range, per-channel
-clipping, SNR, gamut pressure), and can render that scene-linear signal to an 8-bit
-JPEG through one of four tone-mapping pipelines — either from the command line or a
-small local web GUI.
+[中文](README.zh-CN.md)
+
+A physically-grounded RAW/DNG analyzer and **AgX** tone-mapping exporter. It reads a
+camera raw file, measures what the sensor actually captured (dynamic range, per-channel
+clipping, SNR, gamut pressure), and renders that scene-linear signal to an 8-bit JPEG
+through a single AgX view transform — optionally with a **grade** (chromatic look or
+display filter) — from the command line or a small local web GUI.
 
 It began as a diagnostic tool (the six-panel PNG dashboard) and grew into a way to
 produce finished JPEGs directly, without round-tripping through a raw editor.
@@ -15,37 +17,67 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
   distributions, RGB exposure histograms, gamut-overflow risk per output space, a
   spatial exposure-zone map, and a clipped-channel highlight map, plus per-channel
   full-well / clip / black-level / white-balance readouts.
-- **Four export pipelines** (`--jpeg-mode`):
-  - `neutral` — minimal-loss reference: scene-linear → display encode, no tone curve.
-    Faithful, but clips highlights (no shoulder); meant as a baseline, not a finished look.
-  - `smart` — analysis-driven highlight shoulder + hue-preserving chroma easing,
-    computed in the output color space with same-space luminance.
-  - `agx` — AgX view transform with the Rec.2020-native Blender/EaryChow matrices:
-    inset (primaries rotation + attenuation) → log2 → sigmoid → linearize → 40%
-    hue-mix → outset in linear light. The channel crosstalk gives AgX's smooth
-    highlight desaturation and its signature hue flourish.
-  - `tony` — the Tony McMapface display-referred 3D LUT.
-- **Hue-preserving gamut fit** — every mode ends by fitting out-of-gamut colors into the
-  output space with Oklab adaptive-L0 clipping (hold hue, reduce chroma) instead of
-  per-channel clipping, which skews hue on saturated colors. Works for sRGB and Display P3.
+- **AgX export** — Rec.2020-native AgX view transform: inset → log2 → sigmoid →
+  outset. Channel crosstalk gives smooth highlight desaturation and AgX's signature hue
+  flourish. All JPEG output uses this pipeline.
+- **Grades (mutually exclusive)** — one optional layer on top of AgX (`--grade`):
+  - **Chromatic looks** — measured Oklab geometry from official LUTs (Fujifilm film sims,
+    ARRI Classic / Reveal). Tone stays AgX; only hue / saturation / skin shaping.
+  - **Display filters** — full log-encoded output transforms (Kodak 2383 FPE, RED IPP2)
+    sampled from `.cube` files after Cineon / Log3G10 encode.
+- **Hue-preserving gamut fit** — output fitting uses Oklab adaptive-L0 clipping (hold
+  hue, reduce chroma) instead of per-channel clipping. Works for sRGB and Display P3.
 - **High-quality demosaic on export** — full-res exports use `--demosaic auto` (DHT
-  preferred, libraw-native for non-Bayer sensors) or a manual algorithm; the fast preview
-  uses a light demosaic. This selects interpolation *quality* only — no noise reduction is
-  ever applied.
-- **Local web GUI** (`python -m dngscan.gui`) — pick a file, mode, exposure, quality,
+  preferred, libraw-native for non-Bayer / X-Trans sensors) or a manual algorithm;
+  preview uses a light demosaic. Interpolation quality only — **no noise reduction**.
+- **Local web GUI** (`python -m dngscan.gui`) — pick a file, exposure, grade, quality,
   demosaic and output gamut; live preview; per-file exposure-headroom estimate; sRGB or
-  Display P3 output; highlight handling (clip / blend / reconstruct). Browser-based, no Tk.
-- **Optional Ultra HDR JPEG** — writes JPEG-based gain-map HDR output with a normal
-  SDR fallback image plus an ISO/Ultra HDR gain map. SDR JPEG remains the default.
+  Display P3; highlight handling (clip / blend / reconstruct).
+- **Optional Ultra HDR JPEG** — ISO/Ultra HDR gain-map output with an SDR fallback.
+  Grades are SDR-only today. SDR JPEG remains the default.
+
+## Processing pipeline
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ ① RAW restore                                               │
+│    DNG ──► demosaic ──► WB ──► color matrix ──► scene Rec.2020│
+└────────────────────────────┬────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ② Analysis + exposure                                       │
+│    analyze() · EV manual/auto · compute_exposure_gain(agx)  │
+└────────────────────────────┬────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ③ AgX                                                       │
+│    scene Rec.2020 ──► AgX core ──► mapped Rec.2020          │
+└────────────────────────────┬────────────────────────────────┘
+                             ▼
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+           [none]      chromatic look    display filter
+                      │                  │
+              rec2020_to_output    log encode → .cube → decode
+                      │                  │
+              Oklab + LookField      Kodak: Cineon + Rec.709
+              (L untouched)          RED: Log3G10 + RWG
+                      │                  │
+              └──────────────┬───────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ④ Display encode                                            │
+│    gamut fit · sRGB/P3 OETF + TPDF dither · JPEG / Ultra HDR│
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Design notes
 
 A few choices worth knowing:
 
-- **Exposure is a fixed constant, never content-adaptive.** The tone modes anchor a
-  nominally-exposed mid gray onto 0.18 with a constant scalar; `--ev` adds a manual
-  offset. A dark scene stays dark — the tool never auto-brightens to "average" and
-  never changes your capture intent.
+- **Exposure is a fixed constant, never content-adaptive.** AgX anchors a nominally-exposed
+  mid gray onto 0.18 with a constant scalar; `--ev` adds a manual offset or `auto` aligns
+  median to 18% gray with highlight protection. A dark scene stays dark.
 - **Scene-linear Rec.2020 throughout.** The export buffer stays in a wide working
   space so saturated highlights are not clipped to sRGB before tone mapping. AgX's
   inset/outset are conjugated into Rec.2020 so neutrals stay neutral.
@@ -53,12 +85,8 @@ A few choices worth knowing:
 - **Hue-preserving gamut fit.** Colors outside the output gamut are brought in with Oklab
   adaptive-L0 clipping (hold hue, reduce chroma) rather than per-channel clipping, which
   skews hue on saturated colors. Applied in every mode, for both sRGB and Display P3.
-- **Demosaicing is reconstruction, not denoising.** Every raw must be demosaiced
-  (interpolating the two missing colors at each Bayer pixel) — it is mandatory, never
-  optional. `--demosaic` only selects interpolation *quality* (default `auto` → DHT on the
-  full-res export, libraw-native for non-Bayer sensors); it applies no smoothing. The
-  pipeline performs **no noise reduction at all** (FBDD off, no median filtering): a
-  high-quality demosaic preserves detail and noise, it never removes them.
+- **Demosaicing is reconstruction, not denoising.** Bayer sensors can use DHT on export;
+  non-Bayer (e.g. Fujifilm X-Trans) keeps libraw's native path. No smoothing, no NR.
 - **Gain-map HDR is additive.** The SDR base image is the same rendered output, while
   the HDR numerator keeps midtones equal to SDR and releases only highlight headroom.
   HDR output is forced to Display P3 and defaults to +3 EV headroom.
@@ -111,14 +139,16 @@ Project layout:
 
 ```text
 dngscan/
-  __main__.py           # CLI entry point: python -m dngscan
-  core.py               # RAW analysis, tone planning, Tony/export pipeline
+  cli.py                # CLI entry point
   agx.py                # AgX inset/outset, log curve and sigmoid core
-  gui.py                # GUI entry point: python -m dngscan.gui
+  look.py               # chromatic LookField layer (Oklab)
+  display_filter.py     # Kodak / RED display LUT filters
+  grade.py              # unified grade picker (look OR filter)
+  render.py / export.py # scene → AgX → JPEG / Ultra HDR
+  gui/                  # local web GUI
 dngscan_assets/
-  README.md             # asset notes
-  TONY_LICENSE-MIT.md   # Tony McMapface MIT license text
-  tony_mc_mapface.spi3d # Tony LUT
+  look_fields.json      # user-measured looks (gitignored)
+  vendor_luts/          # downloaded .cube files (gitignored)
   darktable_agx.*       # local AgX reference copies
 ```
 
@@ -130,18 +160,24 @@ Command line:
 # Diagnostic PNG only
 python -m dngscan photo.dng
 
-# Export a JPEG with the AgX pipeline, +0.5 EV, Display P3
-python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx --ev 0.5 --output-gamut p3
+# AgX JPEG, +0.5 EV, Display P3
+python -m dngscan photo.dng --jpeg out.jpg --ev 0.5 --output-gamut p3
 
-# Force a specific demosaic algorithm (default is auto -> DHT; export only)
-python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx --demosaic dht
+# Fujifilm Velvia look (chromatic geometry on AgX)
+python -m dngscan photo.dng --jpeg out.jpg --grade fuji_velvia --grade-strength 1.0
 
-# Export an ISO/Ultra HDR gain-map JPEG. The SDR base is forced to Display P3.
-python -m dngscan photo.dng --jpeg out_hdr.jpg --jpeg-mode agx --highlight-mode reconstruct \
+# Kodak 2383 display filter (log-encoded .cube)
+python -m dngscan photo.dng --jpeg out.jpg --grade kodak_2383_d65
+
+# Force demosaic (default auto → DHT on Bayer; export only)
+python -m dngscan photo.dng --jpeg out.jpg --demosaic dht
+
+# Ultra HDR gain-map JPEG (no grade; SDR base forced to Display P3)
+python -m dngscan photo.dng --jpeg out_hdr.jpg --highlight-mode reconstruct \
   --output-format ultrahdr --hdr-headroom 3
 
-# Faithful reference, also write the diagnostic PNG and a metrics CSV
-python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode neutral --scan --csv metrics.csv
+# Diagnostics + metrics CSV alongside JPEG
+python -m dngscan photo.dng --jpeg out.jpg --scan --csv metrics.csv
 ```
 
 Local GUI:
@@ -154,40 +190,38 @@ For WeChat/QQ delivery, use original-file or file transfer if you want the HDR g
 map to survive. Moments/feed-style uploads usually recompress to SDR and strip the
 gain map.
 
-## Looks (chromatic layer on top of AgX)
+## Grades
 
-`--look {classic,reveal,...}` applies a purely chromatic Oklab field on the agx render
-(`--look-strength 0–1.5`). The built-in `classic` / `reveal` fields are geometry measured
-from ARRI's official display LUTs (K1S1 and Reveal); no LUT data ships with the repo.
+`--grade NAME` picks **one** optional style (`--grade-strength 0–1.5`). Chromatic looks
+and display filters are mutually exclusive.
 
-**Add your own look** from any official Log→Rec.709 display LUT you download:
+**Chromatic looks** (`classic`, `reveal`, `fuji_*`, …) apply a measured Oklab field on the
+AgX render. Built-in ARRI fields come from official display LUT geometry; Fujifilm fields
+are measured from F-Log2 film-sim `.cube` files. **No LUT is sampled at export time** for
+looks — only pre-measured hue/chroma parameters in `dngscan_assets/look_fields.json`.
+
+**Display filters** (`kodak_2383_d65`, `red_ipp2_rec709_medium`) are full output transforms:
+AgX → log encode → vendor `.cube` → display decode → blend. These cannot be reduced to a
+chromatic look (measuring them as LookFields collapses saturation).
+
+Add a chromatic look from any official Log→display `.cube` you download:
 
 ```bash
-# example: Fujifilm ETERNA (F-Log → ETERNA BT.709 .cube from Fujifilm's site)
-python tools/extract_arri_look.py --lut path/to/eterna.cube --source flog \
-  --name eterna --validate --append-json
+# example: Fujifilm ETERNA (F-Log2 → ETERNA .cube from Fujifilm's site)
+python tools/extract_arri_look.py --lut path/to/eterna.cube --source flog2 \
+  --name fuji_eterna --validate --append-json
 ```
 
-Supported `--source` encodings: `logc3, logc4, slog3, vlog, flog, flog2` (each
-self-tests its gray anchor and gamut white point). The measured field is written to
-`dngscan_assets/look_fields.json` (user-local, gitignored) and appears automatically in
-the CLI `--look` choices and the GUI dropdown on restart. Worthwhile official downloads:
-Fujifilm F-Log→ETERNA, Sony S-Log3→s709 (Venice look), Panasonic V-Log→V-709.
-The measurement compares the LUT against dngscan's AgX in Oklab with L-normalized
-saturation, so a look field captures the LUT's chromatic character without its tone.
+Supported `--source` encodings: `logc3, logc4, slog3, vlog, flog, flog2, cineon, log3g10`.
+The tool warns when `mid_chroma_ratio < 0.25` (full output transform — use a display
+filter instead). Measurement compares the LUT against AgX in Oklab with L-normalized
+saturation so the field captures chromatic character without the LUT's tone curve.
 
-## Tony McMapface LUT
-
-The `tony` mode needs `tony_mc_mapface.spi3d`. Keep it at
-`./dngscan_assets/tony_mc_mapface.spi3d`, or pass `--tony-lut PATH`. The bundled LUT
-is redistributed under the upstream MIT license in
-`dngscan_assets/TONY_LICENSE-MIT.md`.
+Place display-filter `.cube` files under `dngscan_assets/vendor_luts/` (see
+`display_filter.py` for expected paths).
 
 ## License & attribution
 
-Licensed under **GPL-3.0-or-later** (see [LICENSE](LICENSE)). The AgX mode ports
-portions of [darktable](https://github.com/darktable-org/darktable)'s GPL-3.0-or-later
-AgX implementation, which is why the combined work is GPL. The Tony McMapface LUT is
-an external asset dual-licensed Apache-2.0 OR MIT by
-[h3r2tic/tony-mc-mapface](https://github.com/h3r2tic/tony-mc-mapface). See
-[NOTICE.md](NOTICE.md) for details.
+Licensed under **GPL-3.0-or-later** (see [LICENSE](LICENSE)). The AgX implementation
+ports portions of [darktable](https://github.com/darktable-org/darktable)'s GPL-3.0-or-later
+AgX code. See [NOTICE.md](NOTICE.md) for third-party assets.
