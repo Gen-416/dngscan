@@ -19,6 +19,7 @@ import argparse
 import json
 import math
 import sys
+from typing import Any
 from dataclasses import asdict
 from pathlib import Path
 
@@ -76,6 +77,62 @@ AWG4_TO_XYZ = np.array(
 )
 XYZ_TO_AWG3 = np.linalg.inv(AWG3_TO_XYZ)
 XYZ_TO_AWG4 = np.linalg.inv(AWG4_TO_XYZ)
+
+
+# --- other vendors (published log formulas + camera gamuts, D65) ---
+
+def slog3_encode(x: np.ndarray) -> np.ndarray:  # Sony S-Log3
+    return np.where(
+        x >= 0.01125,
+        (420.0 + np.log10(np.maximum(x + 0.01, 1e-9) / 0.19) * 261.5) / 1023.0,
+        (x * (171.2102946929 - 95.0) / 0.01125 + 95.0) / 1023.0,
+    )
+
+
+SGAMUT3CINE_TO_XYZ = np.array(
+    [
+        [0.599083920758, 0.248925516115, 0.102446490167],
+        [0.215075820116, 0.885068501744, -0.100144321859],
+        [-0.032065849545, -0.027658390679, 1.148782114677],
+    ]
+)
+
+
+def vlog_encode(x: np.ndarray) -> np.ndarray:  # Panasonic V-Log
+    b, c, d = 0.00873, 0.241514, 0.598206
+    return np.where(x < 0.01, 5.6 * x + 0.125, c * np.log10(np.maximum(x + b, 1e-9)) + d)
+
+
+VGAMUT_TO_XYZ = np.array(
+    [
+        [0.679644, 0.152211, 0.118600],
+        [0.260686, 0.774894, -0.035580],
+        [-0.009310, -0.004612, 1.102980],
+    ]
+)
+
+
+def flog_encode(x: np.ndarray) -> np.ndarray:  # Fujifilm F-Log (F-Gamut = BT.2020)
+    a, b, c, d, e, f = 0.555556, 0.009468, 0.344676, 0.790453, 8.735631, 0.092864
+    return np.where(x >= 0.00089, c * np.log10(np.maximum(a * x + b, 1e-9)) + d, e * x + f)
+
+
+def flog2_encode(x: np.ndarray) -> np.ndarray:  # Fujifilm F-Log2 (F-Gamut = BT.2020)
+    a, b, c, d, e, f = 5.555556, 0.064829, 0.245281, 0.384316, 8.799461, 0.092864
+    return np.where(x >= 0.000889, c * np.log10(np.maximum(a * x + b, 1e-9)) + d, e * x + f)
+
+
+def _sources() -> dict[str, tuple[Any, np.ndarray, float]]:
+    """source name -> (scene-linear->log encode, XYZ->camera-gamut matrix, gray anchor)."""
+    rec2020_from_xyz = np.asarray(dg.XYZ_TO_RGB["Rec2020"], dtype=np.float64)
+    return {
+        "logc3": (logc3_encode, XYZ_TO_AWG3, 0.391),
+        "logc4": (logc4_encode, XYZ_TO_AWG4, 0.278),
+        "slog3": (slog3_encode, np.linalg.inv(SGAMUT3CINE_TO_XYZ), 0.411),
+        "vlog": (vlog_encode, np.linalg.inv(VGAMUT_TO_XYZ), 0.423),
+        "flog": (flog_encode, rec2020_from_xyz, 0.459),
+        "flog2": (flog2_encode, rec2020_from_xyz, 0.391),
+    }
 
 
 class TypicalPlan:
@@ -152,16 +209,16 @@ def render_agx_oklab(scene_xyz: np.ndarray) -> np.ndarray:
     return xyz_to_oklab(agx_xyz)
 
 
-def render_arri_oklab(scene_xyz: np.ndarray, lut_path: Path, enc: str) -> np.ndarray:
+def render_arri_oklab(scene_xyz: np.ndarray, lut_path: Path, enc: str, display_gamma: float = 2.4) -> np.ndarray:
+    """Scene XYZ -> vendor log encoding -> display LUT -> Oklab (assumes Rec.709 output)."""
+    encode, xyz_to_cam, _ = _sources()[enc]
     lut = load_cube(lut_path)
-    if enc == "logc3":
-        cam = scene_xyz @ XYZ_TO_AWG3.T
-        encoded = logc3_encode(np.maximum(cam, 0.0))
-    else:
-        cam = scene_xyz @ XYZ_TO_AWG4.T
-        encoded = logc4_encode(cam)
+    cam = scene_xyz @ xyz_to_cam.T
+    if enc in ("logc3", "slog3", "flog", "flog2"):
+        cam = np.maximum(cam, 0.0)  # these curves have no meaningful negative-domain toe
+    encoded = encode(cam)
     disp = sample_cube(lut, np.clip(encoded, 0.0, 1.0))
-    disp_lin = np.power(np.clip(disp, 0.0, 1.0), 2.4)
+    disp_lin = np.power(np.clip(disp, 0.0, 1.0), display_gamma)
     arri_xyz = disp_lin @ np.asarray(dg.RGB_TO_XYZ["sRGB"]).T
     return xyz_to_oklab(arri_xyz)
 
@@ -299,12 +356,15 @@ def validate_fit(look_id: str, field: LookField, lab_a: np.ndarray, lab_r: np.nd
     from dngscan import look as look_mod
 
     L, a, b = lab_a[:, 0], lab_a[:, 1], lab_a[:, 2]
-    old = look_mod.LOOK_FIELDS[look_id]
+    old = look_mod.LOOK_FIELDS.get(look_id)  # custom names may not be registered yet
     look_mod.LOOK_FIELDS[look_id] = field
     try:
         _, a2, b2 = apply_look_oklab(L, a, b, look_id, 1.0)
     finally:
-        look_mod.LOOK_FIELDS[look_id] = old
+        if old is not None:
+            look_mod.LOOK_FIELDS[look_id] = old
+        else:
+            look_mod.LOOK_FIELDS.pop(look_id, None)
 
     fit = np.stack([L, a2, b2], axis=1)
     delta = fit - lab_r
@@ -357,39 +417,73 @@ def emit_python(fields: dict[str, LookField]) -> str:
 
 
 def run_self_tests() -> None:
-    lc3_18 = float(logc3_encode(np.array([0.18]))[0])
-    lc4_18 = float(logc4_encode(np.array([0.18]))[0])
-    print(f"[self-test] LogC3(0.18)={lc3_18:.4f} (published 0.391)   LogC4(0.18)={lc4_18:.4f} (published 0.278)")
-    if abs(lc3_18 - 0.391) >= 0.002 or abs(lc4_18 - 0.278) >= 0.002:
-        raise SystemExit("LogC constants wrong")
-    for name, m in (("AWG3", AWG3_TO_XYZ), ("AWG4", AWG4_TO_XYZ)):
-        w = m @ [1, 1, 1]
-        print(f"[self-test] {name} white -> XYZ {np.round(w, 4)} (expect ~[0.9505, 1.0, 1.0891])")
+    d65 = np.array([0.9505, 1.0, 1.0891])
+    for name, (encode, xyz_to_cam, anchor) in _sources().items():
+        got = float(encode(np.array([0.18]))[0])
+        cam_to_xyz = np.linalg.inv(xyz_to_cam)
+        white = cam_to_xyz @ [1.0, 1.0, 1.0]
+        print(f"[self-test] {name}: encode(0.18)={got:.4f} (published {anchor})  white->XYZ {np.round(white, 4)}")
+        if abs(got - anchor) >= 0.005:
+            raise SystemExit(f"{name} log constants wrong: encode(0.18)={got:.4f}, expected {anchor}")
+        if np.abs(white - d65).max() >= 0.002:
+            raise SystemExit(f"{name} gamut matrix wrong: white {white} != D65")
+
+
+def append_look_fields_json(measured: dict[str, LookField]) -> Path:
+    """Merge measured fields into dngscan_assets/look_fields.json (the user look registry)."""
+    from dngscan.look import LOOK_FIELDS_JSON
+
+    existing: dict[str, Any] = {}
+    if LOOK_FIELDS_JSON.is_file():
+        try:
+            existing = json.loads(LOOK_FIELDS_JSON.read_text(encoding="utf-8"))
+        except ValueError:
+            existing = {}
+    existing.update({k: asdict(v) for k, v in measured.items()})
+    LOOK_FIELDS_JSON.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
+    return LOOK_FIELDS_JSON
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--emit", choices=("python", "json"), help="emit measured LookField data")
     parser.add_argument("--out", type=Path, help="output path for --emit json")
-    parser.add_argument("--validate", action="store_true", help="report look fit error vs ARRI")
+    parser.add_argument("--validate", action="store_true", help="report look fit error vs the LUT")
+    parser.add_argument("--lut", type=Path, help="measure a single display LUT (.cube) instead of the ARRI batch")
+    parser.add_argument("--source", choices=tuple(_sources()), help="log encoding + camera gamut the LUT expects")
+    parser.add_argument("--name", help="look name to register (with --lut), e.g. eterna / s709 / v709")
+    parser.add_argument(
+        "--display-gamma", type=float, default=2.4, help="display EOTF power of the LUT output (default 2.4)"
+    )
+    parser.add_argument(
+        "--append-json",
+        action="store_true",
+        help="merge measured fields into dngscan_assets/look_fields.json (GUI/CLI pick them up on restart)",
+    )
     args = parser.parse_args()
+    if args.lut and (not args.source or not args.name):
+        parser.error("--lut requires --source and --name")
 
     run_self_tests()
     scene_srgb = build_scene_sweep()
     scene_xyz = scene_srgb @ np.asarray(dg.RGB_TO_XYZ["sRGB"]).T
     lab_a = render_agx_oklab(scene_xyz)
 
+    if args.lut:
+        jobs = {args.name: (f"{args.name} ({args.lut.name}, {args.source})", args.lut, args.source)}
+    else:
+        jobs = {look_id: (title, ASSETS / fname, enc) for look_id, (title, fname, enc) in LUTS.items()}
+
     measured: dict[str, LookField] = {}
-    for look_id, (title, fname, enc) in LUTS.items():
-        lut_path = ASSETS / fname
+    for look_id, (title, lut_path, enc) in jobs.items():
         if not lut_path.is_file():
             print(f"skip {look_id}: missing {lut_path}", file=sys.stderr)
             continue
-        lab_r = render_arri_oklab(scene_xyz, lut_path, enc)
+        lab_r = render_arri_oklab(scene_xyz, lut_path, enc, args.display_gamma)
         neutral_rows = np.arange(0, len(scene_srgb), 1 + 36 * 5)
         tint = np.abs(lab_r[neutral_rows, 1:]).max()
         print(f"\n===== {title} =====")
-        print(f"[sanity] max |a,b| on neutral ladder: {tint:.4f} (should be ~<0.01)")
+        print(f"[sanity] max |a,b| on neutral ladder: {tint:.4f} (should be ~<0.01; higher means wrong --source/--display-gamma)")
         field = measure_look_field(lab_a, lab_r)
         measured[look_id] = field
         print_report(title, field, lab_a, lab_r)
@@ -408,6 +502,10 @@ def main() -> int:
             print(f"wrote {args.out}")
         else:
             print(text)
+    if args.append_json and measured:
+        path = append_look_fields_json(measured)
+        print(f"\nregistered look(s) {sorted(measured)} in {path}")
+        print("重启 GUI / 重新运行 CLI 后即可在 --look 里使用。")
     return 0
 
 

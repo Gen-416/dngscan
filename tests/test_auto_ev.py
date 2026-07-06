@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import unittest
+from unittest.mock import patch
 
 from dngscan.auto_ev import (
     anchored_median_ev,
@@ -110,11 +111,52 @@ def test_resolve_export_ev_manual():
     assert auto is None
 
 
+def _minimal_bundle() -> RawBundle:
+    return RawBundle(
+        path=__file__,
+        raw_image=None,
+        raw_colors=None,
+        xyz_render=None,
+        render_scale=1.0,
+        scene_rec2020_render=None,
+        scene_scale=1.0,
+        white_level=16383,
+        black_levels=[1024.0, 1024.0, 1024.0, 1024.0],
+        camera_wb=[1.0, 1.0, 1.0, 1.0],
+        color_desc="RGBG",
+        raw_pattern=[[0, 1], [1, 2]],
+        camera_white_levels=[16383.0, 16383.0, 16383.0, 16383.0],
+    )
+
+
+def test_compute_auto_ev_boost_only_high_key():
+    analysis = _minimal_analysis(+1.5)
+    bundle = _minimal_bundle()
+    with patch("dngscan.auto_ev.max_safe_ev", return_value=3.0):
+        result = compute_auto_ev(bundle, analysis, "neutral", "p3")
+    assert result.ev_median_target < 0
+    assert result.ev == 0.0
+    assert result.ev_boost == 0.0
+    assert result.highlight_limited is False
+
+
+def test_compute_auto_ev_caps_upward_boost():
+    analysis = _minimal_analysis(-2.0)
+    bundle = _minimal_bundle()
+    with patch("dngscan.auto_ev.max_safe_ev", return_value=0.5):
+        result = compute_auto_ev(bundle, analysis, "agx", "p3")
+    assert result.ev == 0.5
+    assert result.highlight_limited is True
+    assert result.ev_median_target > 0.5
+
+
 class AutoEvTest(unittest.TestCase):
     test_parse_ev_auto_token = staticmethod(test_parse_ev_auto_token)
     test_median_align_ev_agx = staticmethod(test_median_align_ev_agx)
     test_median_align_ev_neutral = staticmethod(test_median_align_ev_neutral)
     test_resolve_export_ev_manual = staticmethod(test_resolve_export_ev_manual)
+    test_compute_auto_ev_boost_only_high_key = staticmethod(test_compute_auto_ev_boost_only_high_key)
+    test_compute_auto_ev_caps_upward_boost = staticmethod(test_compute_auto_ev_caps_upward_boost)
 
 
 if __name__ == "__main__":

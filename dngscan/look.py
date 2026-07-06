@@ -9,7 +9,9 @@ Tone stays with AgX; this layer is purely chromatic.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, fields as dataclass_fields
+from pathlib import Path
 from typing import Any
 
 try:
@@ -17,7 +19,10 @@ try:
 except Exception:  # pragma: no cover
     np = None  # type: ignore[assignment]
 
-LOOK_CHOICES = ("none", "classic", "reveal")
+# User-extendable look registry: fields measured from locally downloaded official LUTs
+# are appended here by `tools/extract_arri_look.py --append-json` — adding a new look
+# never requires editing code. The file lives next to the other local-only assets.
+LOOK_FIELDS_JSON = Path(__file__).resolve().parents[1] / "dngscan_assets" / "look_fields.json"
 
 
 @dataclass(frozen=True)
@@ -87,6 +92,35 @@ LOOK_FIELDS: dict[str, LookField] = {
         skin_chroma_scale=0.951,
     ),
 }
+
+
+def _load_json_fields() -> None:
+    """Merge user-measured looks from dngscan_assets/look_fields.json into the registry.
+
+    JSON entries win over same-named built-ins (re-measuring 'classic' overrides it).
+    Bad entries are skipped, never fatal — a broken JSON must not take the tool down."""
+    try:
+        raw = json.loads(LOOK_FIELDS_JSON.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(raw, dict):
+        return
+    allowed = {f.name for f in dataclass_fields(LookField)}
+    for name, params in raw.items():
+        if not isinstance(name, str) or not isinstance(params, dict) or name == "none":
+            continue
+        try:
+            kwargs = {k: (tuple(v) if isinstance(v, list) else v) for k, v in params.items() if k in allowed}
+            LOOK_FIELDS[name] = LookField(**kwargs)
+        except (TypeError, ValueError):
+            continue
+
+
+_load_json_fields()
+
+LOOK_CHOICES = ("none",) + tuple(LOOK_FIELDS)
+
+
 def _smoothstep(edge0: float, edge1: float, x: Any) -> Any:
     t = np.clip((x - edge0) / max(edge1 - edge0, 1e-9), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)

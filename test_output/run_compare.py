@@ -12,8 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import dngscan as dg
 
 FILES = [
-    Path("/Users/itoshikigen/Pictures/_SDI0133.DNG"),
-    Path("/Users/itoshikigen/Pictures/_SDI0165.DNG"),
+    Path("/Users/itoshikigen/Pictures/_SDI0199.DNG"),
+    Path("/Users/itoshikigen/Pictures/_SDI0200.DNG"),
+    Path("/Users/itoshikigen/Pictures/_SDI0206.DNG"),
 ]
 
 JOBS = [

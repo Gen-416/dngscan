@@ -109,6 +109,12 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
+    <div id="lookBlock" style="flex:0;min-width:170px">
+      <label>Look（仅 agx）</label>
+      <select id="look" title="AgX 之上的色度 look：实测官方 LUT 的 Oklab 几何场；纯色度、不改色调">
+LOOK_OPTIONS
+      </select>
+    </div>
     <div id="lookStrengthBlock" style="flex:0;min-width:180px;display:none">
       <label>Look 强度</label>
       <div class="evrow"><input type="range" id="lookStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="lookStrengthVal">1.00</span></div>
@@ -203,6 +209,7 @@ function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,mode,ev:$("#ev").value,quality:$("#quality").value,
     highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    look:$("#look").value,lookStrength:$("#lookStrength").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -216,6 +223,8 @@ function restoreSettings(){
   if(s.wb)$("#wb").value=s.wb;
   if(s.demosaic)$("#demosaic").value=s.demosaic;
   if(s.chroma)$("#chroma").value=s.chroma;
+  if(s.look&&[...$("#look").options].some(o=>o.value===s.look))$("#look").value=s.look;
+  if(s.lookStrength!==undefined)$("#lookStrength").value=s.lookStrength;
   if(s.format)$("#format").value=s.format;
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
@@ -249,6 +258,7 @@ function payload(){
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
     input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    look:$("#look").value,lookStrength:+$("#lookStrength").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -322,5 +332,19 @@ function setStatus(t,c){const s=$("#status");s.textContent=t;s.className=c||"";}
 """
 
 
+_LOOK_LABELS = {"none": "无", "classic": "Classic 709 几何", "reveal": "Reveal 709 几何"}
+
+
+def _look_options_html() -> str:
+    from ..look import LOOK_CHOICES
+
+    lines = []
+    for name in LOOK_CHOICES:
+        label = _LOOK_LABELS.get(name, name)
+        lines.append(f'        <option value="{name}">{label}</option>')
+    return "\n".join(lines)
+
+
 def render_page(init_dir: str) -> bytes:
-    return PAGE.replace("INIT_DIR", json.dumps(init_dir)).encode("utf-8")
+    html = PAGE.replace("INIT_DIR", json.dumps(init_dir)).replace("LOOK_OPTIONS", _look_options_html())
+    return html.encode("utf-8")

@@ -154,6 +154,28 @@ For WeChat/QQ delivery, use original-file or file transfer if you want the HDR g
 map to survive. Moments/feed-style uploads usually recompress to SDR and strip the
 gain map.
 
+## Looks (chromatic layer on top of AgX)
+
+`--look {classic,reveal,...}` applies a purely chromatic Oklab field on the agx render
+(`--look-strength 0–1.5`). The built-in `classic` / `reveal` fields are geometry measured
+from ARRI's official display LUTs (K1S1 and Reveal); no LUT data ships with the repo.
+
+**Add your own look** from any official Log→Rec.709 display LUT you download:
+
+```bash
+# example: Fujifilm ETERNA (F-Log → ETERNA BT.709 .cube from Fujifilm's site)
+python tools/extract_arri_look.py --lut path/to/eterna.cube --source flog \
+  --name eterna --validate --append-json
+```
+
+Supported `--source` encodings: `logc3, logc4, slog3, vlog, flog, flog2` (each
+self-tests its gray anchor and gamut white point). The measured field is written to
+`dngscan_assets/look_fields.json` (user-local, gitignored) and appears automatically in
+the CLI `--look` choices and the GUI dropdown on restart. Worthwhile official downloads:
+Fujifilm F-Log→ETERNA, Sony S-Log3→s709 (Venice look), Panasonic V-Log→V-709.
+The measurement compares the LUT against dngscan's AgX in Oklab with L-normalized
+saturation, so a look field captures the LUT's chromatic character without its tone.
+
 ## Tony McMapface LUT
 
 The `tony` mode needs `tony_mc_mapface.spi3d`. Keep it at
