@@ -14,7 +14,10 @@ Reference copies of `agx.c` and `agx.cl` are included under `dngscan_assets/` wi
 their original GPL notices intact.
 
 The AgX inset/outset primaries derive from Troy Sobotka's AgX family of view
-transforms.
+transforms. The Rec.2020-native inset/outset matrix values and the hue-mix
+approach follow the Blender AgX implementation by Eary Chow
+(https://github.com/EaryChow/AgX_LUT_Gen); the constants were computed by running
+that repository's published generation parameters.
 
 ## Tony McMapface LUT (Apache-2.0 OR MIT)
 

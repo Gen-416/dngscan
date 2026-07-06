@@ -11,6 +11,23 @@ python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx   # CLI
 ```
 
 ## Done recently
+- **P0/P1 batch (Blender AgX + priors + health + fixed WB)**:
+  - agx now uses the Rec.2020-native Blender/EaryChow inset (rotation baked in) and
+    non-inverse outset, reference order: guard rail → inset → log2 → sigmoid →
+    linearize → 40% hue-mix → outset in linear light. Gray-neutral verified; 0.18→0.18.
+    Deliberate deviations: adaptive log window + darktable sigmoid at gamma 2.2.
+  - Tony's Rec.709 input conversion + luminance-anchored negative fold confirmed
+    already in place (no change needed).
+  - `dngscan/metadata.py`: no-dependency TIFF/DNG tag reader (Make/Model/ISO/
+    AsShotNeutral). `dngscan/priors.py`: Sigma fp table from PhotonsToPhotos
+    (unity gain EV 7.29, FWC 74884 e-, PDR + read-noise curves). analyze() reports
+    e-/DN, noise floor in electrons, prior read noise/PDR; tone plan DR gently
+    bounded to prior ±1.5 EV.
+  - RAW health: lag-1 autocorrelation on the dual-green DIFFERENCE plane (scene
+    cancels; catches in-camera NR baked into raws) + missing-DN-code check.
+  - `--wb {camera,daylight}` + GUI select (preview cache keyed on wb). AsShot vs
+    daylight deviation always reported as light-source testimony.
+  - Mid-gray anchor check line after export.
 - **Demosaic on export**: `--demosaic` (default `auto` → DHT; non-Bayer → libraw
   native). Export only; preview stays on the fast half-size path. No noise reduction
   anywhere in the pipeline.

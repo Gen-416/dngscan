@@ -146,6 +146,13 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
+    <div style="flex:0;min-width:150px">
+      <label>白平衡</label>
+      <select id="wb" title="camera=相机 AsShot；daylight=固定日光配平（胶片式，整卷一致）">
+        <option value="camera">相机 AsShot</option>
+        <option value="daylight">日光固定配平</option>
+      </select>
+    </div>
     <div style="flex:0;min-width:170px">
       <label>去马赛克（画质·非降噪）</label>
       <select id="demosaic" title="彩色重建的插值算法，仅影响细节画质、仅全分辨率导出生效；本工具不做任何降噪">
@@ -215,7 +222,7 @@ function metricText(j){
 function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,mode,ev:$("#ev").value,quality:$("#quality").value,
-    highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -226,6 +233,7 @@ function restoreSettings(){
   if(s.quality)$("#quality").value=s.quality;
   if(s.highlight)$("#highlight").value=s.highlight;
   if(s.gamut)$("#gamut").value=s.gamut;
+  if(s.wb)$("#wb").value=s.wb;
   if(s.demosaic)$("#demosaic").value=s.demosaic;
   if(s.chroma)$("#chroma").value=s.chroma;
   if(s.format)$("#format").value=s.format;
@@ -258,7 +266,7 @@ function payload(){
   const input=$("#input").value.trim();
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
-    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    input,mode,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -603,14 +611,15 @@ def export_preview_jpeg(
     ev: float,
     quality: int,
     max_width: int = 1400,
+    wb: str = "camera",
 ) -> dict:
     dg.require_dependencies()
     stat = inp.stat()
-    key = (str(inp), int(stat.st_mtime_ns), highlight)
+    key = (str(inp), int(stat.st_mtime_ns), highlight, wb)
     with PREVIEW_CACHE_LOCK:
         cached = PREVIEW_CACHE.get(key)
     if cached is None:
-        bundle = dg.load_raw(inp, highlight, scene_half_size=True)
+        bundle = dg.load_raw(inp, highlight, scene_half_size=True, wb_mode=wb)
         analysis, _, _ = dg.analyze(bundle, 4)
         proxy_scene = downsample_mean(bundle.scene_rec2020_render, PROXY_LONG_EDGE)
         cached = PreviewEntry(bundle=bundle, analysis=analysis, proxy_scene=proxy_scene)
@@ -643,7 +652,10 @@ def export_preview_jpeg(
 
 def run_preview(params: dict) -> dict:
     inp, mode, highlight, gamut, _, ev, _, quality, _, _ = parse_job_params(params)
-    return export_preview_jpeg(inp, mode, highlight, gamut, ev, min(quality, 95))
+    wb = str(params.get("wb", "camera"))
+    if wb not in dg.WB_CHOICES:
+        raise ValueError(f"未知白平衡模式：{wb}")
+    return export_preview_jpeg(inp, mode, highlight, gamut, ev, min(quality, 95), wb=wb)
 
 
 def run_export(params: dict) -> dict:
@@ -654,7 +666,10 @@ def run_export(params: dict) -> dict:
 
     demosaic = str(params.get("demosaic", "auto"))
     chroma = str(params.get("chroma", "444"))
-    bundle = dg.load_raw(inp, highlight, demosaic=demosaic)
+    wb = str(params.get("wb", "camera"))
+    if wb not in dg.WB_CHOICES:
+        raise ValueError(f"未知白平衡模式：{wb}")
+    bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
     bundle.exposure_gain = dg.compute_exposure_gain(mode, ev)
 
     analysis = None

@@ -20,9 +20,10 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
     Faithful, but clips highlights (no shoulder); meant as a baseline, not a finished look.
   - `smart` — analysis-driven highlight shoulder + hue-preserving chroma easing,
     computed in the output color space with same-space luminance.
-  - `agx` — AgX view transform (inset → log2 → sigmoid → outset), run natively in
-    Rec.2020. The inset/outset channel crosstalk gives AgX's smooth highlight
-    desaturation instead of hard per-channel clipping.
+  - `agx` — AgX view transform with the Rec.2020-native Blender/EaryChow matrices:
+    inset (primaries rotation + attenuation) → log2 → sigmoid → linearize → 40%
+    hue-mix → outset in linear light. The channel crosstalk gives AgX's smooth
+    highlight desaturation and its signature hue flourish.
   - `tony` — the Tony McMapface display-referred 3D LUT.
 - **Hue-preserving gamut fit** — every mode ends by fitting out-of-gamut colors into the
   output space with Oklab adaptive-L0 clipping (hold hue, reduce chroma) instead of
@@ -64,6 +65,18 @@ A few choices worth knowing:
 - **Per-channel analysis** — full-well and clip thresholds are reconstructed per
   channel (empirical saturation pile when present, metadata white level as a
   fallback for unclipped scenes).
+- **Sensor priors (best-effort).** When the camera is in the priors table (currently
+  Sigma fp, from published PhotonsToPhotos measurements), the analysis reports
+  electron-domain figures (e-/DN gain, measured noise floor in e-, read-noise and PDR
+  priors) and gently bounds the tone plan's DR budget with the published PDR. Unknown
+  cameras fall back to pure single-frame estimates.
+- **RAW health check.** The dual-green difference plane (scene cancels, noise remains)
+  is tested for lag-1 spatial correlation — a per-frame verdict on noise reduction baked
+  into the raw file — plus a missing-DN-code (requantization) check. Diagnostics only.
+- **Fixed white balance option.** `--wb daylight` uses libraw's calibrated daylight
+  multipliers as a film-style fixed balance (consistent across a whole shoot); the
+  as-shot balance is always reported as light-source testimony, including its deviation
+  from daylight. Default remains the camera's as-shot balance.
 - **Analysis matches the export.** Render-dependent stats (luminance/EV distribution,
   gamut-overflow risk, and the auto tone plan's inputs) are measured on a render that uses
   the same demosaic and highlight mode as your export, so they describe the image you

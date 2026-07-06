@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from . import agx as agx_engine
+from . import metadata as dng_metadata
+from . import priors as sensor_priors
 
 IMPORT_ERRORS: list[str] = []
 
@@ -108,8 +110,10 @@ SRGB_TO_REC2020 = (
     else None
 )
 
-AGX_REFERENCE_INSET = agx_engine.REFERENCE_INSET
-AGX_INSET, AGX_OUTSET = agx_engine.build_inset_outset(SRGB_TO_REC2020, REC2020_TO_SRGB)
+# Rec.2020-native Blender AgX matrices (rotation baked into the inset; outset is
+# intentionally not its inverse). See dngscan/agx.py for provenance.
+AGX_INSET = agx_engine.AGX_INSET_REC2020
+AGX_OUTSET = agx_engine.AGX_OUTSET_REC2020
 
 
 @dataclass
@@ -130,6 +134,11 @@ class RawBundle:
     scene_highlight_mode: str = "clip"
     orientation_flip: int = 0
     exposure_gain: float = 1.0
+    wb_mode: str = "camera"
+    daylight_wb: list[float] | None = None
+    shot_make: str | None = None
+    shot_model: str | None = None
+    shot_iso: int | None = None
 
 
 @dataclass
@@ -171,6 +180,17 @@ class Analysis:
     bright_pixel_pct: float
     survivor_channel: str
     container_bits_est: int
+    # Priors layer (electron-domain calibration from public measurements) — all
+    # best-effort: None/nan when the camera or ISO is unknown.
+    prior_id: str | None = None
+    gain_e_per_dn: float | None = None
+    noise_floor_e: float | None = None
+    prior_read_noise_e: float | None = None
+    prior_pdr_ev: float | None = None
+    usable_dr_eff_ev: float = float("nan")
+    # RAW health diagnostics (demosaic-independent, from the CFA green plane)
+    health_lag1_corr: float = float("nan")
+    health_hist_empty_pct: float = float("nan")
 
 
 @dataclass
@@ -310,6 +330,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="JPEG 导出缓存的高光处理: clip=硬剪切；blend=libraw 高光混合；reconstruct=libraw 默认高光重建",
     )
     parser.add_argument(
+        "--wb",
+        choices=WB_CHOICES,
+        default="camera",
+        help="白平衡: camera=相机 AsShot（默认）；daylight=固定日光配平（胶片式，整卷一致，AsShot 仅作现场光源证词）",
+    )
+    parser.add_argument(
         "--demosaic",
         choices=DEMOSAIC_CHOICES,
         default="auto",
@@ -365,7 +391,26 @@ def highlight_mode_cn(name: str) -> str:
     }.get(name, name)
 
 
-def render_to_xyz(raw: Any, highlight_mode_name: str = "clip", demosaic: Any = None, half_size: bool = False) -> Any:
+WB_CHOICES = ("camera", "daylight")
+
+
+def wb_postprocess_kwargs(wb_mode: str, daylight_wb: list[float] | None) -> dict[str, Any]:
+    """Film-style fixed balance ('daylight', libraw's calibrated daylight multipliers)
+    or the as-shot camera balance (default). One dict so every render agrees."""
+    if wb_mode == "daylight" and daylight_wb is not None and any(v > 0 for v in daylight_wb[:3]):
+        return {"use_camera_wb": False, "user_wb": [float(v) for v in daylight_wb[:4]]}
+    if wb_mode not in WB_CHOICES:
+        raise ValueError(f"unknown wb mode: {wb_mode}")
+    return {"use_camera_wb": True}
+
+
+def render_to_xyz(
+    raw: Any,
+    highlight_mode_name: str = "clip",
+    demosaic: Any = None,
+    half_size: bool = False,
+    wb_kwargs: dict[str, Any] | None = None,
+) -> Any:
     if not hasattr(rawpy.ColorSpace, "XYZ"):
         raise RuntimeError("rawpy.ColorSpace.XYZ is not available; cannot make device-independent EV/gamut metrics")
     # Render-dependent analysis (luminance, EV, gamut risk) uses the SAME demosaic and
@@ -377,10 +422,10 @@ def render_to_xyz(raw: Any, highlight_mode_name: str = "clip", demosaic: Any = N
         half_size=half_size,
         demosaic_algorithm=(None if half_size else demosaic),
         no_auto_bright=True,
-        use_camera_wb=True,
         highlight_mode=rawpy_highlight_mode(highlight_mode_name),
         output_bps=16,
         user_flip=0,
+        **(wb_kwargs or {"use_camera_wb": True}),
     )
 
 
@@ -419,7 +464,11 @@ def resolve_demosaic_algorithm(raw: Any, requested: str) -> Any:
 
 
 def render_to_scene_rec2020(
-    raw: Any, highlight_mode_name: str = "clip", half_size: bool = False, demosaic: Any = None
+    raw: Any,
+    highlight_mode_name: str = "clip",
+    half_size: bool = False,
+    demosaic: Any = None,
+    wb_kwargs: dict[str, Any] | None = None,
 ) -> Any:
     if not hasattr(rawpy.ColorSpace, "Rec2020"):
         raise RuntimeError("rawpy.ColorSpace.Rec2020 is not available; cannot make scene-linear export buffer")
@@ -429,10 +478,10 @@ def render_to_scene_rec2020(
         half_size=half_size,
         demosaic_algorithm=(None if half_size else demosaic),
         no_auto_bright=True,
-        use_camera_wb=True,
         highlight_mode=rawpy_highlight_mode(highlight_mode_name),
         output_bps=16,
         user_flip=None,
+        **(wb_kwargs or {"use_camera_wb": True}),
     )
 
 
@@ -722,8 +771,9 @@ def build_tone_compression_plan(
     gamut_risk = analysis.gamut_out_pct.get(target_gamut, 0.0)
     gamut_term = clamp_float(gamut_risk / 6.0, 0.0, 1.0)
 
-    if math.isfinite(analysis.usable_dr_ev):
-        noise_limited_black = -analysis.usable_dr_ev - 1.5
+    plan_dr = analysis.usable_dr_eff_ev if math.isfinite(analysis.usable_dr_eff_ev) else analysis.usable_dr_ev
+    if math.isfinite(plan_dr):
+        noise_limited_black = -plan_dr - 1.5
     else:
         noise_limited_black = -12.0
     black_ev = max(ev_p1 - 0.25, noise_limited_black)
@@ -736,7 +786,7 @@ def build_tone_compression_plan(
         black_ev = white_ev - 5.5
 
     dynamic_range_ev = white_ev - black_ev
-    shadow_term = clamp_float((10.0 - analysis.usable_dr_ev) / 3.0, 0.0, 1.0) if math.isfinite(analysis.usable_dr_ev) else 0.5
+    shadow_term = clamp_float((10.0 - plan_dr) / 3.0, 0.0, 1.0) if math.isfinite(plan_dr) else 0.5
     shoulder_strength = max(clip_term, gamut_term)
     contrast = clamp_float(3.0 - 0.25 * shoulder_strength + 0.10 * clamp_float((9.0 - dynamic_range_ev) / 4.0, 0.0, 1.0), 2.45, 3.15)
     toe_power = clamp_float(1.5 - 0.25 * shadow_term, 1.15, 1.75)
@@ -1590,13 +1640,18 @@ def export_jpeg(
 
 
 def load_raw(
-    path: Path, scene_highlight_mode: str = "clip", scene_half_size: bool = False, demosaic: str = "auto"
+    path: Path,
+    scene_highlight_mode: str = "clip",
+    scene_half_size: bool = False,
+    demosaic: str = "auto",
+    wb_mode: str = "camera",
 ) -> RawBundle:
     if not path.exists():
         raise FileNotFoundError(f"Input file does not exist: {path}")
     if not path.is_file():
         raise FileNotFoundError(f"Input path is not a file: {path}")
     rawpy_highlight_mode(scene_highlight_mode)
+    shot = dng_metadata.read_dng_shot_info(path)
 
     try:
         with rawpy.imread(str(path)) as raw:
@@ -1613,13 +1668,17 @@ def load_raw(
             else:
                 white_level = int(white_level)
 
+            daylight_attr = getattr(raw, "daylight_whitebalance", None)
+            daylight_wb = [float(v) for v in daylight_attr] if daylight_attr is not None else None
+            wb_kwargs = wb_postprocess_kwargs(wb_mode, daylight_wb)
+
             demosaic_alg = resolve_demosaic_algorithm(raw, demosaic)
-            xyz_render = render_to_xyz(raw, scene_highlight_mode, demosaic_alg, scene_half_size)
+            xyz_render = render_to_xyz(raw, scene_highlight_mode, demosaic_alg, scene_half_size, wb_kwargs)
             if xyz_render.ndim != 3 or xyz_render.shape[2] < 3:
                 raise RuntimeError("XYZ render did not produce a 3-channel image")
 
             scene_rec2020_render = render_to_scene_rec2020(
-                raw, scene_highlight_mode, scene_half_size, demosaic_alg
+                raw, scene_highlight_mode, scene_half_size, demosaic_alg, wb_kwargs
             )
             if scene_rec2020_render.ndim != 3 or scene_rec2020_render.shape[2] < 3:
                 raise RuntimeError("scene Rec.2020 render did not produce a 3-channel image")
@@ -1664,6 +1723,11 @@ def load_raw(
         camera_white_levels=[float(x) for x in camera_white_levels],
         scene_highlight_mode=scene_highlight_mode,
         orientation_flip=orientation_flip,
+        wb_mode=wb_mode,
+        daylight_wb=daylight_wb,
+        shot_make=shot.make,
+        shot_model=shot.model,
+        shot_iso=shot.iso,
     )
 
 
@@ -2162,6 +2226,87 @@ def estimate_container_bits(white_level: int, raw_image: Any) -> int:
     return 0
 
 
+def raw_health_metrics(bundle: RawBundle, channel_ids: list[int], labels: dict[int, str]) -> tuple[float, float]:
+    """Demosaic-independent checks for in-camera processing baked into the raw.
+
+    lag-1 correlation: residuals of the darkest CFA green tiles should be ~white noise;
+    clearly positive correlation means spatial filtering was applied before writing the
+    file. histogram emptiness: missing DN codes in the dense value range indicate the
+    data was rescaled/requantized in camera. Heuristics — reported, never acted on."""
+    green_ids = [cid for cid in channel_ids if labels[cid].startswith("G")]
+    if not green_ids:
+        return float("nan"), float("nan")
+    pattern = np.asarray(bundle.raw_pattern)
+    if pattern.ndim != 2:
+        return float("nan"), float("nan")
+    ph, pw = pattern.shape
+    positions = [pos for cid in green_ids for pos in cfa_positions_for_channel(bundle, cid)]
+    if not positions:
+        return float("nan"), float("nan")
+    yoff, xoff = positions[0]
+    plane = bundle.raw_image[yoff::ph, xoff::pw].astype(np.float32, copy=False)
+
+    # Scene cancellation: the two green CFA planes sample (nearly) the same image, so
+    # their difference is almost pure sensor noise. White noise -> lag-1 ~ 0; in-camera
+    # spatial filtering leaves the residual noise correlated. Measuring on the raw plane
+    # itself would pick up scene texture and always read "smoothed".
+    lag1 = float("nan")
+    if len(positions) >= 2:
+        y2, x2 = positions[1]
+        plane2 = bundle.raw_image[y2::ph, x2::pw].astype(np.float32, copy=False)
+        h = min(plane.shape[0], plane2.shape[0])
+        w = min(plane.shape[1], plane2.shape[1])
+        diff = plane[:h, :w] - plane2[:h, :w]
+        tile = SNR_TILE
+        h2 = (h // tile) * tile
+        w2 = (w // tile) * tile
+        if h2 >= tile and w2 >= tile:
+            tiles = diff[:h2, :w2].reshape(h2 // tile, tile, w2 // tile, tile).transpose(0, 2, 1, 3)
+            tiles = tiles.reshape(-1, tile, tile)
+            # Prefer flat tiles (low |diff| variance) to sidestep edge/aliasing residue.
+            variances = tiles.var(axis=(1, 2))
+            count = max(16, int(math.ceil(variances.size * 0.25)))
+            flattest = np.argsort(variances)[: min(count, 768)]
+            sel = tiles[flattest] - tiles[flattest].mean(axis=(1, 2), keepdims=True)
+            num_h = np.sum(sel[:, :, :-1] * sel[:, :, 1:], dtype=np.float64)
+            den_h = math.sqrt(
+                float(np.sum(sel[:, :, :-1] ** 2, dtype=np.float64))
+                * float(np.sum(sel[:, :, 1:] ** 2, dtype=np.float64))
+            )
+            num_v = np.sum(sel[:, :-1, :] * sel[:, 1:, :], dtype=np.float64)
+            den_v = math.sqrt(
+                float(np.sum(sel[:, :-1, :] ** 2, dtype=np.float64))
+                * float(np.sum(sel[:, 1:, :] ** 2, dtype=np.float64))
+            )
+            if den_h > 0 and den_v > 0:
+                lag1 = float(0.5 * (num_h / den_h + num_v / den_v))
+
+    vals = plane.reshape(-1).astype(np.int64)
+    p05, p60 = np.percentile(vals, [5.0, 60.0])
+    lo, hi = int(p05), int(max(p60, p05 + 32))
+    hist_empty = float("nan")
+    if hi - lo >= 32:
+        counts = np.bincount(np.clip(vals, lo, hi) - lo, minlength=hi - lo + 1)
+        interior = counts[1:-1]
+        if interior.size:
+            hist_empty = float(np.mean(interior == 0) * 100.0)
+    return lag1, hist_empty
+
+
+def raw_health_verdict_cn(lag1: float, hist_empty: float) -> str:
+    if not math.isfinite(lag1):
+        return "n/a"
+    if lag1 < 0.08:
+        verdict = "干净(近白噪声)"
+    elif lag1 < 0.20:
+        verdict = "轻度空间处理迹象"
+    else:
+        verdict = "明显平滑(疑似机内降噪)"
+    if math.isfinite(hist_empty) and hist_empty > 5.0:
+        verdict += "; 直方图有梳齿(疑似机内缩放)"
+    return verdict
+
+
 def analyze(bundle: RawBundle, margin: int) -> tuple[Analysis, Any, Any]:
     raw_image = bundle.raw_image
     raw_colors = bundle.raw_colors
@@ -2190,6 +2335,24 @@ def analyze(bundle: RawBundle, margin: int) -> tuple[Analysis, Any, Any]:
     usable_dr = math.log2(1.0 / max(nf, NOISE_DR_EPS))
     snr_curves, snr1_dr, snr1_stop = compute_snr_curves(bundle, channel_ids, labels, channel_fullwell)
     gamut_pct, bright_pct = compute_gamut_metrics(bundle.xyz_render, bundle.render_scale, y)
+
+    # Priors layer: electron-domain calibration from public measurements (best-effort).
+    prior = sensor_priors.find_priors(bundle.shot_make, bundle.shot_model)
+    prior_id = prior["id"] if prior else None
+    gain_e = sensor_priors.gain_e_per_dn(prior, bundle.shot_iso) if prior and bundle.shot_iso else None
+    prior_rn_e = sensor_priors.read_noise_e(prior, bundle.shot_iso) if prior and bundle.shot_iso else None
+    prior_pdr = sensor_priors.pdr_ev(prior, bundle.shot_iso) if prior and bundle.shot_iso else None
+    noise_e = None
+    if gain_e is not None:
+        mean_black = float(np.mean([bundle.black_levels[c] for c in channel_ids if c < len(bundle.black_levels)] or [0.0]))
+        noise_e = float(nf * max(fullwell - mean_black, 1.0) * gain_e)
+    # Effective DR for downstream tone planning: the empirical single-frame estimate,
+    # gently bounded by the published PDR when available (never replaced by it).
+    if prior_pdr is not None and math.isfinite(usable_dr):
+        usable_dr_eff = clamp_float(usable_dr, prior_pdr - 1.5, prior_pdr + 1.5)
+    else:
+        usable_dr_eff = usable_dr
+    health_lag1, health_hist = raw_health_metrics(bundle, channel_ids, labels)
 
     survivor_id = min(channel_ids, key=lambda cid: clip_pct.get(cid, float("inf")))
     analysis = Analysis(
@@ -2230,6 +2393,14 @@ def analyze(bundle: RawBundle, margin: int) -> tuple[Analysis, Any, Any]:
         bright_pixel_pct=bright_pct,
         survivor_channel=labels[survivor_id],
         container_bits_est=estimate_container_bits(bundle.white_level, raw_image),
+        prior_id=prior_id,
+        gain_e_per_dn=gain_e,
+        noise_floor_e=noise_e,
+        prior_read_noise_e=prior_rn_e,
+        prior_pdr_ev=prior_pdr,
+        usable_dr_eff_ev=usable_dr_eff,
+        health_lag1_corr=health_lag1,
+        health_hist_empty_pct=health_hist,
     )
     return analysis, y, ev
 
@@ -2748,6 +2919,50 @@ def darktable_guidance_lines(bundle: RawBundle, analysis: Analysis) -> list[str]
     return lines
 
 
+def priors_line_cn(bundle: RawBundle, analysis: Analysis) -> str:
+    ident = f"{bundle.shot_make or '?'} {bundle.shot_model or '?'}".strip()
+    iso = f"ISO{bundle.shot_iso}" if bundle.shot_iso else "ISO?"
+    if analysis.prior_id is None:
+        return f"机型/先验: {ident} @ {iso}（无先验表条目，全部使用单帧实测）"
+    parts = [f"机型/先验: {analysis.prior_id} @ {iso}"]
+    if analysis.gain_e_per_dn is not None:
+        parts.append(f"增益≈{analysis.gain_e_per_dn:.2f} e⁻/DN")
+    if analysis.noise_floor_e is not None:
+        parts.append(f"实测噪声底≈{analysis.noise_floor_e:.1f} e⁻")
+    if analysis.prior_read_noise_e is not None:
+        parts.append(f"读出噪声先验={analysis.prior_read_noise_e:.2f} e⁻")
+    if analysis.prior_pdr_ev is not None:
+        parts.append(f"PDR先验={analysis.prior_pdr_ev:.2f} EV")
+    if math.isfinite(analysis.usable_dr_eff_ev) and abs(analysis.usable_dr_eff_ev - analysis.usable_dr_ev) > 0.01:
+        parts.append(f"计划用DR={analysis.usable_dr_eff_ev:.2f}(先验收敛)")
+    return "  ".join(parts)
+
+
+def health_line_cn(analysis: Analysis) -> str:
+    if not math.isfinite(analysis.health_lag1_corr):
+        return "RAW 健康度: n/a"
+    return (
+        f"RAW 健康度: 暗部lag1相关={analysis.health_lag1_corr:.3f}"
+        f"  直方图空码={analysis.health_hist_empty_pct:.1f}%"
+        f" → {raw_health_verdict_cn(analysis.health_lag1_corr, analysis.health_hist_empty_pct)}"
+    )
+
+
+def wb_line_cn(bundle: RawBundle) -> str:
+    mode = "日光固定配平" if bundle.wb_mode == "daylight" else "相机 AsShot"
+    line = f"白平衡: {mode}"
+    cam = bundle.camera_wb
+    day = bundle.daylight_wb
+    if cam and day and len(cam) >= 3 and len(day) >= 3 and all(v > 0 for v in (cam[0], cam[2], day[0], day[2], cam[1], day[1])):
+        # AsShot vs daylight, normalized to green: the scene's own light-source testimony.
+        dev_r = math.log2((cam[0] / cam[1]) / (day[0] / day[1]))
+        dev_b = math.log2((cam[2] / cam[1]) / (day[2] / day[1]))
+        line += f"  AsShot相对日光: R{dev_r:+.2f}EV B{dev_b:+.2f}EV"
+        if max(abs(dev_r), abs(dev_b)) > 0.8:
+            line += "（明显偏离日光：人工/混合光源）"
+    return line
+
+
 def summary_lines(bundle: RawBundle, analysis: Analysis) -> list[str]:
     black = padded_channel_values(bundle.black_levels, analysis.channel_ids)
     wb = padded_channel_values(bundle.camera_wb, analysis.channel_ids)
@@ -2794,6 +3009,9 @@ def summary_lines(bundle: RawBundle, analysis: Analysis) -> list[str]:
         f"画面 DR p1->p99.9: {analysis.ev_dr_p1_p999:.2f} 档  左端压底: {analysis.ev_floor_hit_pct:.2f}% 原始p1={analysis.ev_raw_p1:.2f}",
         f"中位亮度相对 18% 灰: {analysis.median_vs_gray_ev:+.2f} EV",
         f"RAW 噪声底: {analysis.noise_floor:.6g}  可用 DR 上限: {analysis.usable_dr_ev:.2f} 档",
+        priors_line_cn(bundle, analysis),
+        health_line_cn(analysis),
+        wb_line_cn(bundle),
         "SNR=1 可用 DR: " + format_snr_dr(analysis.snr1_dr),
         "高亮色域越界 %: "
         + " ".join(f"{name}={analysis.gamut_out_pct[name]:.3f}" for name in ("sRGB", "P3", "Rec2020")),
@@ -2824,13 +3042,19 @@ def print_report(
         print(f"CSV 指标: {csv_path}")
     if jpeg_path is not None:
         print(f"JPEG 图像: {jpeg_path}")
+        wb_label = "日光固定配平" if bundle.wb_mode == "daylight" else "相机白平衡"
         print(
             f"JPEG 设置: scene-linear Rec.2020 起点；8-bit {output_gamut_label(output_gamut)}（TPDF 抖动）；"
-            "相机白平衡；无自动增亮；"
+            f"{wb_label}；无自动增亮；"
             f"曝光锚定增益={bundle.exposure_gain:.3f}（EV 补偿={jpeg_ev:+.2f}，固定常数非自适应）；"
             f"模式={jpeg_mode}；高光处理={highlight_mode_cn(bundle.scene_highlight_mode)}；"
-            f"质量={jpeg_quality}；4:4:4 色度采样；"
+            f"质量={jpeg_quality}；"
             f"ICC={'已嵌入' if jpeg_icc_embedded else '未嵌入'}"
+        )
+        anchored = analysis.median_vs_gray_ev + math.log2(max(bundle.exposure_gain, EPS))
+        print(
+            f"中灰锚定校验: 锚定后画面中位亮度相对 18% 灰 {anchored:+.2f} EV"
+            + ("（暗调场景，符合拍摄意图即可）" if anchored < -1.0 else "")
         )
         print(f"JPEG 策略: {jpeg_policy_cn(jpeg_mode, output_gamut)}")
         plan_line = jpeg_tone_plan_cn(bundle, analysis, jpeg_mode, tone_plan, output_gamut)
@@ -2841,13 +3065,13 @@ def print_report(
 def jpeg_policy_cn(mode: str, output_gamut: str = "srgb") -> str:
     label = output_gamut_label(output_gamut)
     if mode == "neutral":
-        return f"neutral: scene-linear Rec.2020 缓冲；相机白平衡；无自动增亮；高光处理按导出选项；不做 tone mapping，转 {label} 时裁切；4:4:4 色度采样"
+        return f"neutral: scene-linear Rec.2020 缓冲；白平衡按导出选项；无自动增亮；高光处理按导出选项；不做 tone mapping，转 {label} 时裁切；4:4:4 色度采样"
     if mode == "smart":
-        return f"smart: scene-linear 转 linear {label}；相机白平衡；无自动增亮；高光处理按导出选项；同空间亮度锚定；基于色域/剪切/高光/色度分析驱动 knee，做 C1 光滑高光肩与色度收敛，亮度轴裁回不歪色相；4:4:4 色度采样"
+        return f"smart: scene-linear 转 linear {label}；白平衡按导出选项；无自动增亮；高光处理按导出选项；同空间亮度锚定；基于色域/剪切/高光/色度分析驱动 knee，做 C1 光滑高光肩与色度收敛，亮度轴裁回不歪色相；4:4:4 色度采样"
     if mode == "agx":
-        return f"agx: scene-linear Rec.2020 工作空间；相机白平衡；无自动增亮；高光处理按导出选项；分析全图 Y 自动设定 AgX 黑白相对曝光与曲线；Rec.2020 inset→log2→sigmoid→outset 通道串扰，最后转 {label}；4:4:4 色度采样"
+        return f"agx: scene-linear Rec.2020 工作空间；白平衡按导出选项；无自动增亮；高光处理按导出选项；分析全图 Y 自动设定 AgX 黑白相对曝光与曲线；Rec.2020 inset→log2→sigmoid→outset 通道串扰，最后转 {label}；4:4:4 色度采样"
     if mode == "tony":
-        return f"tony: scene-linear Rec.2020 缓冲转 linear sRGB stimulus；相机白平衡；无自动增亮；高光处理按导出选项；LUT 前做亮度锚定高光刺激量与色度压缩，再采样 Tony McMapface 3D LUT，最后色彩管理到 {label}；4:4:4 色度采样"
+        return f"tony: scene-linear Rec.2020 缓冲转 linear sRGB stimulus；白平衡按导出选项；无自动增亮；高光处理按导出选项；LUT 前做亮度锚定高光刺激量与色度压缩，再采样 Tony McMapface 3D LUT，最后色彩管理到 {label}；4:4:4 色度采样"
     return ""
 
 
@@ -2924,6 +3148,18 @@ def csv_row(
         "median_vs_18pct_gray_ev": analysis.median_vs_gray_ev,
         "raw_noise_floor_single_frame": analysis.noise_floor,
         "usable_dr_noise_limited_upper_bound_stops": analysis.usable_dr_ev,
+        "camera_make": bundle.shot_make or "",
+        "camera_model": bundle.shot_model or "",
+        "iso": bundle.shot_iso if bundle.shot_iso else "",
+        "wb_mode": bundle.wb_mode,
+        "prior_id": analysis.prior_id or "",
+        "gain_e_per_dn": analysis.gain_e_per_dn if analysis.gain_e_per_dn is not None else "",
+        "noise_floor_e": analysis.noise_floor_e if analysis.noise_floor_e is not None else "",
+        "prior_read_noise_e": analysis.prior_read_noise_e if analysis.prior_read_noise_e is not None else "",
+        "prior_pdr_ev": analysis.prior_pdr_ev if analysis.prior_pdr_ev is not None else "",
+        "usable_dr_eff_ev": analysis.usable_dr_eff_ev,
+        "health_lag1_corr": analysis.health_lag1_corr,
+        "health_hist_empty_pct": analysis.health_hist_empty_pct,
         "snr1_dr_R": analysis.snr1_dr.get("R", float("nan")),
         "snr1_dr_G": analysis.snr1_dr.get("G", float("nan")),
         "snr1_dr_B": analysis.snr1_dr.get("B", float("nan")),
@@ -3073,7 +3309,7 @@ def main(argv: list[str]) -> int:
         scan_requested = bool(args.scan or args.out is not None or (args.jpeg is None and args.csv is None))
         out_path = args.out if args.out is not None else (default_png_path(args.path) if scan_requested else None)
 
-        bundle = load_raw(args.path, args.highlight_mode, demosaic=args.demosaic)
+        bundle = load_raw(args.path, args.highlight_mode, demosaic=args.demosaic, wb_mode=args.wb)
         bundle.exposure_gain = compute_exposure_gain(args.jpeg_mode, args.ev)
         analysis, y, ev = analyze(bundle, args.margin)
         if out_path is not None:

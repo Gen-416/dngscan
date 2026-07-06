@@ -13,15 +13,33 @@ except Exception:  # pragma: no cover - handled by dngscan.core import checks
 
 EPS = 1e-12
 
-# Reference AgX inset/outset from Troy Sobotka's AgX family, expressed for
-# sRGB/Rec.709 primaries. dngscan conjugates this matrix into Rec.2020 so the
-# view transform can run in the same wide scene-linear space as the RAW buffer.
-REFERENCE_INSET = (
+# Blender AgX (EaryChow) Rec.2020-native inset/outset, computed at float64 precision by
+# running the reference generation expressions from EaryChow/AgX_LUT_Gen
+# (AgXBaseRec2020.py + working_space.py via colour-science):
+#   inset:  primaries_rotate=[2.13976149, -1.22827335, -3.05174246] degrees,
+#           primaries_scale=[0.32965205, 0.28051336, 0.12475368]
+#   outset: no rotation, primaries_scale=[0.32317438, 0.28325605, 0.0374326]
+# Cross-checked against the matrix printed in the EaryChow/AgX README. The rotation baked
+# into the inset is AgX's "flourish" (e.g. red drifts toward orange, countering Abney);
+# the outset deliberately does NOT invert it, so AGX_OUTSET_REC2020 != inv(AGX_INSET_REC2020).
+AGX_INSET_REC2020 = (
     np.array(  # type: ignore[union-attr]
         [
-            [0.842479062253094, 0.0784335999999992, 0.0792237451477643],
-            [0.0423282422610123, 0.878468636469772, 0.0791661274605434],
-            [0.0423756549057051, 0.0784336, 0.879142973793104],
+            [0.8566271562887795, 0.0951212454025350, 0.0482515983086858],
+            [0.1373189722835516, 0.7612419870090806, 0.1014390407073675],
+            [0.1118982080451796, 0.0767994145625176, 0.8113023773923032],
+        ],
+        dtype=np.float64,
+    )
+    if np is not None
+    else None
+)
+AGX_OUTSET_REC2020 = (
+    np.array(  # type: ignore[union-attr]
+        [
+            [1.1271005696301188, -0.1106066385782607, -0.0164939310518590],
+            [-0.1413297544213532, 1.1578236854732127, -0.0164939310518590],
+            [-0.1413297544213531, -0.1106066385782606, 1.2519363929996135],
         ],
         dtype=np.float64,
     )
@@ -29,13 +47,10 @@ REFERENCE_INSET = (
     else None
 )
 
-
-def build_inset_outset(srgb_to_rec2020: Any, rec2020_to_srgb: Any) -> tuple[Any, Any]:
-    if np is None or srgb_to_rec2020 is None or rec2020_to_srgb is None or REFERENCE_INSET is None:
-        return None, None
-    inset = (srgb_to_rec2020 @ REFERENCE_INSET @ rec2020_to_srgb).astype(np.float64)
-    inset = (inset / inset.sum(axis=1, keepdims=True)).astype(np.float64)
-    return inset, np.linalg.inv(inset).astype(np.float64)
+# Fraction of the per-channel hue shift kept after the curve (Blender AgX mix_percent=40:
+# lerp 60% of the hue back toward the pre-formation angle so the deliberate primaries
+# rotation is not amplified by per-channel "notorious six" skew).
+AGX_HUE_KEEP = 0.4
 
 
 def _clamp_float(value: float, low: float, high: float) -> float:
@@ -212,8 +227,66 @@ def compress_into_gamut(rgb: Any) -> Any:
     return rgb_offset * ratio[:, None]
 
 
+def _rgb_to_hsv(rgb: Any) -> Any:
+    r, g, b = rgb[:, 0], rgb[:, 1], rgb[:, 2]
+    maxc = np.max(rgb, axis=1)
+    minc = np.min(rgb, axis=1)
+    delta = maxc - minc
+    h = np.zeros_like(maxc)
+    mask = delta > EPS
+    rmask = mask & (maxc == r)
+    gmask = mask & (maxc == g) & ~rmask
+    bmask = mask & ~rmask & ~gmask
+    h[rmask] = ((g[rmask] - b[rmask]) / delta[rmask]) % 6.0
+    h[gmask] = (b[gmask] - r[gmask]) / delta[gmask] + 2.0
+    h[bmask] = (r[bmask] - g[bmask]) / delta[bmask] + 4.0
+    h = (h / 6.0) % 1.0
+    s = np.zeros_like(maxc)
+    positive = maxc > EPS
+    s[positive] = delta[positive] / maxc[positive]
+    return np.stack([h, s, maxc], axis=1)
+
+
+def _hsv_to_rgb(hsv: Any) -> Any:
+    h = (hsv[:, 0] % 1.0) * 6.0
+    s = np.clip(hsv[:, 1], 0.0, None)
+    v = hsv[:, 2]
+    i = np.floor(h).astype(np.int32) % 6
+    f = h - np.floor(h)
+    p = v * (1.0 - s)
+    q = v * (1.0 - s * f)
+    t = v * (1.0 - s * (1.0 - f))
+    out = np.empty((hsv.shape[0], 3), dtype=np.float32)
+    for idx, (cr, cg, cb) in enumerate([(v, t, p), (q, v, p), (p, v, t), (p, q, v), (t, p, v), (v, p, q)]):
+        m = i == idx
+        if np.any(m):
+            out[m, 0] = cr[m]
+            out[m, 1] = cg[m]
+            out[m, 2] = cb[m]
+    return out
+
+
+def _mix_hue(rgb_linear: Any, pre_hue: Any, keep: float) -> Any:
+    """Lerp the post-curve hue back toward the pre-formation hue along the shortest arc,
+    keeping `keep` of the per-channel shift (Blender AgX's mix_percent hack)."""
+    hsv = _rgb_to_hsv(rgb_linear)
+    delta = hsv[:, 0] - pre_hue
+    delta -= np.rint(delta)
+    hsv[:, 0] = (pre_hue + np.float32(keep) * delta) % 1.0
+    return _hsv_to_rgb(hsv)
+
+
 def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: Any) -> Any:
-    """AgX in Rec.2020 working space: inset -> log2 -> sigmoid curve -> outset -> gamma."""
+    """AgX per Blender/EaryChow reference order, in Rec.2020 working space:
+
+    guard rail -> inset (rotation+attenuation) -> log2 window -> sigmoid ->
+    linearize -> hue mix (keep 40% of per-channel shift) -> outset in LINEAR light.
+
+    Deviations from the reference, both deliberate: the log2 window and sigmoid
+    parameters come from the scene analysis plan (reference uses fixed [-10,+6.5] and
+    fixed contrast), and linearization uses the darktable-derived 2.2 pivot the curve
+    was parameterized with (reference encodes 2.4).
+    """
     params = curve_params(
         round(plan.black_ev, 3),
         round(plan.white_ev, 3),
@@ -223,8 +296,10 @@ def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: An
     )
     rgb = compress_into_gamut(rgb_rec2020.astype(np.float32, copy=False))
     inset = _apply_matrix3(rgb, inset_matrix)
+    pre_hue = _rgb_to_hsv(np.maximum(inset, 0.0))[:, 0]
     log_encoded = (np.log2(np.maximum(inset / 0.18, EPS)) - float(params["black_ev"])) / float(params["range_ev"])
     log_encoded = np.clip(log_encoded, 0.0, 1.0)
     curved = apply_curve(log_encoded, params)
-    curved = _apply_matrix3(curved, outset_matrix)
-    return np.power(np.maximum(curved, 0.0), float(params["gamma"])).astype(np.float32)
+    linear = np.power(np.maximum(curved, 0.0), float(params["gamma"]))
+    linear = _mix_hue(linear, pre_hue, AGX_HUE_KEEP)
+    return _apply_matrix3(linear, outset_matrix).astype(np.float32)
