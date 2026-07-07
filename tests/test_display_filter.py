@@ -102,3 +102,25 @@ class DisplayFilterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_slog3_anchors(self) -> None:
+        import numpy as np
+
+        from dngscan.log_encode import SLOG3_MIDGRAY, slog3_encode
+
+        self.assertAlmostEqual(float(slog3_encode(np.array([0.18]))[0]), SLOG3_MIDGRAY, places=4)
+        # official 90% reflectance point
+        self.assertAlmostEqual(float(slog3_encode(np.array([0.9]))[0]), 0.5845, places=3)
+        # linear toe continuity at the join
+        lo = float(slog3_encode(np.array([0.011249]))[0])
+        hi = float(slog3_encode(np.array([0.011251]))[0])
+        self.assertLess(abs(hi - lo), 1e-3)
+
+    def test_sony_lc709a_registered(self) -> None:
+        from dngscan.display_filter import DISPLAY_FILTERS, filter_available
+
+        spec = DISPLAY_FILTERS["sony_lc709a"]
+        self.assertEqual(spec.feed, "scene")
+        self.assertEqual(spec.source, "slog3")
+        if filter_available("sony_lc709a"):
+            self.assertTrue(spec.cube.is_file())

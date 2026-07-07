@@ -12,7 +12,7 @@ from typing import Any
 
 from ._deps import np
 from .color import apply_rgb_matrix3, bt1886_eotf, rec2020_to_output, rec2020_to_srgb, rec2020_to_xyz, srgb_to_output
-from .log_encode import XYZ_TO_RWG, encode_for_source
+from .log_encode import XYZ_TO_RWG, XYZ_TO_SGAMUT3CINE, encode_for_source
 from .lut_io import get_cube, sample_cube
 
 _ASSETS = Path(__file__).resolve().parents[1] / "dngscan_assets" / "vendor_luts"
@@ -54,6 +54,17 @@ DISPLAY_FILTERS: dict[str, DisplayFilter] = {
         display_gamma=2.4,
         feed="scene",
     ),
+    # Sony's official "Type A" = Alexa-style 709 rendering, published for exactly the
+    # "match ARRI on set" use case. A camera OUTPUT transform like IPP2: feed it scene.
+    "sony_lc709a": DisplayFilter(
+        label="Sony LC-709TypeA (Alexa-style 709)",
+        cube=_ASSETS / "sony_look_profiles" / "2_SGamut3CineSLog3_To_LC-709TypeA.cube",
+        source="slog3",
+        input_space="sgamut3cine",
+        display_eotf="bt1886",
+        display_gamma=2.4,
+        feed="scene",
+    ),
 }
 
 FILTER_CHOICES: tuple[str, ...] = ("none",) + tuple(DISPLAY_FILTERS)
@@ -72,6 +83,9 @@ def _linear_to_encoder_input(rec2020_linear: np.ndarray, spec: DisplayFilter) ->
     if spec.input_space == "rwg":
         xyz = rec2020_to_xyz(rec2020_linear)
         return apply_rgb_matrix3(xyz, XYZ_TO_RWG)
+    if spec.input_space == "sgamut3cine":
+        xyz = rec2020_to_xyz(rec2020_linear)
+        return apply_rgb_matrix3(xyz, XYZ_TO_SGAMUT3CINE)
     raise ValueError(f"unknown input_space: {spec.input_space}")
 
 
