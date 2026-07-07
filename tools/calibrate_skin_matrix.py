@@ -1,32 +1,53 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Calibrate a demo Sigma fp -> ARRI-style scene-linear skin prefilter.
+"""Calibrate a demo Sigma fp -> ARRI-style scene-linear pre-AgX prefilter.
 
 This is an offline tool: it writes a small JSON preset consumed by
 `dngscan.scene_transform`.  Runtime JPEG export never imports this script and
 does not need scipy/colour-science.
 
 Data notes / replacement points:
-- ALEV3 SSF: replace BUILTIN_ALEV3_SSF with digitized values from
+- ALEV3 SSF: default CSV is dngscan_assets/spectral/arri_alexa_alev3_ssf_digitized.csv.
+  Replace it with digitized values from
   https://library.imaging.org/admin/apis/public/api/ist/website/downloadArticle/cic/23/1/art00029
-- IMX410 QE: replace BUILTIN_IMX410_QE with a digitized ZWO ASI2400MC RGB QE
-  curve.  That curve is a bare sensor/CFA proxy, not Sigma fp's final stack.
-- Sigma fp hot mirror: demo uses a sigmoid red cutoff from DPReview user
-  reports quoted in the handoff (lambda_c=660nm, width=15nm).  Replace with a
-  measured transmission curve when available.
-- Skin spectra: the built-in generator is only a low-dimensional demo skin
-  manifold.  Pass --skin-csv for a real public skin reflectance data set.
+- IMX410 QE: default CSV is dngscan_assets/spectral/sony_imx410_qe_zwo_asi2400mc_digitized.csv.
+  Replace it with a digitized ZWO ASI2400MC RGB QE curve.  That curve is a bare
+  sensor/CFA proxy, not Sigma fp's final stack.
+- Sigma fp hot mirror: default CSV is a sigmoid 420..660nm model. Replace it
+  with a measured transmission curve when available, or pass --ir-transmission-csv.
+- Skin spectra: default CSV is still an analytic demo skin manifold.  Pass
+  --skin-csv or --skin-dir for a licensed/public skin reflectance data set.
+- Colour standards: pass --standard-data colour after installing colour-science
+  for tabulated D55/A illuminants and CIE 1931 2-degree CMFs.
+
+The important implementation detail is that the final region matrices are fitted
+in the same domain where dngscan applies them: white-balanced scene-linear
+Rec.2020.  The SSF/QE curves first build simple per-camera colourimetric profiles
+from broad reflectance spectra; the ARRI-like matrix then fits the residual
+IMX410-profiled Rec.2020 response toward the ALEV-profiled Rec.2020 response
+inside each target material family.  A separate look gain can amplify that
+residual without changing the neutral-axis constraint.
 """
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
 
 WL = np.arange(400.0, 701.0, 10.0, dtype=np.float64)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DATA_DIR = PROJECT_ROOT / "dngscan_assets" / "spectral"
+
+DEFAULT_ALEXA_SSF_CSV = "arri_alexa_alev3_ssf_digitized.csv"
+DEFAULT_IMX410_QE_CSV = "sony_imx410_qe_zwo_asi2400mc_digitized.csv"
+DEFAULT_IR_TRANSMISSION_CSV = "sigma_fp_hot_mirror_model_420_660.csv"
+DEFAULT_SKIN_CSV = "demo_skin_reflectance.csv"
+DEFAULT_CYAN_CSV = "demo_cyan_reflectance.csv"
 
 
 # Rough digitized-style curves on WL.  These are intentionally easy to replace:
@@ -57,6 +78,18 @@ XYZ_TO_REC2020 = np.array(
     ],
     dtype=np.float64,
 )
+REC2020_TO_XYZ = np.linalg.inv(XYZ_TO_REC2020)
+D65_XYZ = REC2020_TO_XYZ @ np.ones(3, dtype=np.float64)
+
+BRADFORD = np.array(
+    [
+        [0.8951, 0.2664, -0.1614],
+        [-0.7502, 1.7135, 0.0367],
+        [0.0389, -0.0685, 1.0296],
+    ],
+    dtype=np.float64,
+)
+BRADFORD_INV = np.linalg.inv(BRADFORD)
 
 
 def sigmoid_ir_cut(wavelengths: np.ndarray, cutoff_nm: float, width_nm: float) -> np.ndarray:
@@ -72,8 +105,21 @@ def blackbody_spd(wavelengths_nm: np.ndarray, temp_k: float) -> np.ndarray:
     return spd / np.max(spd)
 
 
-def illuminant_spd(name: str) -> np.ndarray:
+def illuminant_spd(name: str, standard_data: str = "auto", csv_path: Path | None = None) -> np.ndarray:
+    if csv_path is not None:
+        return load_spd_csv(csv_path)
     key = name.upper()
+    if standard_data in {"auto", "colour"}:
+        try:
+            import colour  # type: ignore[import-not-found]
+
+            shape = colour.SpectralShape(400, 700, 10)
+            sd = colour.SDS_ILLUMINANTS[key].copy().align(shape)
+            values = np.asarray(sd.values, dtype=np.float64)
+            return values / max(float(np.max(values)), 1e-12)
+        except Exception:
+            if standard_data == "colour":
+                raise
     if key == "A":
         return blackbody_spd(WL, 2856.0)
     if key == "D65":
@@ -81,6 +127,22 @@ def illuminant_spd(name: str) -> np.ndarray:
     if key == "D55":
         return blackbody_spd(WL, 5500.0)
     raise ValueError(f"unknown illuminant: {name}")
+
+
+def cie_1931_cmf(wavelengths_nm: np.ndarray, standard_data: str = "auto", csv_path: Path | None = None) -> np.ndarray:
+    if csv_path is not None:
+        return load_curve_csv(csv_path)
+    if standard_data in {"auto", "colour"}:
+        try:
+            import colour  # type: ignore[import-not-found]
+
+            shape = colour.SpectralShape(400, 700, 10)
+            cmfs = colour.MSDS_CMFS["CIE 1931 2 Degree Standard Observer"].copy().align(shape)
+            return np.asarray(cmfs.values, dtype=np.float64)
+        except Exception:
+            if standard_data == "colour":
+                raise
+    return cie_1931_cmf_approx(wavelengths_nm)
 
 
 def cie_1931_cmf_approx(wavelengths_nm: np.ndarray) -> np.ndarray:
@@ -103,6 +165,11 @@ def cie_1931_cmf_approx(wavelengths_nm: np.ndarray) -> np.ndarray:
     z_t2 = np.where(w < 459.0, (w - 459.0) * 0.0385, (w - 459.0) * 0.0725)
     z = 1.217 * np.exp(-0.5 * z_t1 * z_t1) + 0.681 * np.exp(-0.5 * z_t2 * z_t2)
     return np.stack([x, y, z], axis=1)
+
+
+def integrate_spectral(values: np.ndarray) -> np.ndarray:
+    integrate = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+    return integrate(values, WL, axis=0)
 
 
 def demo_skin_spectra() -> np.ndarray:
@@ -131,41 +198,230 @@ def demo_cyan_spectra() -> np.ndarray:
     return np.asarray(spectra, dtype=np.float64)
 
 
+def demo_neutral_spectra() -> np.ndarray:
+    spectra: list[np.ndarray] = []
+    center = (WL - 550.0) / 150.0
+    for level in np.linspace(0.08, 0.82, 9):
+        for slope in np.linspace(-0.10, 0.10, 5):
+            for curve in np.linspace(-0.035, 0.035, 3):
+                spectra.append(np.clip(level * (1.0 + slope * center + curve * (center * center - 0.35)), 0.02, 0.95))
+    return np.asarray(spectra, dtype=np.float64)
+
+
+def demo_colour_spectra() -> np.ndarray:
+    spectra: list[np.ndarray] = []
+    for center in np.linspace(430.0, 660.0, 10):
+        for width in (28.0, 45.0, 70.0):
+            bump = 0.035 + 0.68 * np.exp(-0.5 * ((WL - center) / width) ** 2)
+            spectra.append(np.clip(bump, 0.015, 0.82))
+    # Add foliage-like and warm fabric/wood-like families so camera profiles are not
+    # fitted only on skin/cyan samples.
+    for edge in np.linspace(500.0, 560.0, 5):
+        spectra.append(np.clip(0.04 + 0.50 / (1.0 + np.exp(-(WL - edge) / 24.0)), 0.02, 0.72))
+    for red_bias in np.linspace(0.25, 0.60, 5):
+        spectra.append(np.clip(0.10 + red_bias / (1.0 + np.exp(-(WL - 585.0) / 42.0)), 0.03, 0.80))
+    return np.asarray(spectra, dtype=np.float64)
+
+
+def camera_profile_spectra(skin: np.ndarray, cyan: np.ndarray) -> np.ndarray:
+    return np.concatenate([demo_neutral_spectra(), demo_colour_spectra(), skin, cyan], axis=0)
+
+
+def _try_float(value: str) -> float | None:
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _read_csv_rows(path: Path) -> list[list[str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as fh:
+        rows = []
+        for row in csv.reader(fh):
+            cleaned = [cell.strip() for cell in row]
+            if not cleaned or not any(cleaned):
+                continue
+            if cleaned[0].startswith("#"):
+                continue
+            rows.append(cleaned)
+    if not rows:
+        raise ValueError(f"{path} contains no CSV data")
+    return rows
+
+
+def _row_is_numeric(row: list[str], min_cols: int = 2) -> bool:
+    return sum(_try_float(cell) is not None for cell in row) >= min_cols
+
+
+def _normalise_header(cell: str) -> str:
+    return cell.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _find_header_index(header: list[str], candidates: tuple[str, ...]) -> int | None:
+    names = [_normalise_header(cell) for cell in header]
+    for candidate in candidates:
+        key = _normalise_header(candidate)
+        for index, name in enumerate(names):
+            if name == key or name.endswith("_" + key):
+                return index
+    return None
+
+
+def _numeric_matrix(rows: list[list[str]]) -> np.ndarray:
+    numeric_rows: list[list[float]] = []
+    for row in rows:
+        nums = [_try_float(cell) for cell in row]
+        if all(value is not None for value in nums):
+            numeric_rows.append([float(value) for value in nums if value is not None])
+    if not numeric_rows:
+        raise ValueError("CSV contains no fully numeric rows")
+    width = min(len(row) for row in numeric_rows)
+    return np.asarray([row[:width] for row in numeric_rows], dtype=np.float64)
+
+
+def _interpolate_curve(wavelengths: np.ndarray, values: np.ndarray) -> np.ndarray:
+    order = np.argsort(wavelengths)
+    wavelengths = wavelengths[order]
+    values = values[order]
+    return np.interp(WL, wavelengths, values)
+
+
 def load_curve_csv(path: Path) -> np.ndarray:
-    data = np.genfromtxt(path, delimiter=",", comments="#")
+    """Load wavelength,R,G,B CSV and resample to 400..700nm/10nm."""
+    rows = _read_csv_rows(path)
+    header = rows[0] if not _row_is_numeric(rows[0], 4) else None
+    data_rows = rows[1:] if header is not None else rows
+    if header is not None:
+        wl_i = _find_header_index(header, ("wavelength", "wavelength_nm", "lambda", "nm", "wl"))
+        r_i = _find_header_index(header, ("r", "red"))
+        g_i = _find_header_index(header, ("g", "green"))
+        b_i = _find_header_index(header, ("b", "blue"))
+        if None not in (wl_i, r_i, g_i, b_i):
+            numeric: list[tuple[float, float, float, float]] = []
+            for row in data_rows:
+                try:
+                    numeric.append((float(row[wl_i]), float(row[r_i]), float(row[g_i]), float(row[b_i])))  # type: ignore[index]
+                except (IndexError, ValueError):
+                    continue
+            if len(numeric) >= 2:
+                data = np.asarray(numeric, dtype=np.float64)
+                return np.stack([_interpolate_curve(data[:, 0], data[:, i]) for i in (1, 2, 3)], axis=1)
+    data = _numeric_matrix(data_rows)
     if data.ndim != 2 or data.shape[1] < 4:
         raise ValueError(f"{path} must contain wavelength,R,G,B columns")
-    order = np.argsort(data[:, 0])
-    data = data[order]
-    return np.stack([np.interp(WL, data[:, 0], data[:, i]) for i in (1, 2, 3)], axis=1)
+    return np.stack([_interpolate_curve(data[:, 0], data[:, i]) for i in (1, 2, 3)], axis=1)
+
+
+def load_spd_csv(path: Path, normalize: bool = True) -> np.ndarray:
+    """Load wavelength,value CSV and resample to 400..700nm/10nm."""
+    rows = _read_csv_rows(path)
+    header = rows[0] if not _row_is_numeric(rows[0], 2) else None
+    data_rows = rows[1:] if header is not None else rows
+    if header is not None:
+        wl_i = _find_header_index(header, ("wavelength", "wavelength_nm", "lambda", "nm", "wl"))
+        value_i = _find_header_index(header, ("value", "transmission", "reflectance", "power", "spd"))
+        if wl_i is not None and value_i is not None:
+            pairs: list[tuple[float, float]] = []
+            for row in data_rows:
+                try:
+                    pairs.append((float(row[wl_i]), float(row[value_i])))
+                except (IndexError, ValueError):
+                    continue
+            if len(pairs) >= 2:
+                data = np.asarray(pairs, dtype=np.float64)
+                values = _interpolate_curve(data[:, 0], data[:, 1])
+                return values / max(float(np.max(values)), 1e-12) if normalize else values
+    data = _numeric_matrix(data_rows)
+    if data.shape[1] < 2:
+        raise ValueError(f"{path} must contain wavelength,value columns")
+    values = _interpolate_curve(data[:, 0], data[:, 1])
+    return values / max(float(np.max(values)), 1e-12) if normalize else values
 
 
 def load_spectra_csv(path: Path) -> np.ndarray:
-    data = np.genfromtxt(path, delimiter=",", comments="#")
+    """Load reflectance spectra from a wide or tidy CSV.
+
+    Accepted forms:
+    - wide: wavelength,sample_a,sample_b,...
+    - tidy: sample,wavelength,reflectance
+    - single: wavelength,reflectance
+    - numeric matrix: either rows are samples on WL, or first column is wavelength.
+    """
+    rows = _read_csv_rows(path)
+    header = rows[0] if not _row_is_numeric(rows[0], 2) else None
+    data_rows = rows[1:] if header is not None else rows
+    if header is not None:
+        wl_i = _find_header_index(header, ("wavelength", "wavelength_nm", "lambda", "nm", "wl"))
+        value_i = _find_header_index(header, ("reflectance", "value", "transmission"))
+        sample_i = _find_header_index(header, ("sample", "name", "material", "id"))
+        if wl_i is not None and value_i is not None and sample_i is not None:
+            groups: dict[str, list[tuple[float, float]]] = {}
+            for row in data_rows:
+                try:
+                    groups.setdefault(row[sample_i], []).append((float(row[wl_i]), float(row[value_i])))
+                except (IndexError, ValueError):
+                    continue
+            spectra = [_interpolate_curve(np.asarray([p[0] for p in pairs]), np.asarray([p[1] for p in pairs]))
+                       for pairs in groups.values() if len(pairs) >= 2]
+            if spectra:
+                return np.clip(np.asarray(spectra, dtype=np.float64), 0.0, 1.5)
+        if wl_i is not None:
+            sample_columns = [i for i in range(len(header)) if i != wl_i]
+            numeric: list[list[float]] = []
+            for row in data_rows:
+                values: list[float] = []
+                try:
+                    values.append(float(row[wl_i]))
+                    values.extend(float(row[i]) for i in sample_columns)
+                except (IndexError, ValueError):
+                    continue
+                numeric.append(values)
+            if len(numeric) >= 2 and sample_columns:
+                data = np.asarray(numeric, dtype=np.float64)
+                spectra = [_interpolate_curve(data[:, 0], data[:, i]) for i in range(1, data.shape[1])]
+                return np.clip(np.asarray(spectra, dtype=np.float64), 0.0, 1.5)
+    data = _numeric_matrix(data_rows)
     if data.ndim != 2:
         raise ValueError(f"{path} must be a 2D CSV")
-    if data.shape[0] == WL.size + 1:
-        wavelengths = data[1:, 0]
-        return np.stack([np.interp(WL, wavelengths, data[1:, i]) for i in range(1, data.shape[1])], axis=0)
-    if data.shape[1] == WL.size + 1:
-        wavelengths = data[0, 1:]
-        return np.stack([np.interp(WL, wavelengths, data[i, 1:]) for i in range(1, data.shape[0])], axis=0)
+    if data.shape[1] >= 2 and np.nanmin(data[:, 0]) <= 405.0 and np.nanmax(data[:, 0]) >= 695.0:
+        return np.clip(np.stack([_interpolate_curve(data[:, 0], data[:, i]) for i in range(1, data.shape[1])], axis=0), 0.0, 1.5)
     if data.shape[1] == WL.size:
-        return data.astype(np.float64, copy=False)
+        return np.clip(data.astype(np.float64, copy=False), 0.0, 1.5)
     raise ValueError(f"{path} must use 31 samples at 400..700nm or include wavelength headers")
+
+
+def load_spectra_dir(path: Path) -> np.ndarray:
+    spectra: list[np.ndarray] = []
+    skipped: list[str] = []
+    for item in sorted(path.glob("*.csv")):
+        try:
+            loaded = load_spectra_csv(item)
+        except ValueError as exc:
+            skipped.append(f"{item.name}: {exc}")
+            continue
+        spectra.append(loaded)
+    if not spectra:
+        detail = "; ".join(skipped[:3])
+        raise ValueError(f"{path} contains no usable .csv spectra" + (f" ({detail})" if detail else ""))
+    if skipped:
+        print(f"warning: skipped {len(skipped)} non-spectral CSV file(s) in {path}", file=sys.stderr)
+    return np.concatenate(spectra, axis=0)
 
 
 def integrate_response(reflectance: np.ndarray, illuminant: np.ndarray, ssf: np.ndarray) -> np.ndarray:
     weighted = reflectance[:, :, None] * illuminant[None, :, None] * ssf[None, :, :]
-    integrate = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
-    rgb = integrate(weighted, WL, axis=1)
-    white = integrate(illuminant[:, None] * ssf, WL, axis=0)
+    rgb = integrate_spectral(weighted.swapaxes(0, 1))
+    white = integrate_spectral(illuminant[:, None] * ssf)
     return rgb / np.maximum(white[None, :], 1e-12)
 
 
-def spectra_to_rec2020(reflectance: np.ndarray, illuminant: np.ndarray) -> np.ndarray:
-    cmf = cie_1931_cmf_approx(WL)
-    xyz = integrate_response(reflectance, illuminant, cmf)
+def spectra_to_rec2020(reflectance: np.ndarray, illuminant: np.ndarray, cmf: np.ndarray) -> np.ndarray:
+    weighted = reflectance[:, :, None] * illuminant[None, :, None] * cmf[None, :, :]
+    xyz = integrate_spectral(weighted.swapaxes(0, 1))
+    white = integrate_spectral(illuminant[:, None] * cmf)
+    xyz = xyz / max(white[1], 1e-12)
+    src_white = white / max(white[1], 1e-12)
+    xyz = chromatic_adapt_xyz(xyz, src_white, D65_XYZ)
     rgb = xyz @ XYZ_TO_REC2020.T
     return np.clip(rgb, 1e-8, None)
 
@@ -188,6 +444,78 @@ def constrained_row_sum_fit(src: np.ndarray, dst: np.ndarray) -> np.ndarray:
     return matrix
 
 
+def chromatic_adapt_xyz(xyz: np.ndarray, src_white: np.ndarray, dst_white: np.ndarray) -> np.ndarray:
+    src_lms = BRADFORD @ src_white
+    dst_lms = BRADFORD @ dst_white
+    scale = np.diag(dst_lms / np.maximum(src_lms, 1e-12))
+    matrix = BRADFORD_INV @ scale @ BRADFORD
+    return xyz @ matrix.T
+
+
+def camera_to_rec2020_matrix(camera_rgb: np.ndarray, target_rec2020: np.ndarray) -> np.ndarray:
+    return constrained_row_sum_fit(camera_rgb, target_rec2020)
+
+
+def camera_rec2020_response(reflectance: np.ndarray, illuminant: np.ndarray, ssf: np.ndarray, camera_to_rec2020: np.ndarray) -> np.ndarray:
+    camera_rgb = integrate_response(reflectance, illuminant, ssf)
+    return np.clip(camera_rgb @ camera_to_rec2020.T, 1e-8, None)
+
+
+def strengthen_matrix(matrix: np.ndarray, look_gain: float) -> np.ndarray:
+    out = np.eye(3, dtype=np.float64) + float(look_gain) * (matrix - np.eye(3, dtype=np.float64))
+    # Numerical guard: neutral axis must remain neutral after amplification.
+    row_sum = out.sum(axis=1)
+    out[:, 1] += 1.0 - row_sum
+    return out
+
+
+def controlled_cyan_matrix(red_pull: float = 0.12, blue_push: float = 0.04) -> np.ndarray:
+    """ARRI-like cyan counter-axis: reduce red in cyan/blue-green materials while
+    lightly supporting blue.  This is a bounded look matrix, not an SSF residual,
+    because the rough cyan spectra make the residual fit unstable."""
+    red_pull = float(red_pull)
+    blue_push = float(blue_push)
+    return np.asarray(
+        [
+            [1.0 + red_pull, -red_pull, 0.0],
+            [0.0, 1.0, 0.0],
+            [-blue_push, 0.0, 1.0 + blue_push],
+        ],
+        dtype=np.float64,
+    )
+
+
+def controlled_cool_balance_matrix(red_pull: float = 0.35, blue_push: float = 0.12) -> np.ndarray:
+    red_pull = float(red_pull)
+    blue_push = float(blue_push)
+    return np.asarray(
+        [
+            [1.0 + red_pull, -red_pull, 0.0],
+            [0.0, 1.0, 0.0],
+            [-blue_push, 0.0, 1.0 + blue_push],
+        ],
+        dtype=np.float64,
+    )
+
+
+def build_fixed_region(
+    name: str,
+    matrix: np.ndarray,
+    mu_rg_bg: tuple[float, float],
+    cov_rg_bg: tuple[tuple[float, float], tuple[float, float]],
+    scale: float,
+    region_strength: float,
+) -> dict:
+    return {
+        "name": name,
+        "matrix": [[round(float(v), 8) for v in row] for row in matrix],
+        "mu_rg_bg": [float(mu_rg_bg[0]), float(mu_rg_bg[1])],
+        "cov_rg_bg": [[float(v) for v in row] for row in cov_rg_bg],
+        "scale": float(scale),
+        "strength": float(region_strength),
+    }
+
+
 def mask_params(src: np.ndarray, scale: float) -> tuple[list[float], list[list[float]]]:
     chroma = np.stack([src[:, 0] / np.maximum(src[:, 1], 1e-12), src[:, 2] / np.maximum(src[:, 1], 1e-12)], axis=1)
     mu = np.mean(chroma, axis=0)
@@ -196,11 +524,23 @@ def mask_params(src: np.ndarray, scale: float) -> tuple[list[float], list[list[f
     return [float(mu[0]), float(mu[1])], [[float(cov[0, 0]), float(cov[0, 1])], [float(cov[1, 0]), float(cov[1, 1])]]
 
 
-def build_region(name: str, spectra: np.ndarray, illuminant: np.ndarray, fp_ssf: np.ndarray, alexa_ssf: np.ndarray, scale: float) -> dict:
-    fp = integrate_response(spectra, illuminant, fp_ssf)
-    alexa = integrate_response(spectra, illuminant, alexa_ssf)
-    matrix = constrained_row_sum_fit(fp, alexa)
-    mask_rgb = spectra_to_rec2020(spectra, illuminant)
+def build_region(
+    name: str,
+    spectra: np.ndarray,
+    illuminant: np.ndarray,
+    fp_ssf: np.ndarray,
+    alexa_ssf: np.ndarray,
+    fp_to_rec2020: np.ndarray,
+    alexa_to_rec2020: np.ndarray,
+    scale: float,
+    look_gain: float,
+    region_strength: float,
+    matrix_override: np.ndarray | None = None,
+) -> dict:
+    fp = camera_rec2020_response(spectra, illuminant, fp_ssf, fp_to_rec2020)
+    alexa = camera_rec2020_response(spectra, illuminant, alexa_ssf, alexa_to_rec2020)
+    matrix = matrix_override if matrix_override is not None else strengthen_matrix(constrained_row_sum_fit(fp, alexa), look_gain)
+    mask_rgb = fp
     mu, cov = mask_params(mask_rgb, scale)
     return {
         "name": name,
@@ -208,35 +548,229 @@ def build_region(name: str, spectra: np.ndarray, illuminant: np.ndarray, fp_ssf:
         "mu_rg_bg": [round(v, 8) for v in mu],
         "cov_rg_bg": [[round(v, 10) for v in row] for row in cov],
         "scale": scale,
-        "strength": 1.0,
+        "strength": region_strength,
     }
+
+
+def existing_region_windows(path: Path, key: str) -> dict[str, dict]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        regions = raw.get("transforms", raw)[key].get("regions", [])
+    except Exception:
+        return {}
+    out: dict[str, dict] = {}
+    for region in regions:
+        if isinstance(region, dict) and "name" in region:
+            out[str(region["name"])] = region
+    return out
+
+
+def preserve_window(region: dict, existing: dict[str, dict]) -> dict:
+    old = existing.get(str(region.get("name", "")))
+    if not old:
+        return region
+    for field in ("mu_rg_bg", "cov_rg_bg", "scale"):
+        if field in old:
+            region[field] = old[field]
+    return region
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calibrate dngscan scene-transform skin/cyan preset.")
     parser.add_argument("--out", type=Path, default=Path("dngscan/scene_transform_presets.json"))
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR,
+                        help="Directory containing calibration CSV inputs.")
     parser.add_argument("--illuminant", choices=("D55", "D65", "A"), default="D55")
+    parser.add_argument("--standard-data", choices=("auto", "colour", "analytic"), default="auto",
+                        help="Use colour-science standard CMF/illuminant data when available; analytic fallback keeps the tool self-contained.")
+    parser.add_argument("--illuminant-csv", type=Path,
+                        help="Optional wavelength,value SPD CSV overriding --illuminant/--standard-data.")
+    parser.add_argument("--cmf-csv", type=Path,
+                        help="Optional wavelength,X,Y,Z CSV overriding colour-science/analytic CMF.")
     parser.add_argument("--ir-cutoff", type=float, default=660.0)
     parser.add_argument("--ir-width", type=float, default=15.0)
-    parser.add_argument("--mask-scale", type=float, default=2.5)
+    parser.add_argument("--ir-transmission-csv", type=Path,
+                        help="Optional wavelength,transmission CSV overriding the sigmoid Sigma fp hot-mirror model.")
+    parser.add_argument("--mask-scale", type=float, default=2.3)
+    parser.add_argument("--skin-mask-scale", type=float)
+    parser.add_argument("--cyan-mask-scale", type=float)
+    parser.add_argument("--look-gain", type=float, default=2.35,
+                        help="Amplify the physically fitted residual from identity while preserving neutral axis.")
+    parser.add_argument("--skin-look-gain", type=float)
+    parser.add_argument("--cyan-look-gain", type=float)
+    parser.add_argument("--skin-region-strength", type=float, default=1.15)
+    parser.add_argument("--cyan-region-strength", type=float, default=0.90)
+    parser.add_argument("--cyan-mode", choices=("cool", "spectral"), default="cool",
+                        help="cool=bounded ARRI-like cyan counter-axis; spectral=raw SSF residual fit.")
+    parser.add_argument("--cyan-red-pull", type=float, default=0.12)
+    parser.add_argument("--cyan-blue-push", type=float, default=0.04)
+    parser.add_argument("--background-cool", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--background-region-strength", type=float, default=0.42)
+    parser.add_argument("--background-red-pull", type=float, default=0.35)
+    parser.add_argument("--background-blue-push", type=float, default=0.12)
+    parser.add_argument("--preserve-existing-windows", action="store_true",
+                        help="Keep existing mu/cov/scale windows in --out and update only matrices/strengths.")
     parser.add_argument("--alexa-ssf-csv", type=Path)
     parser.add_argument("--imx410-qe-csv", type=Path)
     parser.add_argument("--skin-csv", type=Path)
+    parser.add_argument("--skin-dir", type=Path)
     parser.add_argument("--cyan-csv", type=Path)
+    parser.add_argument("--cyan-dir", type=Path)
+    parser.add_argument("--profile-csv", type=Path,
+                        help="Optional extra reflectance CSV for fitting camera-to-Rec2020 profiles.")
+    parser.add_argument("--profile-dir", type=Path,
+                        help="Optional directory of extra reflectance CSVs for camera profile fitting.")
+    parser.add_argument("--write-bootstrap-csv", type=Path,
+                        help="Write the current rough built-in spectral data as replaceable CSV files and exit.")
     return parser.parse_args()
+
+
+def default_data_path(data_dir: Path, filename: str) -> Path | None:
+    path = data_dir / filename
+    return path if path.is_file() else None
+
+
+def choose_path(explicit: Path | None, data_dir: Path, filename: str) -> Path | None:
+    if explicit is not None:
+        return explicit
+    return default_data_path(data_dir, filename)
+
+
+def source_label(path: Path | None, fallback: str) -> str:
+    if path is None:
+        return fallback
+    try:
+        return str(path.resolve().relative_to(PROJECT_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def load_spectra_input(csv_path: Path | None, dir_path: Path | None, fallback: np.ndarray) -> tuple[np.ndarray, str]:
+    parts: list[np.ndarray] = []
+    sources: list[str] = []
+    if csv_path is not None:
+        parts.append(load_spectra_csv(csv_path))
+        sources.append(source_label(csv_path, str(csv_path)))
+    if dir_path is not None:
+        parts.append(load_spectra_dir(dir_path))
+        sources.append(source_label(dir_path, str(dir_path)))
+    if parts:
+        return np.concatenate(parts, axis=0), ", ".join(sources)
+    return fallback, "built-in analytic generator"
+
+
+def write_curve_csv(path: Path, data: np.ndarray, columns: tuple[str, str, str, str] = ("wavelength_nm", "R", "G", "B")) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(columns)
+        for wl, row in zip(WL, data, strict=True):
+            writer.writerow([f"{wl:.0f}", *(f"{float(v):.8g}" for v in row)])
+
+
+def write_spd_csv(path: Path, values: np.ndarray, value_name: str = "value") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["wavelength_nm", value_name])
+        for wl, value in zip(WL, values, strict=True):
+            writer.writerow([f"{wl:.0f}", f"{float(value):.8g}"])
+
+
+def write_spectra_csv(path: Path, spectra: np.ndarray, sample_prefix: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["wavelength_nm", *[f"{sample_prefix}_{i:03d}" for i in range(spectra.shape[0])]])
+        for col, wl in enumerate(WL):
+            writer.writerow([f"{wl:.0f}", *(f"{float(v):.8g}" for v in spectra[:, col])])
+
+
+def write_bootstrap_csv_bundle(path: Path, ir_cutoff: float, ir_width: float) -> None:
+    """Export current rough built-ins as editable CSV starting points."""
+    path.mkdir(parents=True, exist_ok=True)
+    write_curve_csv(path / DEFAULT_ALEXA_SSF_CSV, BUILTIN_ALEV3_SSF)
+    write_curve_csv(path / DEFAULT_IMX410_QE_CSV, BUILTIN_IMX410_QE)
+    write_spd_csv(path / DEFAULT_IR_TRANSMISSION_CSV, sigmoid_ir_cut(WL, ir_cutoff, ir_width), "transmission")
+    write_spectra_csv(path / DEFAULT_SKIN_CSV, demo_skin_spectra(), "skin")
+    write_spectra_csv(path / DEFAULT_CYAN_CSV, demo_cyan_spectra(), "cyan")
+    (path / "README.md").write_text(
+        "# dngscan spectral calibration CSVs\n\n"
+        "These CSV files are replaceable calibration inputs for `tools/calibrate_skin_matrix.py`.\n"
+        "They intentionally keep measured or digitized spectral data outside the algorithm.\n\n"
+        "Current files are bootstrap-quality approximations, not authoritative measurements:\n\n"
+        "- `arri_alexa_alev3_ssf_digitized.csv`: rough ALEV3/ALEXA SSF digitization target. Replace with points digitized from Figure 1 of Leonhardt & Brendel, CIC 2015: https://library.imaging.org/admin/apis/public/api/ist/website/downloadArticle/cic/23/1/art00029\n"
+        "- `sony_imx410_qe_zwo_asi2400mc_digitized.csv`: rough IMX410 RGB QE proxy. Replace with points digitized from the ZWO ASI2400MC QE graph/specification: https://www.zwoastro.com/product/asi2400mc-pro/\n"
+        "- `sigma_fp_hot_mirror_model_420_660.csv`: sigmoid hot-mirror transmission model, 420nm blue-side and 660nm red-side cutoff assumption. Replace with measured transmission if available. Kolari teardown confirms the fp conversion/filter-stack context: https://kolarivision.com/the-sigma-fp-disassembly-and-teardown/\n"
+        "- `demo_skin_reflectance.csv`: analytic demo skin reflectance manifold. Replace with a licensed/public skin reflectance library such as Hyper-Skin if you have permission to use the released data: https://github.com/hyperspectral-skin/Hyper-Skin-2023\n"
+        "- `demo_cyan_reflectance.csv`: analytic cyan/blue-green material manifold. Replace or augment with measured surface spectra. The MLS dataset is one open source of real measured object/illumination spectra under CC BY-SA 4.0: https://github.com/visillect/mls-dataset\n\n"
+        "Accepted formats include wide `wavelength_nm,sample_1,sample_2,...`, tidy `sample,wavelength_nm,reflectance`, and single `wavelength_nm,value` CSVs.\n",
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
     args = parse_args()
-    alexa_ssf = load_curve_csv(args.alexa_ssf_csv) if args.alexa_ssf_csv else BUILTIN_ALEV3_SSF
-    imx410_qe = load_curve_csv(args.imx410_qe_csv) if args.imx410_qe_csv else BUILTIN_IMX410_QE
-    transmission = sigmoid_ir_cut(WL, args.ir_cutoff, args.ir_width)
-    fp_ssf = imx410_qe * transmission[:, None]
-    illum = illuminant_spd(args.illuminant)
-    skin = load_spectra_csv(args.skin_csv) if args.skin_csv else demo_skin_spectra()
-    cyan = load_spectra_csv(args.cyan_csv) if args.cyan_csv else demo_cyan_spectra()
+    if args.write_bootstrap_csv is not None:
+        write_bootstrap_csv_bundle(args.write_bootstrap_csv, args.ir_cutoff, args.ir_width)
+        print(f"wrote bootstrap CSV bundle to {args.write_bootstrap_csv}")
+        return 0
 
+    data_dir = args.data_dir
+    alexa_path = choose_path(args.alexa_ssf_csv, data_dir, DEFAULT_ALEXA_SSF_CSV)
+    imx410_path = choose_path(args.imx410_qe_csv, data_dir, DEFAULT_IMX410_QE_CSV)
+    ir_path = choose_path(args.ir_transmission_csv, data_dir, DEFAULT_IR_TRANSMISSION_CSV)
+    skin_path = args.skin_csv if args.skin_csv is not None else (None if args.skin_dir else default_data_path(data_dir, DEFAULT_SKIN_CSV))
+    cyan_path = args.cyan_csv if args.cyan_csv is not None else (None if args.cyan_dir else default_data_path(data_dir, DEFAULT_CYAN_CSV))
+
+    alexa_ssf = load_curve_csv(alexa_path) if alexa_path else BUILTIN_ALEV3_SSF
+    imx410_qe = load_curve_csv(imx410_path) if imx410_path else BUILTIN_IMX410_QE
+    transmission = load_spd_csv(ir_path, normalize=False) if ir_path else sigmoid_ir_cut(WL, args.ir_cutoff, args.ir_width)
+    fp_ssf = imx410_qe * transmission[:, None]
+    illum = illuminant_spd(args.illuminant, args.standard_data, args.illuminant_csv)
+    cmf = cie_1931_cmf(WL, args.standard_data, args.cmf_csv)
+    skin, skin_source = load_spectra_input(skin_path, args.skin_dir, demo_skin_spectra())
+    cyan, cyan_source = load_spectra_input(cyan_path, args.cyan_dir, demo_cyan_spectra())
+    profile_spectra = camera_profile_spectra(skin, cyan)
+    if args.profile_csv is not None:
+        profile_spectra = np.concatenate([profile_spectra, load_spectra_csv(args.profile_csv)], axis=0)
+    if args.profile_dir is not None:
+        profile_spectra = np.concatenate([profile_spectra, load_spectra_dir(args.profile_dir)], axis=0)
+    target_rec2020 = spectra_to_rec2020(profile_spectra, illum, cmf)
+    fp_to_rec2020 = camera_to_rec2020_matrix(integrate_response(profile_spectra, illum, fp_ssf), target_rec2020)
+    alexa_to_rec2020 = camera_to_rec2020_matrix(integrate_response(profile_spectra, illum, alexa_ssf), target_rec2020)
+    skin_scale = args.skin_mask_scale if args.skin_mask_scale is not None else args.mask_scale
+    cyan_scale = args.cyan_mask_scale if args.cyan_mask_scale is not None else args.mask_scale
+    skin_gain = args.skin_look_gain if args.skin_look_gain is not None else args.look_gain
+    cyan_gain = args.cyan_look_gain if args.cyan_look_gain is not None else args.look_gain
     key = f"arri_skin_{args.illuminant.lower()}"
+    existing_windows = existing_region_windows(args.out, key) if args.preserve_existing_windows else {}
+    cyan_override = controlled_cyan_matrix(args.cyan_red_pull, args.cyan_blue_push) if args.cyan_mode == "cool" else None
+    skin_region = build_region(
+        "skin", skin, illum, fp_ssf, alexa_ssf, fp_to_rec2020, alexa_to_rec2020,
+        skin_scale, skin_gain, args.skin_region_strength,
+    )
+    cyan_region = build_region(
+        "cyan", cyan, illum, fp_ssf, alexa_ssf, fp_to_rec2020, alexa_to_rec2020,
+        cyan_scale, cyan_gain, args.cyan_region_strength, matrix_override=cyan_override,
+    )
+    if existing_windows:
+        skin_region = preserve_window(skin_region, existing_windows)
+        cyan_region = preserve_window(cyan_region, existing_windows)
+    regions = [skin_region, cyan_region]
+    if args.background_cool:
+        background_region = build_fixed_region(
+            "cool_balance",
+            controlled_cool_balance_matrix(args.background_red_pull, args.background_blue_push),
+            (0.78, 0.82),
+            ((0.09, 0.0), (0.0, 0.16)),
+            1.0,
+            args.background_region_strength,
+        )
+        if existing_windows:
+            background_region = preserve_window(background_region, existing_windows)
+        regions.append(background_region)
+
     payload = {
         "version": 1,
         "transforms": {
@@ -246,20 +780,33 @@ def main() -> int:
                 "illuminant": args.illuminant,
                 "working_space": "Rec2020",
                 "note": (
-                    "Demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; "
-                    "replace curves with measured CSV data for production calibration."
+                    "Rec.2020-domain demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp "
+                    "hot-mirror model; look_gain amplifies the fitted residual while preserving neutral axis. "
+                    "Replace curves with measured CSV data for production calibration."
                 ),
-                "regions": [
-                    build_region("skin", skin, illum, fp_ssf, alexa_ssf, args.mask_scale),
-                    build_region("cyan", cyan, illum, fp_ssf, alexa_ssf, args.mask_scale),
-                ],
+                "regions": regions,
             }
         },
         "sources": {
-            "alev3_ssf": "CIC 23 paper, modelled ARRI ALEXA SSF; rough built-in values are placeholders.",
-            "imx410_qe": "ZWO ASI2400MC / Sony IMX410 RGB QE curve; rough built-in values are placeholders.",
-            "sigma_fp_hot_mirror": f"sigmoid transmission with red cutoff {args.ir_cutoff:g}nm, width {args.ir_width:g}nm.",
-            "skin_spectra": "Built-in analytic demo skin manifold unless --skin-csv is provided.",
+            "alev3_ssf": source_label(alexa_path, "built-in rough ALEV3 SSF placeholder"),
+            "imx410_qe": source_label(imx410_path, "built-in rough IMX410 QE placeholder"),
+            "sigma_fp_hot_mirror": source_label(ir_path, f"sigmoid transmission with red cutoff {args.ir_cutoff:g}nm, width {args.ir_width:g}nm."),
+            "skin_spectra": skin_source,
+            "cyan_spectra": cyan_source,
+            "illuminant": source_label(args.illuminant_csv, f"{args.illuminant} via {args.standard_data}") if args.illuminant_csv else f"{args.illuminant} via {args.standard_data}",
+            "cmf": source_label(args.cmf_csv, f"CIE 1931 2° via {args.standard_data}") if args.cmf_csv else f"CIE 1931 2° via {args.standard_data}",
+            "fit_domain": "camera SSF residual fitted after per-camera constrained Rec.2020 profiling; matrices apply in scene-linear Rec.2020.",
+            "look_gain": (
+                f"skin={skin_gain:g}, cyan={cyan_gain:g}"
+                if args.cyan_mode == "spectral"
+                else f"skin={skin_gain:g}, cyan=cool(red_pull={args.cyan_red_pull:g}, blue_push={args.cyan_blue_push:g})"
+            ),
+            "cyan_mode": args.cyan_mode,
+            "background_cool": (
+                f"enabled strength={args.background_region_strength:g}, "
+                f"red_pull={args.background_red_pull:g}, blue_push={args.background_blue_push:g}"
+                if args.background_cool else "disabled"
+            ),
         },
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)

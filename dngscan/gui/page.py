@@ -22,14 +22,16 @@ label{display:block;font-size:12px;color:#9aa1b0;margin:0 0 6px}
 input[type=text],input[type=number],select{width:100%;background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#e7e9ee;padding:8px 10px;font:inherit}
 .row{display:flex;gap:12px;flex-wrap:wrap}
 .row>div{flex:1;min-width:150px}
+.row>.evMain{flex:2 1 390px;min-width:360px}
 .modes{display:flex;gap:8px;flex-wrap:wrap}
 .modes button{flex:1;min-width:110px;background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#cdd2dd;padding:10px;cursor:pointer;font:inherit;text-align:left}
 .modes button .m{font-weight:600;color:#e7e9ee}
 .modes button .d{font-size:11px;color:#828a99}
 .modes button.sel{border-color:#5b8cff;background:#1a2233}
-.evrow{display:flex;align-items:center;gap:12px}
-input[type=range]{flex:1}
-.evval{width:64px;text-align:right;font-variant-numeric:tabular-nums}
+.evrow{display:flex;align-items:center;gap:12px;min-width:0}
+.sliderField{flex:0;min-width:230px}
+input[type=range]{flex:1 1 auto;min-width:120px}
+.evval{flex:0 0 74px;width:74px;text-align:right;font-variant-numeric:tabular-nums}
 button.go{background:#5b8cff;border:0;border-radius:9px;color:#fff;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer}
 button.go:disabled{opacity:.5;cursor:default}
 button.ghost{background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#cdd2dd;padding:8px 12px;cursor:pointer;font:inherit}
@@ -56,6 +58,8 @@ button.preview:disabled{opacity:.5;cursor:default}
   .previewCard{position:static;min-height:0}
   #previewWrap{min-height:260px}
   #preview{max-height:none}
+  .row>.evMain{min-width:100%}
+  input[type=range]{min-width:0}
 }
 </style></head>
 <body><div class="wrap">
@@ -74,7 +78,7 @@ button.preview:disabled{opacity:.5;cursor:default}
 <div class="controlPanel">
 <div class="card">
   <div class="row">
-    <div>
+    <div class="evMain">
       <label>曝光补偿 EV（手动或 auto 对齐 18% 灰）</label>
       <div class="evrow"><input type="range" id="ev" min="-3" max="3" step="0.05" value="0"><span class="evval" id="evval">+0.00</span></div>
       <div class="modes" style="margin-top:8px">
@@ -112,6 +116,21 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
+    <div style="flex:0;min-width:170px">
+      <label>Tone 核</label>
+      <select id="toneCore" title="agx=现行 inset/outset AgX；lum=亮度域收肩 + raw clip 褪白">
+        <option value="agx">AgX · 现行</option>
+        <option value="lum">Lum · 亮度核</option>
+      </select>
+    </div>
+    <div id="lumNormBlock" style="flex:0;min-width:150px;display:none">
+      <label>lum norm</label>
+      <select id="lumNorm">
+        <option value="y">Y · 亮度</option>
+        <option value="power">power · 折中</option>
+        <option value="max">max RGB</option>
+      </select>
+    </div>
     <div style="flex:0;min-width:220px">
       <label>成片风格</label>
       <select id="grade" title="色度 Look（Fujifilm/ARRI）与输出滤镜（Kodak/RED）互斥，一次只能选一种">
@@ -124,15 +143,15 @@ GRADE_OPTIONS
 SCENE_TRANSFORM_OPTIONS
       </select>
     </div>
-    <div style="flex:0;min-width:180px">
+    <div class="sliderField">
       <label>纯度补偿 punch</label>
       <div class="evrow"><input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="AgX 纯度补偿倍率：1=场景自动值，0=关闭（纯 Base）；夜景自动为 0"><span class="evval" id="punchVal">1.00</span></div>
     </div>
-    <div id="sceneTransformStrengthBlock" style="flex:0;min-width:180px;display:none">
+    <div id="sceneTransformStrengthBlock" class="sliderField" style="display:none">
       <label>前馈强度</label>
-      <div class="evrow"><input type="range" id="sceneTransformStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="sceneTransformStrengthVal">1.00</span></div>
+      <div class="evrow"><input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1=推荐强度；>1 用于诊断/强化 A/B"><span class="evval" id="sceneTransformStrengthVal">1.00</span></div>
     </div>
-    <div id="gradeStrengthBlock" style="flex:0;min-width:180px;display:none">
+    <div id="gradeStrengthBlock" class="sliderField" style="display:none">
       <label>风格强度</label>
       <div class="evrow"><input type="range" id="gradeStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="gradeStrengthVal">1.00</span></div>
     </div>
@@ -197,6 +216,7 @@ function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").valu
 function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v.toFixed(2);}
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
+function updateToneCoreUi(){$("#lumNormBlock").style.display=$("#toneCore").value==="lum"?"block":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
 function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}
 function fmtPct(v){if(v===undefined||!isFinite(v))return "";if(v<=0)return "0%";if(v<0.005)return "<0.01%";if(v<1)return "~"+v.toFixed(2)+"%";return v.toFixed(1)+"%";}
@@ -226,6 +246,11 @@ function sceneTransformText(j){
   const s=j.scene_transform_strength!==undefined?" "+(+j.scene_transform_strength).toFixed(2):"";
   return "，前馈 "+j.scene_transform+s;
 }
+function toneCoreText(j){
+  if(!j.tone_core)return "";
+  const norm=j.tone_core==="lum"&&j.lum_norm?"("+j.lum_norm+")":"";
+  return "，tone "+j.tone_core+norm;
+}
 function applyJobEv(j){
   if(j.ev!==undefined){$("#ev").value=j.ev;setEvLabel();saveSettings();}
 }
@@ -233,6 +258,7 @@ function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,ev:$("#ev").value,quality:$("#quality").value,
     highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    toneCore:$("#toneCore").value,lumNorm:$("#lumNorm").value,
     grade:$("#grade").value,gradeStrength:$("#gradeStrength").value,
     sceneTransform:$("#sceneTransform").value,sceneTransformStrength:$("#sceneTransformStrength").value,punch:$("#punch").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
@@ -248,6 +274,8 @@ function restoreSettings(){
   if(s.wb)$("#wb").value=s.wb;
   if(s.demosaic)$("#demosaic").value=s.demosaic;
   if(s.chroma)$("#chroma").value=s.chroma;
+  if(s.toneCore&&[...$("#toneCore").options].some(o=>o.value===s.toneCore))$("#toneCore").value=s.toneCore;
+  if(s.lumNorm&&[...$("#lumNorm").options].some(o=>o.value===s.lumNorm))$("#lumNorm").value=s.lumNorm;
   if(s.grade&&[...$("#grade").options].some(o=>o.value===s.grade))$("#grade").value=s.grade;
   else if(s.filter&&s.filter!=="none"){
     const fid="filter:"+s.filter;
@@ -269,10 +297,12 @@ function restoreSettings(){
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
-  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();
+  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();updateToneCoreUi();
 }
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
 ["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
+$("#toneCore").addEventListener("change",()=>{updateToneCoreUi();saveSettings();});
+$("#lumNorm").addEventListener("change",saveSettings);
 $("#sceneTransform").addEventListener("change",()=>{updateSceneTransformUi();saveSettings();});
 $("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$("#gamut").value="p3";saveSettings();});
 $("#ev").oninput=()=>{setEvLabel();saveSettings();};
@@ -300,8 +330,10 @@ function payload(){
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
     input,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
+    toneCore:$("#toneCore").value,lumNorm:$("#lumNorm").value,
     grade:$("#grade").value,gradeStrength:+$("#gradeStrength").value,
     sceneTransform:$("#sceneTransform").value,sceneTransformStrength:+$("#sceneTransformStrength").value,
+    punch:+$("#punch").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -323,7 +355,7 @@ function setPreviewImage(b64, ondone){
 function handleJobResult(j, prefix){
   if(!j.ok)return false;
   applyJobEv(j);
-  setStatus(prefix+"：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+sceneTransformText(j)+evAutoStatus(j)+metricText(j),"ok");
+  setStatus(prefix+"：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+toneCoreText(j)+sceneTransformText(j)+evAutoStatus(j)+metricText(j),"ok");
   setPreviewImage(j.preview);
   return true;
 }
@@ -355,7 +387,7 @@ $("#go").onclick=async()=>{
   try{
     const j=await postJob("/export",body);
     if(!j.ok){endBusy();setStatus("错误："+j.error,"err");}
-    else{applyJobEv(j);setStatus("已保存："+j.saved.join(" · ")+"（"+j.format+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+sceneTransformText(j)+evAutoStatus(j)+metricText(j)+"）","ok");
+    else{applyJobEv(j);setStatus("已保存："+j.saved.join(" · ")+"（"+j.format+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+toneCoreText(j)+sceneTransformText(j)+evAutoStatus(j)+metricText(j)+"）","ok");
       lastSavedPath=j.saved[0]||"";$("#revealBtn").style.display=lastSavedPath?"inline-block":"none";setPreviewImage(j.preview);}
   }catch(e){endBusy();setStatus("请求失败："+e,"err");}
   $("#go").disabled=false;$("#previewBtn").disabled=false;

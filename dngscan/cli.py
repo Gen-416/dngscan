@@ -19,7 +19,7 @@ from .plot import default_png_path, plot_dashboard
 from .raw_io import load_raw
 from .report import csv_row, print_report, write_csv
 from .scene_transform import SCENE_TRANSFORM_CHOICES
-from .tone import compute_exposure_gain, plan_for_mode
+from .tone import LUM_NORM_CHOICES, TONE_CORE_CHOICES, compute_exposure_gain, plan_for_mode
 
 
 def require_dependencies() -> None:
@@ -119,13 +119,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--scene-transform-strength",
         type=float,
         default=1.0,
-        help="scene transform 强度 0-1.5（默认 1.0；0=关闭效果）",
+        help="scene transform 强度 0-3（默认 1.0；0=关闭效果；>1 用于诊断/强化 A/B）",
     )
     parser.add_argument(
         "--punch",
         type=float,
         default=1.0,
         help="AgX 纯度补偿倍率 0-1.5（默认 1.0=场景自动值；0=关闭，等价纯 AgX Base；夜景自动为 0）",
+    )
+    parser.add_argument(
+        "--tone-core",
+        choices=TONE_CORE_CHOICES,
+        default="agx",
+        help="tone 核: agx=现行 AgX inset/outset；lum=亮度域收肩 + clip 驱动褪白",
+    )
+    parser.add_argument(
+        "--lum-norm",
+        choices=LUM_NORM_CHOICES,
+        default="y",
+        help="lum 核 norm: y=Rec.2020 Y；power=power norm；max=max RGB",
     )
     parser.add_argument(
         "--wb",
@@ -154,8 +166,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--hdr-headroom must be > 0")
     if not 0.0 <= args.grade_strength <= 1.5:
         parser.error("--grade-strength must be between 0 and 1.5")
-    if not 0.0 <= args.scene_transform_strength <= 1.5:
-        parser.error("--scene-transform-strength must be between 0 and 1.5")
+    if not 0.0 <= args.scene_transform_strength <= 3.0:
+        parser.error("--scene-transform-strength must be between 0 and 3")
     if not 0.0 <= args.punch <= 1.5:
         parser.error("--punch must be between 0 and 1.5")
     if args.grade != "none" and args.output_format == "ultrahdr":
@@ -198,6 +210,8 @@ def main(argv: list[str]) -> int:
                 args.scene_transform,
                 args.scene_transform_strength,
                 args.punch,
+                args.tone_core,
+                args.lum_norm,
             )
         else:
             resolved_ev = float(ev_input)
@@ -217,6 +231,8 @@ def main(argv: list[str]) -> int:
                 args.scene_transform,
                 args.scene_transform_strength,
                 args.punch,
+                args.tone_core,
+                args.lum_norm,
             )
             if jpeg_path is not None
             else None

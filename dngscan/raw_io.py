@@ -137,6 +137,128 @@ def render_to_srgb8(raw: Any, highlight_mode_name: str = "clip") -> Any:
     )
 
 
+def channel_label(color_desc: str, cid: int) -> str:
+    if 0 <= int(cid) < len(color_desc):
+        return color_desc[int(cid)].upper()
+    return str(cid)
+
+
+def channel_black_level(black_levels: list[float], cid: int) -> float:
+    if black_levels:
+        return float(black_levels[int(cid) % len(black_levels)])
+    return 0.0
+
+
+def channel_fullwell(white_level: int, camera_white_levels: list[float], cid: int) -> float:
+    if camera_white_levels and int(cid) < len(camera_white_levels) and camera_white_levels[int(cid)] > 0:
+        return float(camera_white_levels[int(cid)])
+    return float(white_level)
+
+
+def _smoothstep(edge0: float, edge1: float, x: Any) -> Any:
+    t = np.clip((x - np.float32(edge0)) / np.float32(max(edge1 - edge0, 1e-9)), 0.0, 1.0)
+    return t * t * (np.float32(3.0) - np.float32(2.0) * t)
+
+
+def _bin_2x2_max(mask: Any) -> Any:
+    h, w = mask.shape[:2]
+    h2 = max(1, h // 2)
+    w2 = max(1, w // 2)
+    cropped = mask[: h2 * 2, : w2 * 2]
+    return cropped.reshape(h2, 2, w2, 2, mask.shape[2]).max(axis=(1, 3))
+
+
+def _orient_like_libraw(arr: Any, flip: int) -> Any:
+    # LibRaw/rawpy orientation values follow dcraw's common 0/3/5/6 codes.
+    # Keep support for the full EXIF-style range so synthetic tests and unusual RAWs work.
+    flip = int(flip or 0)
+    if flip == 0 or flip == 1:
+        return arr
+    if flip == 2:
+        return np.fliplr(arr)
+    if flip == 3:
+        return np.rot90(arr, 2)
+    if flip == 4:
+        return np.flipud(arr)
+    if flip == 5:
+        return np.rot90(arr, 1)
+    if flip == 6:
+        return np.rot90(arr, 3)
+    if flip == 7:
+        return np.fliplr(np.rot90(arr, 1))
+    if flip == 8:
+        return np.rot90(arr, 1)
+    return arr
+
+
+def _resize_mask_to_shape(mask: Any, shape: tuple[int, int]) -> Any:
+    target_h, target_w = shape
+    if mask.shape[:2] == (target_h, target_w):
+        return mask
+    from PIL import Image
+
+    channels = []
+    for idx in range(mask.shape[2]):
+        im = Image.fromarray(mask[:, :, idx].astype(np.float32, copy=False), mode="F")
+        im = im.resize((target_w, target_h), Image.Resampling.BILINEAR)
+        channels.append(np.asarray(im, dtype=np.float32))
+    return np.stack(channels, axis=2)
+
+
+def _feather_masks(mask: Any) -> Any:
+    # Small separable Gaussian-like kernel, enough to hide demosaic/half-size seams.
+    kernel = np.asarray([1, 4, 6, 4, 1], dtype=np.float32) / np.float32(16.0)
+    radius = len(kernel) // 2
+    out = mask.astype(np.float32, copy=False)
+    for axis in (0, 1):
+        pad = [(0, 0), (0, 0), (0, 0)]
+        pad[axis] = (radius, radius)
+        padded = np.pad(out, pad, mode="edge")
+        acc = np.zeros_like(out, dtype=np.float32)
+        for i, weight in enumerate(kernel):
+            sl = [slice(None), slice(None), slice(None)]
+            sl[axis] = slice(i, i + out.shape[axis])
+            acc += np.float32(weight) * padded[tuple(sl)]
+        out = acc
+    return np.clip(out, 0.0, 1.0)
+
+
+def build_clip_masks(
+    raw_image: Any,
+    raw_colors: Any,
+    color_desc: str,
+    white_level: int,
+    black_levels: list[float],
+    camera_white_levels: list[float],
+    orientation_flip: int,
+    scene_shape: tuple[int, int],
+) -> Any:
+    """Build half-resolution RGB soft clip masks from pre-WB raw DN values."""
+    h, w = raw_image.shape[:2]
+    soft = np.zeros((h, w, 3), dtype=np.float32)
+    for cid in np.unique(raw_colors):
+        cid_int = int(cid)
+        label = channel_label(color_desc, cid_int)
+        if label.startswith("R"):
+            out_idx = 0
+        elif label.startswith("G"):
+            out_idx = 1
+        elif label.startswith("B"):
+            out_idx = 2
+        else:
+            continue
+        black = channel_black_level(black_levels, cid_int)
+        fullwell = channel_fullwell(white_level, camera_white_levels, cid_int)
+        denom = max(fullwell - black, 1.0)
+        raw_norm = (raw_image.astype(np.float32, copy=False) - np.float32(black)) / np.float32(denom)
+        channel_soft = _smoothstep(0.95, 0.99, raw_norm)
+        soft[:, :, out_idx] = np.maximum(soft[:, :, out_idx], np.where(raw_colors == cid_int, channel_soft, 0.0))
+    binned = _bin_2x2_max(soft)
+    oriented = _orient_like_libraw(binned, orientation_flip)
+    aligned = _resize_mask_to_shape(oriented, scene_shape)
+    return _feather_masks(aligned).astype(np.float16, copy=False)
+
+
 def load_raw(
     path: Path,
     scene_highlight_mode: str = "clip",
@@ -200,6 +322,16 @@ def load_raw(
             color_desc = decode_color_desc(getattr(raw, "color_desc", ""))
             raw_pattern_arr = getattr(raw, "raw_pattern", [])
             raw_pattern = np.asarray(raw_pattern_arr).astype(int).tolist() if np is not None else []
+            clip_masks = build_clip_masks(
+                raw_image,
+                raw_colors,
+                color_desc,
+                white_level,
+                [float(x) for x in black_levels],
+                [float(x) for x in camera_white_levels],
+                orientation_flip,
+                scene_rec2020_render.shape[:2],
+            )
     except FileNotFoundError:
         raise
     except Exception as exc:
@@ -226,5 +358,5 @@ def load_raw(
         shot_make=shot.make,
         shot_model=shot.model,
         shot_iso=shot.iso,
+        clip_masks=clip_masks,
     )
-

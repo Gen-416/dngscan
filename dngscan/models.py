@@ -32,6 +32,10 @@ class RawBundle:
     shot_make: str | None = None
     shot_model: str | None = None
     shot_iso: int | None = None
+    # Half-resolution, orientation-correct RGB soft clip masks in raw/CFA space.
+    # Shape is (H, W, 3), aligned to scene_rec2020_render when scene_half_size=True.
+    # Full-resolution renders resize this mask to the render buffer on demand.
+    clip_masks: Any | None = None
 
 
 @dataclass
@@ -109,6 +113,10 @@ class ToneCompressionPlan:
     # Scene-driven purity compensation applied after the AgX curve (see dngscan/punch.py).
     # 0 = identity (night/high-ISO scenes gate to exactly zero).
     punch_strength: float = 0.0
+    # Tone core selector: "agx" keeps inset/outset AgX, "lum" uses luminance-ratio shoulder.
+    tone_core: str = "agx"
+    # Norm for the luminance core: "y", "power", or "max".
+    lum_norm: str = "y"
 
 
 @dataclass

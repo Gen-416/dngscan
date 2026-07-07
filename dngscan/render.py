@@ -7,8 +7,10 @@ from typing import Any
 from ._deps import np
 from . import agx as agx_engine
 from . import display_filter as filter_engine
+from . import lum as lum_engine
 from . import look as look_engine
 from . import punch as punch_engine
+from . import retreat as retreat_engine
 from . import scene_transform as scene_transform_engine
 from .color import (
     fit_to_output_gamut, luminance_from_rgb_space, oklab_to_output_rgb, rec2020_to_output,
@@ -88,6 +90,12 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     return punch_engine.apply_punch_rec2020(mapped, float(getattr(plan, "punch_strength", 0.0)))
 
 
+def apply_tone_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
+    if str(getattr(plan, "tone_core", "agx")) == "lum":
+        return lum_engine.apply_lum_core(rgb_rec2020, plan)
+    return apply_agx_core(rgb_rec2020, plan)
+
+
 def scene_render_to_agx_linear(
     bundle: RawBundle,
     plan: ToneCompressionPlan,
@@ -102,6 +110,9 @@ def scene_render_to_agx_linear(
     flat_scene = scene.reshape(-1, scene.shape[-1])
     out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
+    clip_masks = None
+    if str(getattr(plan, "tone_core", "agx")) == "lum" and getattr(bundle, "clip_masks", None) is not None:
+        clip_masks = retreat_engine.resize_clip_masks(bundle.clip_masks, (h, w)).reshape(-1, 3)
 
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
         bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
@@ -112,7 +123,9 @@ def scene_render_to_agx_linear(
         rec = scene_transform_engine.apply_scene_transform_rec2020(
             rec, scene_transform, scene_transform_strength, wb_adapt
         )
-        mapped_rec = apply_agx_core(rec, plan)
+        if clip_masks is not None:
+            rec = retreat_engine.apply_clip_retreat_rec2020(rec, clip_masks[start:end])
+        mapped_rec = apply_tone_core(rec, plan)
         if display_filter != "none" and filter_strength > 0.0:
             output_linear = filter_engine.apply_display_filter_rec2020(
                 mapped_rec, output_gamut, display_filter, filter_strength, scene_rec2020=rec
@@ -134,6 +147,8 @@ def scene_render_to_agx_u8(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> Any:
     return output_linear_to_u8(
         scene_render_to_agx_linear(
@@ -162,13 +177,15 @@ def render_output_linear(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> Any:
     if look != "none" and display_filter != "none":
         raise ValueError("色度 look 与输出滤镜不能同时启用")
     if analysis is None:
         raise ValueError("AgX 导出需要分析结果")
     plan = tone_plan if tone_plan is not None else plan_for_mode(
-        bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength
+        bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=tone_core, lum_norm=lum_norm
     )
     agx_linear = scene_render_to_agx_linear(
         bundle,
@@ -193,13 +210,15 @@ def render_output_u8(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> Any:
     if look != "none" and display_filter != "none":
         raise ValueError("色度 look 与输出滤镜不能同时启用")
     if analysis is None:
         raise ValueError("AgX 导出需要分析结果")
     plan = tone_plan if tone_plan is not None else plan_for_mode(
-        bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength
+        bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=tone_core, lum_norm=lum_norm
     )
     return quantize_final_output_linear_to_u8(
         render_output_linear(
@@ -213,6 +232,8 @@ def render_output_u8(
             filter_strength,
             scene_transform,
             scene_transform_strength,
+            tone_core,
+            lum_norm,
         ),
     )
 

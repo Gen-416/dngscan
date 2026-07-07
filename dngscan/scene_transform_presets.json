@@ -6,15 +6,15 @@
       "label": "ARRI skin prefeed (D55)",
       "illuminant": "D55",
       "working_space": "Rec2020",
-      "note": "Demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; replace curves with measured CSV data for production calibration. [skin window refit from real DNG samples 2026-07-06] [skin window refit from real DNG samples 2026-07-06]",
+      "note": "Rec.2020-domain demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; look_gain amplifies the fitted residual while preserving neutral axis. Replace curves with measured CSV data for production calibration.",
       "regions": [
         {
           "name": "skin",
           "matrix": [
             [
-              0.8846761,
-              0.23588836,
-              -0.12056446
+              1.00254229,
+              0.06927141,
+              -0.0718137
             ],
             [
               0.0,
@@ -22,9 +22,9 @@
               -0.0
             ],
             [
-              0.00954935,
-              -0.13148449,
-              1.12193515
+              -0.18988251,
+              0.35001476,
+              0.83986775
             ]
           ],
           "mu_rg_bg": [
@@ -42,25 +42,25 @@
             ]
           ],
           "scale": 1.5,
-          "strength": 1.0
+          "strength": 1.15
         },
         {
           "name": "cyan",
           "matrix": [
             [
-              0.82222997,
-              -0.10958465,
-              0.28735468
+              1.12,
+              -0.12,
+              0.0
             ],
             [
-              -0.0,
+              0.0,
               1.0,
-              -0.0
+              0.0
             ],
             [
-              0.19053753,
-              -0.2137184,
-              1.02318087
+              -0.04,
+              0.0,
+              1.04
             ]
           ],
           "mu_rg_bg": [
@@ -78,15 +78,58 @@
             ]
           ],
           "scale": 2.5,
-          "strength": 1.0
+          "strength": 0.9
+        },
+        {
+          "name": "cool_balance",
+          "matrix": [
+            [
+              1.35,
+              -0.35,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -0.12,
+              0.0,
+              1.12
+            ]
+          ],
+          "mu_rg_bg": [
+            0.78,
+            0.82
+          ],
+          "cov_rg_bg": [
+            [
+              0.09,
+              0.0
+            ],
+            [
+              0.0,
+              0.16
+            ]
+          ],
+          "scale": 1.0,
+          "strength": 0.42
         }
       ]
     }
   },
   "sources": {
-    "alev3_ssf": "CIC 23 paper, modelled ARRI ALEXA SSF; rough built-in values are placeholders.",
-    "imx410_qe": "ZWO ASI2400MC / Sony IMX410 RGB QE curve; rough built-in values are placeholders.",
-    "sigma_fp_hot_mirror": "sigmoid transmission with red cutoff 660nm, width 15nm.",
-    "skin_spectra": "Built-in analytic demo skin manifold unless --skin-csv is provided."
+    "alev3_ssf": "dngscan_assets/spectral/arri_alexa_alev3_ssf_digitized.csv",
+    "imx410_qe": "dngscan_assets/spectral/sony_imx410_qe_zwo_asi2400mc_digitized.csv",
+    "sigma_fp_hot_mirror": "dngscan_assets/spectral/sigma_fp_hot_mirror_model_420_660.csv",
+    "skin_spectra": "dngscan_assets/spectral/demo_skin_reflectance.csv",
+    "cyan_spectra": "dngscan_assets/spectral/demo_cyan_reflectance.csv",
+    "illuminant": "D55 via auto",
+    "cmf": "CIE 1931 2° via auto",
+    "fit_domain": "camera SSF residual fitted after per-camera constrained Rec.2020 profiling; matrices apply in scene-linear Rec.2020.",
+    "look_gain": "skin=2.35, cyan=cool(red_pull=0.12, blue_push=0.04)",
+    "cyan_mode": "cool",
+    "background_cool": "enabled strength=0.42, red_pull=0.35, blue_push=0.12"
   }
 }

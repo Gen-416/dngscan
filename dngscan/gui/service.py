@@ -221,6 +221,9 @@ def estimate_ev_headroom(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> dict[str, float | str]:
     if analysis is None:
         return {}
@@ -236,6 +239,9 @@ def estimate_ev_headroom(
         filter_strength=filter_strength,
         scene_transform=scene_transform,
         scene_transform_strength=scene_transform_strength,
+        punch_scale=punch_scale,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
     )
     return {
         "safe_ev_remaining": max(0.0, float(safe_ev - current_ev)),
@@ -309,9 +315,19 @@ def parse_punch(params: dict) -> float:
 def parse_scene_transform(params: dict) -> tuple[str, float]:
     transform = dg.validate_scene_transform(str(params.get("sceneTransform", "none")))
     strength = float(params.get("sceneTransformStrength", params.get("scene_transform_strength", 1.0)))
-    if not 0.0 <= strength <= 1.5:
-        raise ValueError("scene transform 强度需在 0-1.5 之间")
+    if not 0.0 <= strength <= 3.0:
+        raise ValueError("scene transform 强度需在 0-3 之间")
     return transform, strength
+
+
+def parse_tone_core(params: dict) -> tuple[str, str]:
+    core = str(params.get("toneCore", params.get("tone_core", "agx")))
+    norm = str(params.get("lumNorm", params.get("lum_norm", "y")))
+    if core not in dg.TONE_CORE_CHOICES:
+        raise ValueError(f"未知 tone 核：{core}")
+    if norm not in dg.LUM_NORM_CHOICES:
+        raise ValueError(f"未知 lum norm：{norm}")
+    return core, norm
 
 
 def export_preview_jpeg(
@@ -330,6 +346,8 @@ def export_preview_jpeg(
     scene_transform_strength: float = 1.0,
     auto_ev: dg.AutoEvResult | None = None,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> dict:
     dg.require_dependencies()
     stat = inp.stat()
@@ -359,12 +377,15 @@ def export_preview_jpeg(
             scene_transform,
             scene_transform_strength,
             punch_scale,
+            tone_core,
+            lum_norm,
         )
         icc_profile = dg.output_icc_profile_bytes(gamut)
         rgb_u8 = dg.render_output_u8(
             proxy_bundle, cached.analysis, gamut, tone_plan,
             look, look_strength, display_filter, filter_strength,
             scene_transform, scene_transform_strength,
+            tone_core, lum_norm,
         )
         if auto_ev is not None:
             rgb_u8 = annotate_preview_rgb_u8(rgb_u8, dg.auto_ev_overlay_lines(auto_ev))
@@ -381,6 +402,8 @@ def export_preview_jpeg(
         "gamut": dg.output_gamut_label(gamut),
         "scene_transform": dg.scene_transform_label(scene_transform),
         "scene_transform_strength": scene_transform_strength,
+        "tone_core": tone_core,
+        "lum_norm": lum_norm,
         "ev_auto": auto_ev_payload(auto_ev),
     }
     return payload
@@ -401,6 +424,7 @@ def run_preview(params: dict) -> dict:
     look, look_strength, display_filter, filter_strength = parse_grade(params)
     scene_transform, scene_transform_strength = parse_scene_transform(params)
     punch_scale = parse_punch(params)
+    tone_core, lum_norm = parse_tone_core(params)
     auto_ev_result = None
     if ev_auto:
         stat = inp.stat()
@@ -426,6 +450,8 @@ def run_preview(params: dict) -> dict:
             scene_transform=scene_transform,
             scene_transform_strength=scene_transform_strength,
             punch_scale=punch_scale,
+            tone_core=tone_core,
+            lum_norm=lum_norm,
         )
         ev = auto_ev_result.ev
     return export_preview_jpeg(
@@ -443,6 +469,8 @@ def run_preview(params: dict) -> dict:
         scene_transform_strength=scene_transform_strength,
         auto_ev=auto_ev_result,
         punch_scale=punch_scale,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
     )
 
 
@@ -454,9 +482,13 @@ def export_suffix_parts(
     grade_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> str:
     """Build the filename stem suffix for GUI JPEG/PNG exports."""
-    parts = ["agx"]
+    parts = [tone_core]
+    if tone_core == "lum" and lum_norm != "y":
+        parts.append(lum_norm)
     if highlight != "clip":
         parts.append(highlight)
     if gamut != "srgb":
@@ -490,6 +522,7 @@ def run_export(params: dict) -> dict:
     look, look_strength, display_filter, filter_strength = parse_grade(params)
     scene_transform, scene_transform_strength = parse_scene_transform(params)
     punch_scale = parse_punch(params)
+    tone_core, lum_norm = parse_tone_core(params)
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
 
     analysis, y, ev_img = dg.analyze(bundle, 4)
@@ -506,6 +539,8 @@ def run_export(params: dict) -> dict:
             scene_transform=scene_transform,
             scene_transform_strength=scene_transform_strength,
             punch_scale=punch_scale,
+            tone_core=tone_core,
+            lum_norm=lum_norm,
         )
         ev = auto_ev_result.ev
     bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
@@ -517,6 +552,8 @@ def run_export(params: dict) -> dict:
         scene_transform,
         scene_transform_strength,
         punch_scale,
+        tone_core,
+        lum_norm,
     )
 
     grade_id = str(params.get("grade", "none"))
@@ -529,6 +566,8 @@ def run_export(params: dict) -> dict:
         grade_strength,
         scene_transform,
         scene_transform_strength,
+        tone_core,
+        lum_norm,
     )
     jpg_path = outdir / f"{inp.stem}_{suffix}.jpg"
     with RENDER_LOCK:
@@ -567,6 +606,9 @@ def run_export(params: dict) -> dict:
                 filter_strength=filter_strength,
                 scene_transform=scene_transform,
                 scene_transform_strength=scene_transform_strength,
+                punch_scale=punch_scale,
+                tone_core=tone_core,
+                lum_norm=lum_norm,
             )
         )
         preview = make_preview_b64(jpg_path, icc_profile=icc_profile)
@@ -599,4 +641,6 @@ def run_export(params: dict) -> dict:
         "gamut": dg.output_gamut_label(gamut),
         "scene_transform": dg.scene_transform_label(scene_transform),
         "scene_transform_strength": scene_transform_strength,
+        "tone_core": tone_core,
+        "lum_norm": lum_norm,
     }

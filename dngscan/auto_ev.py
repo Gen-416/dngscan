@@ -8,11 +8,12 @@ from typing import Any
 
 from ._deps import np
 from . import display_filter as filter_engine
+from . import retreat as retreat_engine
 from . import scene_transform as scene_transform_engine
 from .color import RGB_TO_XYZ, output_gamut_space, rec2020_to_output
 from .constants import EPS
 from .models import Analysis, AutoEvResult, RawBundle, ToneCompressionPlan
-from .render import apply_agx_core, finalize_output_linear
+from .render import apply_tone_core, finalize_output_linear
 from .tone import compute_exposure_gain, plan_for_mode, scene_rec2020_to_float
 
 EV_AUTO_TOKEN = "auto"
@@ -92,6 +93,9 @@ def render_sample_linear_output(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
+    sample_masks: Any | None = None,
 ) -> Any:
     from .grade import RENDER_MODE
 
@@ -107,6 +111,8 @@ def render_sample_linear_output(
             scene_transform,
             scene_transform_strength,
             punch_scale,
+            tone_core,
+            lum_norm,
         ) if analysis is not None else None
     )
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
@@ -115,7 +121,9 @@ def render_sample_linear_output(
     rec = scene_transform_engine.apply_scene_transform_rec2020(
         rec, scene_transform, scene_transform_strength, wb_adapt
     )
-    mapped_rec = apply_agx_core(rec, plan)
+    if plan is not None and str(getattr(plan, "tone_core", "agx")) == "lum" and sample_masks is not None:
+        rec = retreat_engine.apply_clip_retreat_rec2020(rec, sample_masks)
+    mapped_rec = apply_tone_core(rec, plan)
     if display_filter != "none" and filter_strength > 0.0:
         output_linear = filter_engine.apply_display_filter_rec2020(
             mapped_rec, gamut, display_filter, filter_strength, scene_rec2020=rec
@@ -139,6 +147,8 @@ def max_safe_ev(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> float:
     """Largest EV (>= from_ev) whose preview-scale output stays below highlight thresholds."""
     from .grade import RENDER_MODE
@@ -148,6 +158,10 @@ def max_safe_ev(
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
     sample_rgb = flat[::step, :3]
+    sample_masks = None
+    if tone_core == "lum" and getattr(bundle, "clip_masks", None) is not None:
+        masks = retreat_engine.resize_clip_masks(bundle.clip_masks, bundle.scene_rec2020_render.shape[:2]).reshape(-1, 3)
+        sample_masks = masks[::step]
     baseline_stats: tuple[float, float, float, float] | None = None
 
     def margin_at(ev: float) -> float:
@@ -164,6 +178,9 @@ def max_safe_ev(
             scene_transform=scene_transform,
             scene_transform_strength=scene_transform_strength,
             punch_scale=punch_scale,
+            tone_core=tone_core,
+            lum_norm=lum_norm,
+            sample_masks=sample_masks,
         )
         return output_highlight_margin(rgb, gamut, baseline_stats)
 
@@ -180,6 +197,9 @@ def max_safe_ev(
         scene_transform=scene_transform,
         scene_transform_strength=scene_transform_strength,
         punch_scale=punch_scale,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
+        sample_masks=sample_masks,
     )
     baseline_stats = output_highlight_stats(baseline_rgb, gamut)
     if output_highlight_margin(baseline_rgb, gamut, baseline_stats) <= 0.0:
@@ -215,6 +235,8 @@ def compute_auto_ev(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> AutoEvResult:
     """Boost toward 18% gray median when scene is dark; never darken high-key captures.
 
@@ -238,6 +260,8 @@ def compute_auto_ev(
         scene_transform=scene_transform,
         scene_transform_strength=scene_transform_strength,
         punch_scale=punch_scale,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
     )
     boost_target = max(target, baseline_ev)
     ev = min(boost_target, cap)
@@ -264,6 +288,8 @@ def resolve_export_ev(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> tuple[float, AutoEvResult | None]:
     if not is_ev_auto(ev):
         return float(ev), None
@@ -279,6 +305,8 @@ def resolve_export_ev(
         scene_transform,
         scene_transform_strength,
         punch_scale,
+        tone_core,
+        lum_norm,
     )
     return result.ev, result
 

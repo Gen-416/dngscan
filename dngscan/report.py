@@ -198,6 +198,7 @@ def print_report(
         print(f"CSV 指标: {csv_path}")
     if jpeg_path is not None:
         print(f"JPEG 图像: {jpeg_path}")
+        reported_mode = str(getattr(tone_plan, "tone_core", jpeg_mode)) if jpeg_mode == "agx" else jpeg_mode
         wb_label = "日光固定配平" if bundle.wb_mode == "daylight" else "相机白平衡"
         ev_label = "EV auto" if auto_ev is not None else "EV 补偿"
         ev_note = (
@@ -210,7 +211,7 @@ def print_report(
             f"JPEG 设置: scene-linear Rec.2020 起点；8-bit {output_gamut_label(output_gamut)}（TPDF 抖动）；"
             f"{wb_label}；{brighten_note}；"
             f"曝光锚定增益={bundle.exposure_gain:.3f}（{ev_note}）；"
-            f"模式={jpeg_mode}；高光处理={highlight_mode_cn(bundle.scene_highlight_mode)}；"
+            f"模式={reported_mode}；高光处理={highlight_mode_cn(bundle.scene_highlight_mode)}；"
             f"AgX 前馈={scene_transform_label(scene_transform)}（强度={scene_transform_strength:.2f}）；"
             f"成片风格={grade_label(jpeg_grade)}（强度={jpeg_grade_strength:.2f}）；"
             f"质量={jpeg_quality}；"
@@ -231,11 +232,11 @@ def print_report(
                 f"EV auto: 提升 {auto_ev.ev_boost:+.2f} EV（相对 EV 0）"
                 f"{limit_note}；应用 EV={auto_ev.ev:+.2f}"
             )
-        print(f"JPEG 策略: {jpeg_policy_cn(jpeg_mode, output_gamut)}")
+        print(f"JPEG 策略: {jpeg_policy_cn(reported_mode, output_gamut)}")
         plan_line = jpeg_tone_plan_cn(
             bundle,
             analysis,
-            jpeg_mode,
+            reported_mode,
             tone_plan,
             output_gamut,
             scene_transform,
@@ -249,6 +250,8 @@ def jpeg_policy_cn(mode: str, output_gamut: str = "srgb") -> str:
     label = output_gamut_label(output_gamut)
     if mode == "agx":
         return f"agx: scene-linear Rec.2020 工作空间；白平衡按导出选项；无自动增亮；高光处理按导出选项；分析全图 Y 自动设定 AgX 黑白相对曝光与曲线；Rec.2020 inset→log2→sigmoid→outset 通道串扰，最后转 {label}；4:4:4 色度采样"
+    if mode == "lum":
+        return f"lum: scene-linear Rec.2020 工作空间；raw clip mask 驱动曲线前褪白；标量亮度/norm 进 sigmoid shoulder，RGB 比例保持；无 AgX inset/outset，最后转 {label} 并做输出色域 fit"
     return ""
 
 
@@ -261,12 +264,13 @@ def jpeg_tone_plan_cn(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
 ) -> str:
-    if mode == "agx":
+    if mode in ("agx", "lum"):
         plan = tone_plan if tone_plan is not None else plan_for_mode(
-            bundle, analysis, mode, output_gamut, scene_transform, scene_transform_strength
+            bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=mode
         )
+        label = "AgX" if mode == "agx" else f"lum({plan.lum_norm})"
         return (
-            f"AgX 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV，"
+            f"{label} 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV，"
             f"DR={plan.dynamic_range_ev:.2f}档；Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
             f"曲线 contrast={plan.contrast:.2f}, toe={plan.toe_power:.2f}, shoulder={plan.shoulder_power:.2f}；"
             f"纯度补偿={plan.punch_strength:.2f}；"
@@ -292,6 +296,7 @@ def csv_row(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
 ) -> dict[str, Any]:
+    reported_mode = str(getattr(tone_plan, "tone_core", jpeg_mode)) if jpeg_mode == "agx" else jpeg_mode
     row: dict[str, Any] = {
         "file": str(bundle.path),
         "filename": bundle.path.name,
@@ -345,7 +350,7 @@ def csv_row(
         "survivor_channel": analysis.survivor_channel,
         "png": str(out_path) if out_path is not None else "",
         "jpeg": str(jpeg_path) if jpeg_path is not None else "",
-        "jpeg_mode": jpeg_mode if jpeg_path is not None else "",
+        "jpeg_mode": reported_mode if jpeg_path is not None else "",
         "jpeg_output_gamut": output_gamut if jpeg_path is not None else "",
         "jpeg_output_gamut_label": output_gamut_label(output_gamut) if jpeg_path is not None else "",
         "jpeg_highlight_mode": bundle.scene_highlight_mode if jpeg_path is not None else "",
@@ -364,11 +369,11 @@ def csv_row(
         "jpeg_exposure_gain": bundle.exposure_gain if jpeg_path is not None else "",
         "jpeg_icc_embedded": jpeg_icc_embedded if jpeg_path is not None else "",
         "jpeg_srgb_icc_embedded": jpeg_icc_embedded if jpeg_path is not None and output_gamut == "srgb" else "",
-        "jpeg_policy_cn": jpeg_policy_cn(jpeg_mode, output_gamut) if jpeg_path is not None else "",
+        "jpeg_policy_cn": jpeg_policy_cn(reported_mode, output_gamut) if jpeg_path is not None else "",
         "jpeg_tone_plan_cn": jpeg_tone_plan_cn(
             bundle,
             analysis,
-            jpeg_mode,
+            reported_mode,
             tone_plan,
             output_gamut,
             scene_transform,

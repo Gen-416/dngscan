@@ -15,6 +15,9 @@ from .color import (
 from .constants import AGX_INSET, EPS, EV_REPORT_FLOOR, GAMUT_EPS, GRAY_EV, MIDGRAY_HEADROOM_STOPS
 from .models import Analysis, RawBundle, ToneCompressionPlan
 
+TONE_CORE_CHOICES = ("agx", "lum")
+LUM_NORM_CHOICES = ("y", "power", "max")
+
 def compute_exposure_gain(mode: str, ev: float) -> float:
     """Constant, content-independent exposure anchor plus manual EV compensation.
 
@@ -66,6 +69,8 @@ def build_tone_compression_plan(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> ToneCompressionPlan:
     rec2020 = tone_plan_sample_scene_rec2020(
         bundle,
@@ -139,6 +144,8 @@ def build_tone_compression_plan(
     punch_strength = clamp_float(
         w_bright * w_quality * (0.55 + 0.45 * w_dr) * clamp_float(punch_scale, 0.0, 1.5), 0.0, 1.0
     )
+    if tone_core == "lum":
+        punch_strength = 0.0
 
     if target_gamut == "Rec2020":
         rgb = rec2020
@@ -178,6 +185,8 @@ def build_tone_compression_plan(
         negative_rgb_pct=negative_rgb_pct,
         over_rgb_pct=over_rgb_pct,
         tony_hdr_gain=tony_hdr_gain,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
     )
 
 
@@ -189,6 +198,8 @@ def plan_for_mode(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
 ) -> ToneCompressionPlan:
     """Build the tone plan in the space each mode actually works in.
 
@@ -196,7 +207,9 @@ def plan_for_mode(
     LUT stimulus, and AgX stays in Rec.2020 and derives its log2 window from the
     Rec.2020 inset signal it curves.
     """
-    if mode == "agx":
+    tone_core = tone_core if tone_core in TONE_CORE_CHOICES else "agx"
+    lum_norm = lum_norm if lum_norm in LUM_NORM_CHOICES else "y"
+    if mode == "agx" or tone_core == "lum":
         target_gamut = "Rec2020"
     elif mode == "tony":
         target_gamut = "sRGB"
@@ -206,8 +219,10 @@ def plan_for_mode(
         bundle,
         analysis,
         target_gamut,
-        ev_from_agx_inset=(mode == "agx"),
+        ev_from_agx_inset=(mode == "agx" and tone_core == "agx"),
         scene_transform=scene_transform if mode == "agx" else "none",
         scene_transform_strength=scene_transform_strength,
-        punch_scale=punch_scale if mode == "agx" else 0.0,
+        punch_scale=punch_scale if mode == "agx" and tone_core == "agx" else 0.0,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
     )

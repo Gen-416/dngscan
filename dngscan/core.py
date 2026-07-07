@@ -9,6 +9,8 @@ from .color import *  # noqa: F401,F403
 from .raw_io import *  # noqa: F401,F403
 from .tone import *  # noqa: F401,F403
 from .render import *  # noqa: F401,F403
+from .lum import *  # noqa: F401,F403
+from .retreat import *  # noqa: F401,F403
 from .scene_transform import *  # noqa: F401,F403
 from .export import *  # noqa: F401,F403
 from .analysis import *  # noqa: F401,F403

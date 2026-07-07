@@ -14,6 +14,9 @@ dngscan_assets/*
 !dngscan_assets/darktable_agx.c
 !dngscan_assets/darktable_agx.cl
 !dngscan_assets/tony_mc_mapface.spi3d
+!dngscan_assets/spectral/
+!dngscan_assets/spectral/README.md
+!dngscan_assets/spectral/*.csv
 
 # Raw inputs and generated outputs
 *.dng
@@ -36,3 +39,5 @@ test_output/compare_results.json
 # Editor / OS / tooling
 .claude/
 .DS_Store
+*.swp
+*.swo
