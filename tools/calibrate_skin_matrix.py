@@ -696,7 +696,12 @@ def run_material_mode(
 
     materials = material_spectra_sets(args)
     sky = demo_sky_reflectance(d55)
-    profile = np.concatenate([spec for spec, _ in materials.values()] + [demo_colour_spectra(), sky], axis=0)
+    profile_parts = [spec for spec, _ in materials.values()] + [demo_colour_spectra(), sky]
+    if args.profile_csv is not None:
+        profile_parts.append(load_spectra_csv(args.profile_csv))
+    if args.profile_dir is not None:
+        profile_parts.append(load_spectra_dir(args.profile_dir))
+    profile = np.concatenate(profile_parts, axis=0)
 
     # Per-illuminant camera profiles: each camera is balanced to that illuminant,
     # matching the runtime WB convention (and the daylight-frame window transport).
