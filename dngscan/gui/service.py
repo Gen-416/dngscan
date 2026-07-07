@@ -219,6 +219,8 @@ def estimate_ev_headroom(
     look_strength: float = 1.0,
     display_filter: str = "none",
     filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> dict[str, float | str]:
     if analysis is None:
         return {}
@@ -232,6 +234,8 @@ def estimate_ev_headroom(
         look_strength=look_strength,
         display_filter=display_filter,
         filter_strength=filter_strength,
+        scene_transform=scene_transform,
+        scene_transform_strength=scene_transform_strength,
     )
     return {
         "safe_ev_remaining": max(0.0, float(safe_ev - current_ev)),
