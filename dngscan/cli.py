@@ -18,6 +18,7 @@ from .grade import RENDER_MODE, grade_choices, resolve_grade
 from .plot import default_png_path, plot_dashboard
 from .raw_io import load_raw
 from .report import csv_row, print_report, write_csv
+from .scene_transform import SCENE_TRANSFORM_CHOICES
 from .tone import compute_exposure_gain, plan_for_mode
 
 
@@ -109,6 +110,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="成片风格强度 0-1.5（默认 1.0；0=关闭效果）",
     )
     parser.add_argument(
+        "--scene-transform",
+        choices=SCENE_TRANSFORM_CHOICES,
+        default="none",
+        help="AgX 前 scene-linear Rec.2020 前馈变换；none=关闭，arri_skin_d55=demo ARRI 式肤色前馈",
+    )
+    parser.add_argument(
+        "--scene-transform-strength",
+        type=float,
+        default=1.0,
+        help="scene transform 强度 0-1.5（默认 1.0；0=关闭效果）",
+    )
+    parser.add_argument(
         "--wb",
         choices=WB_CHOICES,
         default="camera",
@@ -135,6 +148,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--hdr-headroom must be > 0")
     if not 0.0 <= args.grade_strength <= 1.5:
         parser.error("--grade-strength must be between 0 and 1.5")
+    if not 0.0 <= args.scene_transform_strength <= 1.5:
+        parser.error("--scene-transform-strength must be between 0 and 1.5")
     if args.grade != "none" and args.output_format == "ultrahdr":
         parser.error("成片风格暂不支持 Ultra HDR 输出")
     return args
@@ -153,6 +168,9 @@ def main(argv: list[str]) -> int:
 
         bundle = load_raw(args.path, args.highlight_mode, demosaic=args.demosaic, wb_mode=args.wb)
         analysis, y, ev = analyze(bundle, args.margin)
+        look, look_strength, display_filter, filter_strength = resolve_grade(
+            args.grade, args.grade_strength
+        )
 
         ev_input = parse_ev_value(args.ev)
         auto_ev_result: AutoEvResult | None = None
@@ -161,7 +179,16 @@ def main(argv: list[str]) -> int:
             if args.jpeg is None and not scan_requested:
                 raise ValueError("--ev auto 需要同时导出 JPEG（--jpeg）或诊断图（--scan / --out）")
             resolved_ev, auto_ev_result = resolve_export_ev(
-                ev_input, bundle, analysis, jpeg_output_gamut
+                ev_input,
+                bundle,
+                analysis,
+                jpeg_output_gamut,
+                look,
+                look_strength,
+                display_filter,
+                filter_strength,
+                args.scene_transform,
+                args.scene_transform_strength,
             )
         else:
             resolved_ev = float(ev_input)
@@ -172,9 +199,17 @@ def main(argv: list[str]) -> int:
 
         jpeg_path = args.jpeg
         jpeg_icc_embedded = False
-        tone_plan = plan_for_mode(bundle, analysis, RENDER_MODE, jpeg_output_gamut) if jpeg_path is not None else None
-        look, look_strength, display_filter, filter_strength = resolve_grade(
-            args.grade, args.grade_strength
+        tone_plan = (
+            plan_for_mode(
+                bundle,
+                analysis,
+                RENDER_MODE,
+                jpeg_output_gamut,
+                args.scene_transform,
+                args.scene_transform_strength,
+            )
+            if jpeg_path is not None
+            else None
         )
         if jpeg_path is not None:
             jpeg_icc_embedded = export_jpeg(
@@ -193,6 +228,8 @@ def main(argv: list[str]) -> int:
                 look_strength,
                 display_filter,
                 filter_strength,
+                args.scene_transform,
+                args.scene_transform_strength,
             )
 
         row = csv_row(
@@ -207,6 +244,10 @@ def main(argv: list[str]) -> int:
             tone_plan,
             jpeg_output_gamut,
             auto_ev_result,
+            args.grade,
+            args.grade_strength,
+            args.scene_transform,
+            args.scene_transform_strength,
         )
         if args.csv is not None:
             write_csv(args.csv, row)
@@ -223,6 +264,10 @@ def main(argv: list[str]) -> int:
             tone_plan,
             jpeg_output_gamut,
             auto_ev_result,
+            args.grade,
+            args.grade_strength,
+            args.scene_transform,
+            args.scene_transform_strength,
         )
         if jpeg_path is not None and args.output_format == "ultrahdr":
             print(f"JPEG HDR: ISO 21496-1 gain-map；headroom=+{args.hdr_headroom:.2f}EV；gain map scale=1/{args.hdr_gainmap_scale}")

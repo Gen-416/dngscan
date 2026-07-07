@@ -10,6 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import dngscan as dg
+from dngscan.grade import resolve_grade
 
 FILES = [
     Path("/Users/itoshikigen/Pictures/_SDI0199.DNG"),
@@ -18,12 +19,12 @@ FILES = [
 ]
 
 JOBS = [
-    ("neutral", "neutral", "none", "srgb"),
-    ("smart", "smart", "none", "p3"),
-    ("agx", "agx", "none", "p3"),
-    ("agx_classic", "agx", "classic", "p3"),
-    ("agx_reveal", "agx", "reveal", "p3"),
-    ("tony", "tony", "none", "p3"),
+    ("agx", "none", "p3"),
+    ("agx_classic", "look:classic", "p3"),
+    ("agx_reveal", "look:reveal", "p3"),
+    ("agx_fuji_velvia", "look:fuji_velvia", "p3"),
+    ("agx_kodak", "filter:kodak_2383_d65", "p3"),
+    ("agx_red", "filter:red_ipp2_rec709_medium", "p3"),
 ]
 
 JPEG_QUALITY = 100
@@ -52,28 +53,37 @@ def run_one(path: Path, outdir: Path) -> list[dict]:
     }
     rows.append({"kind": "analysis", **base})
 
-    for suffix, mode, look, gamut in JOBS:
-        auto = dg.compute_auto_ev(bundle, analysis, mode, gamut)
-        bundle.exposure_gain = dg.compute_exposure_gain(mode, auto.ev)
-        plan = dg.plan_for_mode(bundle, analysis, mode, gamut) if mode != "neutral" else None
+    for suffix, grade, gamut in JOBS:
+        look, look_strength, display_filter, filter_strength = resolve_grade(grade, 1.0)
+        auto = dg.compute_auto_ev(
+            bundle,
+            analysis,
+            gamut,
+            look=look,
+            look_strength=look_strength,
+            display_filter=display_filter,
+            filter_strength=filter_strength,
+        )
+        bundle.exposure_gain = dg.compute_exposure_gain("agx", auto.ev)
+        plan = dg.plan_for_mode(bundle, analysis, "agx", gamut)
         jpg = outdir / f"{stem}_{suffix}_p3.jpg" if gamut == "p3" else outdir / f"{stem}_{suffix}.jpg"
-        if gamut == "srgb" and suffix != "neutral":
+        if gamut == "srgb" and suffix != "agx":
             jpg = outdir / f"{stem}_{suffix}_srgb.jpg"
         t0 = time.perf_counter()
         dg.export_jpeg(
             path,
             jpg,
             JPEG_QUALITY,
-            mode,
             bundle,
             analysis,
-            None,
             plan,
             gamut,
             "sdr",
             subsampling=JPEG_SUBSAMPLING,
             look=look,
-            look_strength=1.0,
+            look_strength=look_strength,
+            display_filter=display_filter,
+            filter_strength=filter_strength,
         )
         elapsed = time.perf_counter() - t0
         anchored = analysis.median_vs_gray_ev + math.log2(max(bundle.exposure_gain, 1e-12))
@@ -82,8 +92,10 @@ def run_one(path: Path, outdir: Path) -> list[dict]:
                 "kind": "export",
                 "file": stem,
                 "suffix": suffix,
-                "mode": mode,
+                "mode": "agx",
+                "grade": grade,
                 "look": look,
+                "display_filter": display_filter,
                 "gamut": gamut,
                 "quality": JPEG_QUALITY,
                 "chroma": "444",

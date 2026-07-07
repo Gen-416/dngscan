@@ -11,9 +11,11 @@ from dngscan.auto_ev import (
     is_ev_auto,
     median_align_ev,
     parse_ev_value,
+    render_sample_linear_output,
     resolve_export_ev,
 )
-from dngscan.models import Analysis, RawBundle
+from dngscan._deps import np
+from dngscan.models import Analysis, RawBundle, ToneCompressionPlan
 from dngscan.tone import compute_exposure_gain
 
 
@@ -129,6 +131,37 @@ def _minimal_bundle() -> RawBundle:
     )
 
 
+def _minimal_plan() -> ToneCompressionPlan:
+    return ToneCompressionPlan(
+        target_gamut="Rec2020",
+        luma_p1=0.01,
+        luma_p50=0.18,
+        luma_p99=0.75,
+        luma_p999=0.9,
+        black_ev=-8.0,
+        white_ev=4.0,
+        dynamic_range_ev=12.0,
+        contrast=3.0,
+        toe_power=1.5,
+        shoulder_power=3.0,
+        chroma_strength=0.0,
+        chroma_p95=0.0,
+        negative_rgb_pct=0.0,
+        over_rgb_pct=0.0,
+        tony_hdr_gain=1.0,
+    )
+
+
+def test_render_sample_output_does_not_mutate_bundle_gain():
+    bundle = _minimal_bundle()
+    bundle.exposure_gain = 7.0
+    sample = np.full((8, 3), 0.25, dtype=np.float32)
+
+    render_sample_linear_output(bundle, None, "p3", 1.0, sample, tone_plan=_minimal_plan())
+
+    assert bundle.exposure_gain == 7.0
+
+
 def test_compute_auto_ev_boost_only_high_key():
     analysis = _minimal_analysis(+1.5)
     bundle = _minimal_bundle()
@@ -155,6 +188,7 @@ class AutoEvTest(unittest.TestCase):
     test_median_align_ev_agx = staticmethod(test_median_align_ev_agx)
     test_median_align_ev_neutral = staticmethod(test_median_align_ev_neutral)
     test_resolve_export_ev_manual = staticmethod(test_resolve_export_ev_manual)
+    test_render_sample_output_does_not_mutate_bundle_gain = staticmethod(test_render_sample_output_does_not_mutate_bundle_gain)
     test_compute_auto_ev_boost_only_high_key = staticmethod(test_compute_auto_ev_boost_only_high_key)
     test_compute_auto_ev_caps_upward_boost = staticmethod(test_compute_auto_ev_caps_upward_boost)
 

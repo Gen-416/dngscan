@@ -140,15 +140,17 @@ def preview_metrics_from_u8(rgb_u8: object, gamut: str) -> dict[str, float]:
         return {}
     rgb = np.asarray(rgb_u8, dtype=np.uint8)
     flat_u8 = rgb.reshape(-1, 3)
+    encoded = flat_u8.astype(np.float32) / np.float32(255.0)
+    linear = dg.srgb_decode(encoded)
     max_channel = np.max(flat_u8, axis=1)
     weights = dg.RGB_TO_XYZ[dg.output_gamut_space(gamut)][1].astype(np.float32)
-    y_u8 = (
-        weights[0] * flat_u8[:, 0].astype(np.float32)
-        + weights[1] * flat_u8[:, 1].astype(np.float32)
-        + weights[2] * flat_u8[:, 2].astype(np.float32)
+    y = (
+        weights[0] * linear[:, 0].astype(np.float32)
+        + weights[1] * linear[:, 1].astype(np.float32)
+        + weights[2] * linear[:, 2].astype(np.float32)
     )
     return {
-        "luma_p999_pct": float(np.percentile(y_u8, 99.9) / 255.0 * 100.0),
+        "luma_p999_pct": float(np.percentile(y, 99.9) * 100.0),
         "near_white_pct": float(np.mean(max_channel >= 250) * 100.0),
         "clipped_channel_pct": float(np.mean(max_channel >= 254) * 100.0),
     }
@@ -165,7 +167,7 @@ def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, flo
     encoded = encoded_u8.astype(np.float32) / np.float32(255.0)
     flat = encoded.reshape(-1, 3)
     max_channel_u8 = np.max(encoded_u8.reshape(-1, 3), axis=1)
-    linear = np.where(flat <= 0.04045, flat / 12.92, np.power((flat + 0.055) / 1.055, 2.4))
+    linear = dg.srgb_decode(flat)
     matrix = dg.RGB_TO_XYZ[dg.output_gamut_space(gamut)]
     y = matrix[1, 0] * linear[:, 0] + matrix[1, 1] * linear[:, 1] + matrix[1, 2] * linear[:, 2]
     y = np.clip(np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
@@ -213,10 +215,24 @@ def estimate_ev_headroom(
     gamut: str,
     current_ev: float,
     max_samples: int = 220_000,
+    look: str = "none",
+    look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
 ) -> dict[str, float | str]:
     if analysis is None:
         return {}
-    safe_ev = dg.max_safe_ev(bundle, analysis, gamut, from_ev=current_ev, max_samples=max_samples)
+    safe_ev = dg.max_safe_ev(
+        bundle,
+        analysis,
+        gamut,
+        from_ev=current_ev,
+        max_samples=max_samples,
+        look=look,
+        look_strength=look_strength,
+        display_filter=display_filter,
+        filter_strength=filter_strength,
+    )
     return {
         "safe_ev_remaining": max(0.0, float(safe_ev - current_ev)),
         "estimated_safe_ev": float(safe_ev),
@@ -278,6 +294,14 @@ def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, gamut: str) -> 
     return dg.plan_for_mode(bundle, analysis, RENDER_MODE, gamut)
 
 
+def parse_scene_transform(params: dict) -> tuple[str, float]:
+    transform = dg.validate_scene_transform(str(params.get("sceneTransform", "none")))
+    strength = float(params.get("sceneTransformStrength", params.get("scene_transform_strength", 1.0)))
+    if not 0.0 <= strength <= 1.5:
+        raise ValueError("scene transform 强度需在 0-1.5 之间")
+    return transform, strength
+
+
 def export_preview_jpeg(
     inp: Path,
     highlight: str,
@@ -290,6 +314,8 @@ def export_preview_jpeg(
     look_strength: float = 1.0,
     display_filter: str = "none",
     filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
     auto_ev: dg.AutoEvResult | None = None,
 ) -> dict:
     dg.require_dependencies()
@@ -312,11 +338,19 @@ def export_preview_jpeg(
         exposure_gain=dg.compute_exposure_gain(RENDER_MODE, ev),
     )
     with RENDER_LOCK:
-        tone_plan = plan_for_bundle(proxy_bundle, cached.analysis, gamut)
+        tone_plan = dg.plan_for_mode(
+            proxy_bundle,
+            cached.analysis,
+            RENDER_MODE,
+            gamut,
+            scene_transform,
+            scene_transform_strength,
+        )
         icc_profile = dg.output_icc_profile_bytes(gamut)
         rgb_u8 = dg.render_output_u8(
             proxy_bundle, cached.analysis, gamut, tone_plan,
             look, look_strength, display_filter, filter_strength,
+            scene_transform, scene_transform_strength,
         )
         if auto_ev is not None:
             rgb_u8 = annotate_preview_rgb_u8(rgb_u8, dg.auto_ev_overlay_lines(auto_ev))
@@ -331,6 +365,8 @@ def export_preview_jpeg(
         "ev": ev,
         "highlight": dg.highlight_mode_cn(highlight),
         "gamut": dg.output_gamut_label(gamut),
+        "scene_transform": dg.scene_transform_label(scene_transform),
+        "scene_transform_strength": scene_transform_strength,
         "ev_auto": auto_ev_payload(auto_ev),
     }
     return payload
@@ -349,6 +385,7 @@ def run_preview(params: dict) -> dict:
     if wb not in dg.WB_CHOICES:
         raise ValueError(f"未知白平衡模式：{wb}")
     look, look_strength, display_filter, filter_strength = parse_grade(params)
+    scene_transform, scene_transform_strength = parse_scene_transform(params)
     auto_ev_result = None
     if ev_auto:
         stat = inp.stat()
@@ -363,7 +400,17 @@ def run_preview(params: dict) -> dict:
             with PREVIEW_CACHE_LOCK:
                 PREVIEW_CACHE.clear()
                 PREVIEW_CACHE[key] = cached
-        auto_ev_result = dg.compute_auto_ev(cached.bundle, cached.analysis, gamut)
+        auto_ev_result = dg.compute_auto_ev(
+            cached.bundle,
+            cached.analysis,
+            gamut,
+            look=look,
+            look_strength=look_strength,
+            display_filter=display_filter,
+            filter_strength=filter_strength,
+            scene_transform=scene_transform,
+            scene_transform_strength=scene_transform_strength,
+        )
         ev = auto_ev_result.ev
     return export_preview_jpeg(
         inp,
@@ -376,8 +423,38 @@ def run_preview(params: dict) -> dict:
         look_strength=look_strength,
         display_filter=display_filter,
         filter_strength=filter_strength,
+        scene_transform=scene_transform,
+        scene_transform_strength=scene_transform_strength,
         auto_ev=auto_ev_result,
     )
+
+
+def export_suffix_parts(
+    highlight: str,
+    gamut: str,
+    output_format: str,
+    grade: str = "none",
+    grade_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
+) -> str:
+    """Build the filename stem suffix for GUI JPEG/PNG exports."""
+    parts = ["agx"]
+    if highlight != "clip":
+        parts.append(highlight)
+    if gamut != "srgb":
+        parts.append(gamut)
+    if output_format == "ultrahdr":
+        parts.append("hdr")
+    if grade != "none":
+        parts.append(grade.replace(":", "_"))
+        if abs(float(grade_strength) - 1.0) > 1e-6:
+            parts.append(f"gs{float(grade_strength):g}")
+    if scene_transform != "none":
+        parts.append(scene_transform)
+        if abs(float(scene_transform_strength) - 1.0) > 1e-6:
+            parts.append(f"st{float(scene_transform_strength):g}")
+    return "_".join(parts)
 
 
 def run_export(params: dict) -> dict:
@@ -394,24 +471,45 @@ def run_export(params: dict) -> dict:
     if wb not in dg.WB_CHOICES:
         raise ValueError(f"未知白平衡模式：{wb}")
     look, look_strength, display_filter, filter_strength = parse_grade(params)
+    scene_transform, scene_transform_strength = parse_scene_transform(params)
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
 
     analysis, y, ev_img = dg.analyze(bundle, 4)
     auto_ev_result = None
     if ev_auto:
-        auto_ev_result = dg.compute_auto_ev(bundle, analysis, gamut)
+        auto_ev_result = dg.compute_auto_ev(
+            bundle,
+            analysis,
+            gamut,
+            look=look,
+            look_strength=look_strength,
+            display_filter=display_filter,
+            filter_strength=filter_strength,
+            scene_transform=scene_transform,
+            scene_transform_strength=scene_transform_strength,
+        )
         ev = auto_ev_result.ev
     bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
-    tone_plan = plan_for_bundle(bundle, analysis, gamut)
+    tone_plan = dg.plan_for_mode(
+        bundle,
+        analysis,
+        RENDER_MODE,
+        gamut,
+        scene_transform,
+        scene_transform_strength,
+    )
 
-    suffix_parts = ["agx"]
-    if highlight != "clip":
-        suffix_parts.append(highlight)
-    if gamut != "srgb":
-        suffix_parts.append(gamut)
-    if output_format == "ultrahdr":
-        suffix_parts.append("hdr")
-    suffix = "_".join(suffix_parts)
+    grade_id = str(params.get("grade", "none"))
+    grade_strength = float(params.get("gradeStrength", params.get("grade_strength", 1.0)))
+    suffix = export_suffix_parts(
+        highlight,
+        gamut,
+        output_format,
+        grade_id,
+        grade_strength,
+        scene_transform,
+        scene_transform_strength,
+    )
     jpg_path = outdir / f"{inp.stem}_{suffix}.jpg"
     with RENDER_LOCK:
         bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
@@ -432,9 +530,25 @@ def run_export(params: dict) -> dict:
             look_strength,
             display_filter,
             filter_strength,
+            scene_transform,
+            scene_transform_strength,
         )
         metrics = output_luminance_metrics(jpg_path, gamut, ev)
-        metrics.update(estimate_ev_headroom(bundle, analysis, gamut, ev, max_samples=600_000))
+        metrics.update(
+            estimate_ev_headroom(
+                bundle,
+                analysis,
+                gamut,
+                ev,
+                max_samples=600_000,
+                look=look,
+                look_strength=look_strength,
+                display_filter=display_filter,
+                filter_strength=filter_strength,
+                scene_transform=scene_transform,
+                scene_transform_strength=scene_transform_strength,
+            )
+        )
         preview = make_preview_b64(jpg_path, icc_profile=icc_profile)
         if auto_ev_result is not None:
             from PIL import Image
@@ -446,7 +560,7 @@ def run_export(params: dict) -> dict:
         saved = [str(jpg_path)]
 
         if want_png:
-            png_path = outdir / f"{inp.stem}_scan.png"
+            png_path = outdir / f"{inp.stem}_{suffix}_scan.png"
             dg.plot_dashboard(bundle, analysis, y, ev_img, png_path, auto_ev=auto_ev_result)
             saved.append(str(png_path))
 
@@ -463,5 +577,6 @@ def run_export(params: dict) -> dict:
         "hdr_headroom": hdr_headroom if output_format == "ultrahdr" else 0.0,
         "highlight": dg.highlight_mode_cn(highlight),
         "gamut": dg.output_gamut_label(gamut),
+        "scene_transform": dg.scene_transform_label(scene_transform),
+        "scene_transform_strength": scene_transform_strength,
     }
-

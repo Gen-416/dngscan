@@ -364,14 +364,24 @@ def export_ultrahdr_jpeg(
     tone_plan: ToneCompressionPlan | None = None,
     hdr_headroom: float = DEFAULT_HDR_HEADROOM_EV,
     gainmap_scale: int = DEFAULT_GAINMAP_SCALE,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> bool:
     output_gamut = "p3"
     try:
         from .grade import RENDER_MODE
         from .tone import plan_for_mode
 
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, RENDER_MODE, output_gamut)
-        sdr_linear = scene_render_to_agx_linear(bundle, plan, output_gamut)
+        plan = tone_plan if tone_plan is not None else plan_for_mode(
+            bundle, analysis, RENDER_MODE, output_gamut, scene_transform, scene_transform_strength
+        )
+        sdr_linear = scene_render_to_agx_linear(
+            bundle,
+            plan,
+            output_gamut,
+            scene_transform=scene_transform,
+            scene_transform_strength=scene_transform_strength,
+        )
         hdr_linear = render_hdr_numerator_linear(bundle, sdr_linear, output_gamut, hdr_headroom)
         base_u8 = output_linear_to_u8(sdr_linear)
         meta = build_gainmap_metadata(hdr_headroom, gainmap_scale)
@@ -402,11 +412,14 @@ def export_srgb_jpeg(
     look_strength: float = 1.0,
     display_filter: str = "none",
     filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> bool:
     try:
         rgb = render_output_u8(
             bundle, analysis, output_gamut, tone_plan,
             look, look_strength, display_filter, filter_strength,
+            scene_transform, scene_transform_strength,
         )
         return save_jpeg_array(rgb, out_path, quality, output_gamut, subsampling)
     except Exception as exc:
@@ -429,6 +442,8 @@ def export_jpeg(
     look_strength: float = 1.0,
     display_filter: str = "none",
     filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> bool:
     if output_format == "ultrahdr":
         if look != "none" or display_filter != "none":
@@ -442,11 +457,13 @@ def export_jpeg(
             tone_plan,
             hdr_headroom,
             gainmap_scale,
+            scene_transform,
+            scene_transform_strength,
         )
     if output_format != "sdr":
         raise ValueError(f"unknown output format: {output_format}")
     return export_srgb_jpeg(
         path, out_path, quality, bundle, analysis, tone_plan, output_gamut, subsampling,
         look, look_strength, display_filter, filter_strength,
+        scene_transform, scene_transform_strength,
     )
-

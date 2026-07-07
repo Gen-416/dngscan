@@ -11,9 +11,13 @@ PAGE = """<!doctype html>
 :root{color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;font:14px/1.5 -apple-system,"PingFang SC",system-ui,sans-serif;background:#15171c;color:#e7e9ee}
-.wrap{max-width:960px;margin:0 auto;padding:22px}
+.wrap{max-width:1480px;margin:0 auto;padding:22px}
 h1{font-size:17px;font-weight:600;margin:0 0 16px}
 .card{background:#1d2028;border:1px solid #2b2f3a;border-radius:12px;padding:16px;margin-bottom:14px}
+.workspace{display:grid;grid-template-columns:minmax(360px,480px) minmax(0,1fr);gap:14px;align-items:start}
+.controlPanel{min-width:0}
+.previewCard{position:sticky;top:16px;min-height:calc(100vh - 44px);display:flex;flex-direction:column}
+.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 label{display:block;font-size:12px;color:#9aa1b0;margin:0 0 6px}
 input[type=text],input[type=number],select{width:100%;background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#e7e9ee;padding:8px 10px;font:inherit}
 .row{display:flex;gap:12px;flex-wrap:wrap}
@@ -37,15 +41,22 @@ button.preview:disabled{opacity:.5;cursor:default}
 #browser{display:none;margin-top:10px;border:1px solid #2b2f3a;border-radius:8px;max-height:260px;overflow:auto;background:#12141a}
 #browser div{padding:6px 10px;cursor:pointer;border-bottom:1px solid #20242e;font-size:13px}
 #browser div:hover{background:#1a2233}
-#previewWrap{position:relative;margin-top:12px;min-height:0}
-#previewWrap.loading{min-height:240px}
-#preview{max-width:100%;border-radius:8px;display:none;transition:opacity .15s ease}
+#previewWrap{position:relative;margin-top:12px;min-height:420px;flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#11141a;border:1px solid #2b2f3a;border-radius:8px}
+#previewWrap.loading{min-height:420px}
+#preview{max-width:100%;max-height:calc(100vh - 190px);border-radius:8px;display:none;transition:opacity .15s ease;object-fit:contain}
 #previewWrap.loading #preview{opacity:.4}
 #spinner{display:none;position:absolute;left:50%;top:50%;width:34px;height:34px;margin:-17px 0 0 -17px;border:3px solid rgba(255,255,255,.22);border-top-color:#eef2ff;border-radius:50%;animation:spin .8s linear infinite}
 #previewWrap.loading #spinner{display:block}
 @keyframes spin{to{transform:rotate(360deg)}}
 .dim{opacity:.45;pointer-events:none}
 .chk{display:flex;align-items:center;gap:8px}.chk input{width:auto}
+@media (max-width:980px){
+  .wrap{padding:14px}
+  .workspace{display:block}
+  .previewCard{position:static;min-height:0}
+  #previewWrap{min-height:260px}
+  #preview{max-height:none}
+}
 </style></head>
 <body><div class="wrap">
 <h1>dngscan · AgX RAW → JPEG</h1>
@@ -59,6 +70,8 @@ button.preview:disabled{opacity:.5;cursor:default}
   <div id="browser"></div>
 </div>
 
+<div class="workspace">
+<div class="controlPanel">
 <div class="card">
   <div class="row">
     <div>
@@ -105,6 +118,16 @@ button.preview:disabled{opacity:.5;cursor:default}
 GRADE_OPTIONS
       </select>
     </div>
+    <div style="flex:0;min-width:220px">
+      <label>AgX 前馈</label>
+      <select id="sceneTransform" title="相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 前馈">
+SCENE_TRANSFORM_OPTIONS
+      </select>
+    </div>
+    <div id="sceneTransformStrengthBlock" style="flex:0;min-width:180px;display:none">
+      <label>前馈强度</label>
+      <div class="evrow"><input type="range" id="sceneTransformStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="sceneTransformStrengthVal">1.00</span></div>
+    </div>
     <div id="gradeStrengthBlock" style="flex:0;min-width:180px;display:none">
       <label>风格强度</label>
       <div class="evrow"><input type="range" id="gradeStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="gradeStrengthVal">1.00</span></div>
@@ -149,13 +172,17 @@ GRADE_OPTIONS
     <input type="checkbox" id="png"><label for="png" style="margin:0">同时导出六面板分析 PNG</label>
   </div>
 </div>
+</div>
 
-<div class="card">
-  <button class="preview" id="previewBtn">预览</button>
-  <button class="go" id="go">导出</button>
-  <button class="ghost" id="revealBtn" style="display:none">在 Finder 中显示</button>
+<div class="card previewCard">
+  <div class="actions">
+    <button class="preview" id="previewBtn">预览</button>
+    <button class="go" id="go">导出</button>
+    <button class="ghost" id="revealBtn" style="display:none">在 Finder 中显示</button>
+  </div>
   <div id="status"></div>
   <div id="previewWrap"><img id="preview"><div id="spinner"></div></div>
+</div>
 </div>
 
 <script>
@@ -163,6 +190,8 @@ const $=s=>document.querySelector(s);
 const STORE_KEY="dngscan.settings.v4";
 function setGradeStrengthLabel(){const v=+$("#gradeStrength").value;$("#gradeStrengthVal").textContent=v.toFixed(2);}
 function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").value!=="none"?"block":"none";}
+function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
+function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
 function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}
 function fmtPct(v){if(v===undefined||!isFinite(v))return "";if(v<=0)return "0%";if(v<0.005)return "<0.01%";if(v<1)return "~"+v.toFixed(2)+"%";return v.toFixed(1)+"%";}
@@ -187,6 +216,11 @@ function evAutoStatus(j){
   if(a.highlight_limited)t+="（高光限制，目标 "+fmtEv(a.ev_median_target)+"）";
   return t;
 }
+function sceneTransformText(j){
+  if(!j.scene_transform||j.scene_transform==="无")return "";
+  const s=j.scene_transform_strength!==undefined?" "+(+j.scene_transform_strength).toFixed(2):"";
+  return "，前馈 "+j.scene_transform+s;
+}
 function applyJobEv(j){
   if(j.ev!==undefined){$("#ev").value=j.ev;setEvLabel();saveSettings();}
 }
@@ -195,6 +229,7 @@ function saveSettings(){
     input:$("#input").value,ev:$("#ev").value,quality:$("#quality").value,
     highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     grade:$("#grade").value,gradeStrength:$("#gradeStrength").value,
+    sceneTransform:$("#sceneTransform").value,sceneTransformStrength:$("#sceneTransformStrength").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -209,23 +244,35 @@ function restoreSettings(){
   if(s.demosaic)$("#demosaic").value=s.demosaic;
   if(s.chroma)$("#chroma").value=s.chroma;
   if(s.grade&&[...$("#grade").options].some(o=>o.value===s.grade))$("#grade").value=s.grade;
-  else if(s.filter&&s.filter!=="none"&&[...$("#grade").options].some(o=>o.value===s.filter))$("#grade").value=s.filter;
-  else if(s.look&&s.look!=="none"&&[...$("#grade").options].some(o=>o.value===s.look))$("#grade").value=s.look;
+  else if(s.filter&&s.filter!=="none"){
+    const fid="filter:"+s.filter;
+    if([...$("#grade").options].some(o=>o.value===fid))$("#grade").value=fid;
+    else if([...$("#grade").options].some(o=>o.value===s.filter))$("#grade").value=s.filter;
+  }
+  else if(s.look&&s.look!=="none"){
+    const lid="look:"+s.look;
+    if([...$("#grade").options].some(o=>o.value===lid))$("#grade").value=lid;
+    else if([...$("#grade").options].some(o=>o.value===s.look))$("#grade").value=s.look;
+  }
   if(s.gradeStrength!==undefined)$("#gradeStrength").value=s.gradeStrength;
   else if(s.filterStrength!==undefined&&s.filter&&s.filter!=="none")$("#gradeStrength").value=s.filterStrength;
   else if(s.lookStrength!==undefined)$("#gradeStrength").value=s.lookStrength;
+  if(s.sceneTransform&&[...$("#sceneTransform").options].some(o=>o.value===s.sceneTransform))$("#sceneTransform").value=s.sceneTransform;
+  if(s.sceneTransformStrength!==undefined)$("#sceneTransformStrength").value=s.sceneTransformStrength;
   if(s.format)$("#format").value=s.format;
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
-  setEvLabel();setHdrLabel();setGradeStrengthLabel();updateGradeUi();
+  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();updateGradeUi();updateSceneTransformUi();
 }
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
 ["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
+$("#sceneTransform").addEventListener("change",()=>{updateSceneTransformUi();saveSettings();});
 $("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$("#gamut").value="p3";saveSettings();});
 $("#ev").oninput=()=>{setEvLabel();saveSettings();};
 $("#hdrHeadroom").oninput=()=>{setHdrLabel();saveSettings();};
 $("#gradeStrength").oninput=()=>{setGradeStrengthLabel();saveSettings();};
+$("#sceneTransformStrength").oninput=()=>{setSceneTransformStrengthLabel();saveSettings();};
 restoreSettings();
 document.querySelectorAll("button[data-ev]").forEach(b=>b.onclick=()=>{$("#ev").value=b.dataset.ev;setEvLabel();saveSettings();});
 let lastSavedPath="";
@@ -247,6 +294,7 @@ function payload(){
   return {
     input,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     grade:$("#grade").value,gradeStrength:+$("#gradeStrength").value,
+    sceneTransform:$("#sceneTransform").value,sceneTransformStrength:+$("#sceneTransformStrength").value,
     hdrHeadroom:+$("#hdrHeadroom").value,ev:+$("#ev").value,quality:+$("#quality").value,
     outdir:$("#outdir").value.trim(),png:$("#png").checked
   };
@@ -268,7 +316,7 @@ function setPreviewImage(b64, ondone){
 function handleJobResult(j, prefix){
   if(!j.ok)return false;
   applyJobEv(j);
-  setStatus(prefix+"：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+evAutoStatus(j)+metricText(j),"ok");
+  setStatus(prefix+"：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+sceneTransformText(j)+evAutoStatus(j)+metricText(j),"ok");
   setPreviewImage(j.preview);
   return true;
 }
@@ -300,7 +348,7 @@ $("#go").onclick=async()=>{
   try{
     const j=await postJob("/export",body);
     if(!j.ok){endBusy();setStatus("错误："+j.error,"err");}
-    else{applyJobEv(j);setStatus("已保存："+j.saved.join(" · ")+"（"+j.format+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+evAutoStatus(j)+metricText(j)+"）","ok");
+    else{applyJobEv(j);setStatus("已保存："+j.saved.join(" · ")+"（"+j.format+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+sceneTransformText(j)+evAutoStatus(j)+metricText(j)+"）","ok");
       lastSavedPath=j.saved[0]||"";$("#revealBtn").style.display=lastSavedPath?"inline-block":"none";setPreviewImage(j.preview);}
   }catch(e){endBusy();setStatus("请求失败："+e,"err");}
   $("#go").disabled=false;$("#previewBtn").disabled=false;
@@ -320,11 +368,16 @@ function setStatus(t,c){const s=$("#status");s.textContent=t;s.className=c||"";}
 """
 
 
-_LOOK_LABELS = {"classic": "ARRI Classic 709", "reveal": "ARRI Reveal 709"}
+_LOOK_LABELS = {
+    "classic": "ARRI Classic 709",
+    "reveal": "ARRI Reveal 709",
+    "optic_warm_cyan": "Optic Warm/Cyan",
+}
 
 
 def _grade_options_html() -> str:
     from ..display_filter import DISPLAY_FILTERS, FILTER_CHOICES
+    from ..grade import grade_id_for_filter, grade_id_for_look
     from ..look import LOOK_CHOICES
 
     lines = ['        <option value="none">无</option>']
@@ -333,17 +386,32 @@ def _grade_options_html() -> str:
         if name == "none":
             continue
         label = _LOOK_LABELS.get(name, name.replace("fuji_", "Fujifilm ").replace("_", " "))
-        lines.append(f'          <option value="{name}">{label}</option>')
+        gid = grade_id_for_look(name)
+        lines.append(f'          <option value="{gid}">{label}</option>')
     lines.append("        </optgroup>")
     lines.append('        <optgroup label="输出滤镜（Kodak / RED IPP2）">')
     for name in FILTER_CHOICES:
         if name == "none":
             continue
-        lines.append(f'          <option value="{name}">{DISPLAY_FILTERS[name].label}</option>')
+        gid = grade_id_for_filter(name)
+        lines.append(f'          <option value="{gid}">{DISPLAY_FILTERS[name].label}</option>')
     lines.append("        </optgroup>")
     return "\n".join(lines)
 
 
+def _scene_transform_options_html() -> str:
+    from ..scene_transform import SCENE_TRANSFORM_CHOICES, scene_transform_label
+
+    lines = []
+    for name in SCENE_TRANSFORM_CHOICES:
+        lines.append(f'        <option value="{name}">{scene_transform_label(name)}</option>')
+    return "\n".join(lines)
+
+
 def render_page(init_dir: str) -> bytes:
-    html = PAGE.replace("INIT_DIR", json.dumps(init_dir)).replace("GRADE_OPTIONS", _grade_options_html())
+    html = (
+        PAGE.replace("INIT_DIR", json.dumps(init_dir))
+        .replace("GRADE_OPTIONS", _grade_options_html())
+        .replace("SCENE_TRANSFORM_OPTIONS", _scene_transform_options_html())
+    )
     return html.encode("utf-8")

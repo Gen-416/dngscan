@@ -68,6 +68,11 @@ def srgb_encode(linear: Any) -> Any:
     return np.where(linear <= 0.0031308, linear * 12.92, 1.055 * np.power(linear, 1.0 / 2.4) - 0.055)
 
 
+def srgb_decode(encoded: Any) -> Any:
+    v = np.clip(encoded, 0.0, 1.0)
+    return np.where(v <= 0.04045, v / 12.92, np.power((v + 0.055) / 1.055, 2.4))
+
+
 def apply_rgb_matrix3(rgb: Any, matrix: Any) -> Any:
     out = np.empty((rgb.shape[0], 3), dtype=np.float32)
     out[:, 0] = matrix[0, 0] * rgb[:, 0] + matrix[0, 1] * rgb[:, 1] + matrix[0, 2] * rgb[:, 2]
@@ -174,3 +179,15 @@ def smoothstep(edge0: float, edge1: float, x: Any) -> Any:
     t = np.clip((x - np.float32(edge0)) / np.float32(edge1 - edge0), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
 
+
+def rec709_inverse_oetf(encoded: Any) -> Any:
+    """Decode Rec.709 camera OETF code values to linear light."""
+    v = np.clip(encoded, 0.0, 1.0)
+    a = np.float32(0.099)
+    return np.where(v < np.float32(0.081), v / np.float32(4.5), np.power((v + a) / (np.float32(1.0) + a), 1.0 / 0.45))
+
+
+def bt1886_eotf(encoded: Any) -> Any:
+    """Decode normalized BT.1886 display code to linear light with ideal black."""
+    v = np.clip(encoded, 0.0, 1.0)
+    return np.power(v, np.float32(2.4))

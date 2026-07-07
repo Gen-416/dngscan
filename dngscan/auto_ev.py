@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from typing import Any
 
 from ._deps import np
-from .color import RGB_TO_XYZ, luminance_from_rec2020, output_gamut_space
+from . import display_filter as filter_engine
+from . import scene_transform as scene_transform_engine
+from .color import RGB_TO_XYZ, output_gamut_space, rec2020_to_output
 from .constants import EPS
 from .models import Analysis, AutoEvResult, RawBundle, ToneCompressionPlan
-from .render import apply_agx_core, rec2020_to_output
+from .render import apply_agx_core, finalize_output_linear
 from .tone import compute_exposure_gain, plan_for_mode, scene_rec2020_to_float
 
 EV_AUTO_TOKEN = "auto"
@@ -82,15 +85,39 @@ def render_sample_linear_output(
     ev: float,
     sample_rec2020: Any,
     tone_plan: ToneCompressionPlan | None = None,
+    look: str = "none",
+    look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> Any:
     from .grade import RENDER_MODE
 
-    bundle.exposure_gain = compute_exposure_gain(RENDER_MODE, ev)
-    rec = scene_rec2020_to_float(sample_rec2020, bundle.scene_scale, bundle.exposure_gain)
+    exposure_gain = compute_exposure_gain(RENDER_MODE, ev)
+    ev_bundle = replace(bundle, exposure_gain=exposure_gain)
+    rec = scene_rec2020_to_float(sample_rec2020, bundle.scene_scale, exposure_gain)
     plan = tone_plan if tone_plan is not None else (
-        plan_for_mode(bundle, analysis, RENDER_MODE, gamut) if analysis is not None else None
+        plan_for_mode(
+            ev_bundle,
+            analysis,
+            RENDER_MODE,
+            gamut,
+            scene_transform,
+            scene_transform_strength,
+        ) if analysis is not None else None
     )
-    return rec2020_to_output(apply_agx_core(rec, plan), gamut)
+    rec = scene_transform_engine.apply_scene_transform_rec2020(
+        rec, scene_transform, scene_transform_strength
+    )
+    mapped_rec = apply_agx_core(rec, plan)
+    if display_filter != "none" and filter_strength > 0.0:
+        output_linear = filter_engine.apply_display_filter_rec2020(
+            mapped_rec, gamut, display_filter, filter_strength
+        )
+    else:
+        output_linear = rec2020_to_output(mapped_rec, gamut)
+    return finalize_output_linear(output_linear, gamut, look, look_strength)
 
 
 def max_safe_ev(
@@ -100,6 +127,12 @@ def max_safe_ev(
     from_ev: float = 0.0,
     max_samples: int = 220_000,
     search_hi: float = 3.0,
+    look: str = "none",
+    look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> float:
     """Largest EV (>= from_ev) whose preview-scale output stays below highlight thresholds."""
     from .grade import RENDER_MODE
@@ -109,38 +142,57 @@ def max_safe_ev(
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
     sample_rgb = flat[::step, :3]
-    original_gain = bundle.exposure_gain
-
     baseline_stats: tuple[float, float, float, float] | None = None
 
     def margin_at(ev: float) -> float:
-        rgb = render_sample_linear_output(bundle, analysis, gamut, ev, sample_rgb)
+        rgb = render_sample_linear_output(
+            bundle,
+            analysis,
+            gamut,
+            ev,
+            sample_rgb,
+            look=look,
+            look_strength=look_strength,
+            display_filter=display_filter,
+            filter_strength=filter_strength,
+            scene_transform=scene_transform,
+            scene_transform_strength=scene_transform_strength,
+        )
         return output_highlight_margin(rgb, gamut, baseline_stats)
 
-    try:
-        baseline_rgb = render_sample_linear_output(bundle, analysis, gamut, from_ev, sample_rgb)
-        baseline_stats = output_highlight_stats(baseline_rgb, gamut)
-        if output_highlight_margin(baseline_rgb, gamut, baseline_stats) <= 0.0:
-            return float(from_ev)
+    baseline_rgb = render_sample_linear_output(
+        bundle,
+        analysis,
+        gamut,
+        from_ev,
+        sample_rgb,
+        look=look,
+        look_strength=look_strength,
+        display_filter=display_filter,
+        filter_strength=filter_strength,
+        scene_transform=scene_transform,
+        scene_transform_strength=scene_transform_strength,
+    )
+    baseline_stats = output_highlight_stats(baseline_rgb, gamut)
+    if output_highlight_margin(baseline_rgb, gamut, baseline_stats) <= 0.0:
+        return float(from_ev)
 
-        low = float(from_ev)
-        high = low + 0.5
-        while margin_at(high) > 0.0 and high < from_ev + search_hi:
-            low = high
-            high += 0.5
+    low = float(from_ev)
+    high = low + 0.5
+    while margin_at(high) > 0.0 and high < from_ev + search_hi:
+        low = high
+        high += 0.5
 
-        if margin_at(high) > 0.0:
-            return float(high)
+    if margin_at(high) > 0.0:
+        return float(high)
 
-        for _ in range(6):
-            mid = (low + high) * 0.5
-            if margin_at(mid) > 0.0:
-                low = mid
-            else:
-                high = mid
-        return float(low)
-    finally:
-        bundle.exposure_gain = original_gain
+    for _ in range(6):
+        mid = (low + high) * 0.5
+        if margin_at(mid) > 0.0:
+            low = mid
+        else:
+            high = mid
+    return float(low)
 
 
 def compute_auto_ev(
@@ -148,6 +200,12 @@ def compute_auto_ev(
     analysis: Analysis,
     gamut: str = "p3",
     baseline_ev: float = 0.0,
+    look: str = "none",
+    look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> AutoEvResult:
     """Boost toward 18% gray median when scene is dark; never darken high-key captures.
 
@@ -159,7 +217,18 @@ def compute_auto_ev(
 
     mode = RENDER_MODE
     target = median_align_ev(mode, analysis)
-    cap = max_safe_ev(bundle, analysis, gamut, from_ev=baseline_ev)
+    cap = max_safe_ev(
+        bundle,
+        analysis,
+        gamut,
+        from_ev=baseline_ev,
+        look=look,
+        look_strength=look_strength,
+        display_filter=display_filter,
+        filter_strength=filter_strength,
+        scene_transform=scene_transform,
+        scene_transform_strength=scene_transform_strength,
+    )
     boost_target = max(target, baseline_ev)
     ev = min(boost_target, cap)
     limited = boost_target > cap + 1e-6
@@ -178,10 +247,27 @@ def resolve_export_ev(
     bundle: RawBundle,
     analysis: Analysis,
     gamut: str,
+    look: str = "none",
+    look_strength: float = 1.0,
+    display_filter: str = "none",
+    filter_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> tuple[float, AutoEvResult | None]:
     if not is_ev_auto(ev):
         return float(ev), None
-    result = compute_auto_ev(bundle, analysis, gamut)
+    result = compute_auto_ev(
+        bundle,
+        analysis,
+        gamut,
+        0.0,
+        look,
+        look_strength,
+        display_filter,
+        filter_strength,
+        scene_transform,
+        scene_transform_strength,
+    )
     return result.ev, result
 
 

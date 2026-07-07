@@ -10,6 +10,7 @@
 
 - **诊断** — 六面板 PNG：SNR–档数曲线、逐通道 RAW 分布、RGB 曝光直方图、各输出色域的溢出风险、空间曝光分区图、剪切通道高光图；以及逐通道满阱 / 剪切 / 黑电平 / 白平衡读数。
 - **AgX 导出** — Rec.2020 原生 AgX 视图变换：inset → log2 → sigmoid → outset。通道串扰带来平滑的高光去饱和与 AgX 特有的色相 flourish。所有 JPEG 均走此管线。
+- **AgX 前馈（实验）** — 可选 `--scene-transform arri_skin_d55`，在相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 域，对肤色/青色区域施加受限 3×3 色度矩阵；默认关闭。
 - **成片风格（互斥）** — AgX 之上可选一层（`--grade`）：
   - **色度 Look** — 由官方 LUT 实测的 Oklab 几何（富士胶片模拟、ARRI Classic / Reveal）。色调仍由 AgX 负责；只改色相 / 饱和度 / 肤色塑形。
   - **输出滤镜** — 完整 Log 编码输出变换（Kodak 2383 FPE、RED IPP2），经 Cineon / Log3G10 编码后采样 `.cube`。
@@ -32,6 +33,11 @@ AgX 之前/之中链路固定。`--grade` 在 **同一份 AgX 成品** 上三选
 ┌─────────────────────────────────────────────────────────────┐
 │ ② 分析 + 曝光                                                │
 │    analyze() · EV 手动/auto · compute_exposure_gain(agx)      │
+└────────────────────────────┬────────────────────────────────┘
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│ ②b AgX 前馈（可选）                                          │
+│    scene Rec.2020 ──► skin/cyan chroma mask ──► constrained M │
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
@@ -109,6 +115,8 @@ dngscan/
   cli.py                # 命令行入口
   agx.py                # AgX inset/outset、对数曲线与 sigmoid 核心
   look.py               # 色度 LookField 层（Oklab）
+  scene_transform.py    # AgX 前 scene-linear 前馈层
+  scene_transform_presets.json # demo ARRI skin prefeed 参数
   display_filter.py     # Kodak / RED 显示 LUT 滤镜
   grade.py              # 统一成片风格选择（Look 或滤镜二选一）
   render.py / export.py # scene → AgX → JPEG / Ultra HDR
@@ -117,6 +125,8 @@ dngscan_assets/
   look_fields.json      # 用户实测 look（gitignore）
   vendor_luts/          # 下载的 .cube（gitignore）
   darktable_agx.*       # 本地 AgX 参考副本
+tools/
+  calibrate_skin_matrix.py # 光谱 demo → 前馈矩阵/遮罩 JSON
 ```
 
 ## 用法
@@ -135,6 +145,10 @@ python -m dngscan photo.dng --jpeg out.jpg --grade fuji_velvia --grade-strength 
 
 # Kodak 2383 输出滤镜（Log 编码 .cube）
 python -m dngscan photo.dng --jpeg out.jpg --grade kodak_2383_d65
+
+# AgX 前 ARRI 式肤色前馈（实验；可与后置 grade 分开比较）
+python -m dngscan photo.dng --jpeg out.jpg --scene-transform arri_skin_d55 \
+  --scene-transform-strength 1.0
 
 # 指定去马赛克（默认 auto → Bayer 用 DHT；仅全分辨率导出）
 python -m dngscan photo.dng --jpeg out.jpg --demosaic dht
@@ -174,6 +188,22 @@ python tools/extract_arri_look.py --lut path/to/eterna.cube --source flog2 \
 支持的 `--source` 编码：`logc3, logc4, slog3, vlog, flog, flog2, cineon, log3g10`。当 `mid_chroma_ratio < 0.25` 时会警告（完整输出变换，应走 display filter）。测量在 Oklab 中与 AgX 对比，并用 L 归一化饱和度，使场捕获色度性格而非 LUT 的色调曲线。
 
 输出滤镜 `.cube` 放在 `dngscan_assets/vendor_luts/`（路径见 `display_filter.py`）。
+
+## AgX 前馈
+
+`--scene-transform` 是 AgX 之前的 scene-linear 变换，不是后置滤镜。内置 `arri_skin_d55`
+来自 `tools/calibrate_skin_matrix.py` 的 demo 光谱拟合：用粗略 ALEV3 / IMX410 曲线、D55 光源与
+Sigma fp hot mirror sigmoid 假设生成受限矩阵和色度遮罩。运行时只读取
+`dngscan/scene_transform_presets.json`，不需要 `colour-science` 或 `scipy`。
+
+重新生成默认参数：
+
+```bash
+python tools/calibrate_skin_matrix.py --out dngscan/scene_transform_presets.json
+```
+
+精确校准时，把数字化 ALEV3 SSF、IMX410 QE 和真实皮肤光谱 CSV 传给脚本；当前内置曲线只是为了跑通
+“IMX410 → ALEV 皮肤子空间差异 → 受限矩阵 → AgX 前输入”这条链路。
 
 ## 许可与署名
 

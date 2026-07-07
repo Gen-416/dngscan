@@ -13,9 +13,11 @@ from .analysis import (
 )
 from .color import clamp_float, output_gamut_label
 from .constants import EPS, EV_REPORT_FLOOR
+from .grade import grade_label
+from .scene_transform import scene_transform_label
 from .models import Analysis, AutoEvResult, RawBundle, ToneCompressionPlan
 from .raw_io import highlight_mode_cn
-from .tone import plan_for_mode, smart_mapping_strength
+from .tone import plan_for_mode
 
 def darktable_guidance_lines(bundle: RawBundle, analysis: Analysis) -> list[str]:
     lines = ["Darktable 修图建议:"]
@@ -183,6 +185,10 @@ def print_report(
     tone_plan: ToneCompressionPlan | None = None,
     output_gamut: str = "srgb",
     auto_ev: AutoEvResult | None = None,
+    jpeg_grade: str = "none",
+    jpeg_grade_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> None:
     for line in summary_lines(bundle, analysis):
         print(line)
@@ -205,6 +211,8 @@ def print_report(
             f"{wb_label}；{brighten_note}；"
             f"曝光锚定增益={bundle.exposure_gain:.3f}（{ev_note}）；"
             f"模式={jpeg_mode}；高光处理={highlight_mode_cn(bundle.scene_highlight_mode)}；"
+            f"AgX 前馈={scene_transform_label(scene_transform)}（强度={scene_transform_strength:.2f}）；"
+            f"成片风格={grade_label(jpeg_grade)}（强度={jpeg_grade_strength:.2f}）；"
             f"质量={jpeg_quality}；"
             f"ICC={'已嵌入' if jpeg_icc_embedded else '未嵌入'}"
         )
@@ -224,21 +232,23 @@ def print_report(
                 f"{limit_note}；应用 EV={auto_ev.ev:+.2f}"
             )
         print(f"JPEG 策略: {jpeg_policy_cn(jpeg_mode, output_gamut)}")
-        plan_line = jpeg_tone_plan_cn(bundle, analysis, jpeg_mode, tone_plan, output_gamut)
+        plan_line = jpeg_tone_plan_cn(
+            bundle,
+            analysis,
+            jpeg_mode,
+            tone_plan,
+            output_gamut,
+            scene_transform,
+            scene_transform_strength,
+        )
         if plan_line:
             print(f"JPEG 自动计划: {plan_line}")
 
 
 def jpeg_policy_cn(mode: str, output_gamut: str = "srgb") -> str:
     label = output_gamut_label(output_gamut)
-    if mode == "neutral":
-        return f"neutral: scene-linear Rec.2020 缓冲；白平衡按导出选项；无自动增亮；高光处理按导出选项；不做 tone mapping，转 {label} 时裁切；4:4:4 色度采样"
-    if mode == "smart":
-        return f"smart: scene-linear 转 linear {label}；白平衡按导出选项；无自动增亮；高光处理按导出选项；同空间亮度锚定；基于色域/剪切/高光/色度分析驱动 knee，做 C1 光滑高光肩与色度收敛，亮度轴裁回不歪色相；4:4:4 色度采样"
     if mode == "agx":
         return f"agx: scene-linear Rec.2020 工作空间；白平衡按导出选项；无自动增亮；高光处理按导出选项；分析全图 Y 自动设定 AgX 黑白相对曝光与曲线；Rec.2020 inset→log2→sigmoid→outset 通道串扰，最后转 {label}；4:4:4 色度采样"
-    if mode == "tony":
-        return f"tony: scene-linear Rec.2020 缓冲转 linear sRGB stimulus；白平衡按导出选项；无自动增亮；高光处理按导出选项；LUT 前做亮度锚定高光刺激量与色度压缩，再采样 Tony McMapface 3D LUT，最后色彩管理到 {label}；4:4:4 色度采样"
     return ""
 
 
@@ -248,29 +258,18 @@ def jpeg_tone_plan_cn(
     mode: str,
     tone_plan: ToneCompressionPlan | None = None,
     output_gamut: str = "srgb",
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> str:
-    if mode == "smart":
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-        strength = smart_mapping_strength(analysis, plan)
-        return (
-            f"smart 强度={strength:.2f}；scene Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
-            f"{plan.target_gamut} 负通道={plan.negative_rgb_pct:.2f}%，超 1={plan.over_rgb_pct:.2f}%；色度压缩参考={plan.chroma_strength:.2f}"
-        )
     if mode == "agx":
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
+        plan = tone_plan if tone_plan is not None else plan_for_mode(
+            bundle, analysis, mode, output_gamut, scene_transform, scene_transform_strength
+        )
         return (
             f"AgX 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV，"
             f"DR={plan.dynamic_range_ev:.2f}档；Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
             f"曲线 contrast={plan.contrast:.2f}, toe={plan.toe_power:.2f}, shoulder={plan.shoulder_power:.2f}；"
             f"色度压缩={plan.chroma_strength:.2f}，{plan.target_gamut} 负通道={plan.negative_rgb_pct:.2f}%"
-        )
-    if mode == "tony":
-        plan = tone_plan if tone_plan is not None else plan_for_mode(bundle, analysis, mode, output_gamut)
-        return (
-            f"Tony 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV；"
-            f"Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
-            f"高光输入增益={plan.tony_hdr_gain:.2f}；色度压缩={plan.chroma_strength:.2f}，"
-            f"sRGB 负通道={plan.negative_rgb_pct:.2f}%，超 1={plan.over_rgb_pct:.2f}%"
         )
     return ""
 
@@ -287,6 +286,10 @@ def csv_row(
     tone_plan: ToneCompressionPlan | None = None,
     output_gamut: str = "srgb",
     auto_ev: AutoEvResult | None = None,
+    jpeg_grade: str = "none",
+    jpeg_grade_strength: float = 1.0,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> dict[str, Any]:
     row: dict[str, Any] = {
         "file": str(bundle.path),
@@ -348,6 +351,12 @@ def csv_row(
         "jpeg_highlight_mode_cn": highlight_mode_cn(bundle.scene_highlight_mode) if jpeg_path is not None else "",
         "jpeg_quality": int(jpeg_quality) if jpeg_quality is not None else "",
         "jpeg_ev": jpeg_ev if jpeg_path is not None else "",
+        "jpeg_grade": jpeg_grade if jpeg_path is not None else "",
+        "jpeg_grade_label": grade_label(jpeg_grade) if jpeg_path is not None else "",
+        "jpeg_grade_strength": jpeg_grade_strength if jpeg_path is not None else "",
+        "jpeg_scene_transform": scene_transform if jpeg_path is not None else "",
+        "jpeg_scene_transform_label": scene_transform_label(scene_transform) if jpeg_path is not None else "",
+        "jpeg_scene_transform_strength": scene_transform_strength if jpeg_path is not None else "",
         "jpeg_ev_auto_boost": auto_ev.ev_boost if jpeg_path is not None and auto_ev is not None else "",
         "jpeg_ev_auto_limited": auto_ev.highlight_limited if jpeg_path is not None and auto_ev is not None else "",
         "jpeg_ev_auto_median_target": auto_ev.ev_median_target if jpeg_path is not None and auto_ev is not None else "",
@@ -355,7 +364,15 @@ def csv_row(
         "jpeg_icc_embedded": jpeg_icc_embedded if jpeg_path is not None else "",
         "jpeg_srgb_icc_embedded": jpeg_icc_embedded if jpeg_path is not None and output_gamut == "srgb" else "",
         "jpeg_policy_cn": jpeg_policy_cn(jpeg_mode, output_gamut) if jpeg_path is not None else "",
-        "jpeg_tone_plan_cn": jpeg_tone_plan_cn(bundle, analysis, jpeg_mode, tone_plan, output_gamut) if jpeg_path is not None else "",
+        "jpeg_tone_plan_cn": jpeg_tone_plan_cn(
+            bundle,
+            analysis,
+            jpeg_mode,
+            tone_plan,
+            output_gamut,
+            scene_transform,
+            scene_transform_strength,
+        ) if jpeg_path is not None else "",
         "note": "SNR/噪声为单帧估计，不是光子转移测量；位深不等于可用动态范围。",
         "darktable_guidance_cn": " | ".join(darktable_guidance_lines(bundle, analysis)[1:]),
         "fullwell_note_cn": fullwell_note_cn(analysis.fullwell_note),
@@ -387,4 +404,3 @@ def write_csv(path: Path, row: dict[str, Any]) -> None:
         writer = csv.DictWriter(fh, fieldnames=list(row.keys()))
         writer.writeheader()
         writer.writerow(row)
-

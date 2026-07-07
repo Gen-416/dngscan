@@ -11,7 +11,7 @@ from .analysis import (
     black_map, channel_color, channel_fullwell_map, channel_threshold_map,
     downsample_any, downsample_mean, format_pct, format_snr_dr, rgb_channel_groups,
 )
-from .constants import EV_REPORT_FLOOR, GRAY_EV, SNR_BRIGHT_UNRELIABLE_STOP, XYZ_TO_RGB
+from .constants import EPS, EV_REPORT_FLOOR, GRAY_EV, SNR_BRIGHT_UNRELIABLE_STOP, XYZ_TO_RGB
 from .models import Analysis, AutoEvResult, RawBundle
 from .report import summary_lines
 

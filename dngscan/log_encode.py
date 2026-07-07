@@ -26,9 +26,14 @@ LOG3G10_MIDGRAY = 1.0 / 3.0
 
 
 def cineon_encode(x: np.ndarray) -> np.ndarray:
-    """Minimal Cineon Film Log (Resolve FPE LUTs): 18% scene-linear -> 0.5 code."""
+    """Canonical Cineon Film Log: code = (685 + 300*log10(x)) / 1023.
+
+    This is the encoding Resolve's Film Look (PFE) LUTs are authored against:
+    18% gray -> 0.4512, diffuse white 1.0 -> 0.6696 (the print-stock shoulder lives
+    in the codes above that). Anchoring mid gray at 0.5 instead rides ~1/3 stop too
+    high up the print curve and never reaches the 2383 highlight density."""
     x = np.maximum(x, 1e-10)
-    return np.clip((np.log2(x / 0.18) + 1.0) * 0.5, 0.0, 1.0)
+    return np.clip((685.0 + 300.0 * np.log10(x)) / 1023.0, 0.0, 1.0)
 
 
 def log3g10_encode(x: np.ndarray) -> np.ndarray:

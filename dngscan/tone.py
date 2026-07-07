@@ -7,6 +7,7 @@ from typing import Any
 
 from ._deps import np
 from . import agx as agx_engine
+from . import scene_transform as scene_transform_engine
 from .color import (
     apply_rgb_matrix3, clamp_float, luminance_from_rgb_space, output_gamut_space,
     rec2020_to_xyz, smoothstep, XYZ_TO_RGB,
@@ -35,44 +36,33 @@ def scene_rec2020_to_float(values: Any, scene_scale: float, gain: float = 1.0) -
     return np.nan_to_num(rgb, nan=0.0, posinf=1e6, neginf=0.0)
 
 
-def smooth_highlight_shoulder(y: Any, knee: float) -> Any:
-    """Identity below the knee (midtones untouched); a globally smooth exponential
-    roll-off that asymptotes to display white above it. Value and unit slope match at the
-    knee, so there is no contour-inducing kink -- the branch below only avoids a needless
-    exp() on the untouched midtones."""
-    knee = clamp_float(knee, 0.05, 0.98)
-    span = 1.0 - knee
-    over = np.maximum(y - np.float32(knee), 0.0)
-    rolled = np.float32(knee) + np.float32(span) * (1.0 - np.exp(-over / np.float32(max(span, EPS))))
-    return np.where(y > np.float32(knee), rolled, y)
-
-
-def smart_mapping_strength(analysis: Analysis, plan: ToneCompressionPlan | None = None) -> float:
-    target_gamut = plan.target_gamut if plan is not None else "sRGB"
-    srgb_risk = analysis.gamut_out_pct.get(target_gamut, analysis.gamut_out_pct.get("sRGB", 0.0))
-    if plan is not None:
-        srgb_risk = max(srgb_risk, plan.over_rgb_pct)
-    clip_pressure = max(analysis.clip_pct.values()) if analysis.clip_pct else 0.0
-    if plan is None:
-        highlight_pressure = max(0.0, 1.0 + analysis.ev_p999)
-    else:
-        highlight_pressure = clamp_float((plan.luma_p999 - 0.65) / 0.35, 0.0, 1.0)
-    gamut_term = min(1.0, srgb_risk / 6.0)
-    clip_term = min(1.0, clip_pressure / 1.0)
-    chroma_term = clamp_float((plan.chroma_p95 - 3.0) / 4.0, 0.0, 1.0) if plan is not None else 0.0
-    return float(max(gamut_term, clip_term, highlight_pressure * 0.7, 0.8 * chroma_term))
-
-
-def tone_plan_sample_scene_rec2020(bundle: RawBundle, max_samples: int = 800_000) -> Any:
+def tone_plan_sample_scene_rec2020(
+    bundle: RawBundle,
+    max_samples: int = 800_000,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
+) -> Any:
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
-    return scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, bundle.exposure_gain)
+    rec2020 = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, bundle.exposure_gain)
+    return scene_transform_engine.apply_scene_transform_rec2020(
+        rec2020, scene_transform, scene_transform_strength
+    )
 
 
 def build_tone_compression_plan(
-    bundle: RawBundle, analysis: Analysis, target_gamut: str, ev_from_agx_inset: bool = False
+    bundle: RawBundle,
+    analysis: Analysis,
+    target_gamut: str,
+    ev_from_agx_inset: bool = False,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> ToneCompressionPlan:
-    rec2020 = tone_plan_sample_scene_rec2020(bundle)
+    rec2020 = tone_plan_sample_scene_rec2020(
+        bundle,
+        scene_transform=scene_transform,
+        scene_transform_strength=scene_transform_strength,
+    )
     xyz = rec2020_to_xyz(rec2020)
     y = np.clip(xyz[:, 1], 0.0, None)
     y_for_ev = np.clip(y, 2.0 ** EV_REPORT_FLOOR, None)
@@ -155,78 +145,13 @@ def build_tone_compression_plan(
     )
 
 
-def precondition_tonemapper_rgb(rgb: Any, luma: Any, plan: ToneCompressionPlan, for_tony: bool = False) -> Any:
-    """Split Y/chroma, then condition chroma and highlights from whole-frame stats."""
-    anchor = np.clip(luma.astype(np.float32, copy=False), 0.0, None)
-    out = rgb.astype(np.float32, copy=True)
-    out = np.nan_to_num(out, nan=0.0, posinf=1.0, neginf=0.0)
-
-    if for_tony and plan.tony_hdr_gain > 1.0:
-        edge0 = max(0.18, plan.luma_p99 * 0.55)
-        edge1 = max(edge0 + 0.02, plan.luma_p999)
-        weight = smoothstep(edge0, edge1, anchor)
-        gain = 1.0 + (plan.tony_hdr_gain - 1.0) * weight
-        out *= gain[:, None]
-        anchor = anchor * gain
-
-    rgb_min = np.min(out, axis=1)
-    low = (rgb_min < 0.0) & (rgb_min < anchor - EPS)
-    if np.any(low):
-        scale = (0.0 - anchor[low]) / (rgb_min[low] - anchor[low])
-        scale = np.clip(scale, 0.0, 1.0)
-        out[low] = anchor[low, None] + scale[:, None] * (out[low] - anchor[low, None])
-
-    strength = plan.chroma_strength
-    if strength > 0.0:
-        chroma = out - anchor[:, None]
-        chroma_mag = np.max(np.abs(chroma), axis=1)
-        chroma_ratio = chroma_mag / np.maximum(anchor, EPS)
-        high_luma = smoothstep(max(0.18, plan.luma_p99 * 0.50), max(0.22, plan.luma_p999), anchor)
-        high_chroma = smoothstep(0.50, max(0.80, plan.chroma_p95), chroma_ratio)
-        weight = np.maximum(high_luma, high_chroma)
-        max_reduction = 0.38 if for_tony else 0.30
-        chroma_scale = 1.0 - max_reduction * strength * weight
-        out = anchor[:, None] + chroma_scale[:, None] * chroma
-
-    return out
-
-
-def compress_linear_output_rgb_for_jpeg(
-    rgb: Any, analysis: Analysis, plan: ToneCompressionPlan | None = None, output_gamut: str = "srgb"
-) -> Any:
-    strength = smart_mapping_strength(analysis, plan)
-    if strength <= 0.0:
-        return np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
-
-    rgb = np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
-    # Anchor on this pixel's own output-space luminance, so the luminance-preserving math
-    # below stays exact instead of mixing Rec.2020 Y with the encoded output RGB space.
-    y = luminance_from_rgb_space(rgb, output_gamut)
-    # Analysis drives where the highlight roll-off begins: more clip/gamut/highlight/chroma
-    # pressure pulls the knee down so bright detail is compressed sooner.
-    knee = clamp_float(0.88 - 0.38 * strength, 0.50, 0.90)
-    y_mapped = smooth_highlight_shoulder(y, knee)
-    scale_y = np.divide(y_mapped, np.maximum(y, EPS), out=np.ones_like(y_mapped), where=y > EPS)
-    rgb = rgb * scale_y[:, None]
-    anchor = np.clip(y_mapped, 0.0, 1.0)
-
-    # Analysis-driven chroma easing: ease saturation only where the frame is bright or where
-    # chroma exceeds the scene's own 95th-percentile chroma (from the plan), not everywhere.
-    if plan is not None:
-        chroma = rgb - anchor[:, None]
-        chroma_ratio = np.max(np.abs(chroma), axis=1) / np.maximum(anchor, EPS)
-        high_luma = smoothstep(max(0.30, knee - 0.10), 0.999, anchor)
-        high_chroma = smoothstep(0.50, max(0.80, plan.chroma_p95), chroma_ratio)
-        weight = np.maximum(high_luma, high_chroma)
-        rgb = anchor[:, None] + (1.0 - 0.30 * strength * weight)[:, None] * chroma
-
-    # Out-of-gamut is handled downstream by the shared Oklab gamut fit, so return the
-    # tone-shaped linear RGB unclipped (hue preservation happens in Oklab, not per-channel).
-    return np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
-
-
 def plan_for_mode(
-    bundle: RawBundle, analysis: Analysis, mode: str, output_gamut: str = "srgb"
+    bundle: RawBundle,
+    analysis: Analysis,
+    mode: str,
+    output_gamut: str = "srgb",
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
 ) -> ToneCompressionPlan:
     """Build the tone plan in the space each mode actually works in.
 
@@ -240,5 +165,11 @@ def plan_for_mode(
         target_gamut = "sRGB"
     else:
         target_gamut = output_gamut_space(output_gamut)
-    return build_tone_compression_plan(bundle, analysis, target_gamut, ev_from_agx_inset=(mode == "agx"))
-
+    return build_tone_compression_plan(
+        bundle,
+        analysis,
+        target_gamut,
+        ev_from_agx_inset=(mode == "agx"),
+        scene_transform=scene_transform if mode == "agx" else "none",
+        scene_transform_strength=scene_transform_strength,
+    )

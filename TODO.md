@@ -7,7 +7,7 @@ Stage checkpoint for picking work back up. Everything below is on `main`.
 cd ~/projects/dngscan
 source .venv/bin/activate
 python -m dngscan.gui                     # GUI
-python -m dngscan photo.dng --jpeg out.jpg --jpeg-mode agx   # CLI
+python -m dngscan photo.dng --jpeg out.jpg                   # CLI (AgX-only pipeline)
 ```
 
 ## Done recently

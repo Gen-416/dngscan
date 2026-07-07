@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from ._deps import np
-from .color import apply_rgb_matrix3, rec2020_to_output, rec2020_to_srgb, rec2020_to_xyz, srgb_to_output
+from .color import apply_rgb_matrix3, bt1886_eotf, rec2020_to_output, rec2020_to_srgb, rec2020_to_xyz, srgb_to_output
 from .log_encode import XYZ_TO_RWG, encode_for_source
 from .lut_io import get_cube, sample_cube
 
@@ -24,7 +24,13 @@ class DisplayFilter:
     cube: Path
     source: str  # cineon | log3g10
     input_space: str  # rec709 | rwg — linear RGB space fed to the encoder
-    display_gamma: float  # pow on LUT output to reach scene-linear Rec.709 (1.0 = already linear)
+    display_eotf: str = "gamma"  # gamma | bt1886 — how to decode LUT output to linear
+    display_gamma: float = 2.4  # used when display_eotf == gamma
+    # What the encoder is fed: "display" = the AgX display render (right for print film
+    # emulation, which in grading sits on top of a finished look); "scene" = the
+    # scene-linear buffer (right for camera OUTPUT transforms like RED IPP2, which carry
+    # their own tone mapping — feeding them AgX output would stack two shoulders).
+    feed: str = "display"
 
 
 DISPLAY_FILTERS: dict[str, DisplayFilter] = {
@@ -34,6 +40,7 @@ DISPLAY_FILTERS: dict[str, DisplayFilter] = {
         source="cineon",
         input_space="rec709",
         display_gamma=2.4,
+        feed="display",
     ),
     "red_ipp2_rec709_medium": DisplayFilter(
         label="RED IPP2 Rec709 Medium",
@@ -43,7 +50,9 @@ DISPLAY_FILTERS: dict[str, DisplayFilter] = {
         / "RWG_Log3G10 to REC709_BT1886 with MEDIUM_CONTRAST and R_2_Medium size_33 v1.13.cube",
         source="log3g10",
         input_space="rwg",
+        display_eotf="bt1886",
         display_gamma=2.4,
+        feed="scene",
     ),
 }
 
@@ -66,13 +75,28 @@ def _linear_to_encoder_input(rec2020_linear: np.ndarray, spec: DisplayFilter) ->
     raise ValueError(f"unknown input_space: {spec.input_space}")
 
 
+def _decode_lut_display(lut_out: Any, spec: DisplayFilter) -> Any:
+    v = np.clip(lut_out, 0.0, 1.0)
+    if spec.display_eotf == "bt1886":
+        return bt1886_eotf(v)
+    if spec.display_gamma > 1.0 + 1e-6:
+        return np.power(v, spec.display_gamma)
+    return v
+
+
 def apply_display_filter_rec2020(
     mapped_rec2020: Any,
     output_gamut: str,
     filter_name: str,
     strength: float = 1.0,
+    scene_rec2020: Any | None = None,
 ) -> Any:
-    """Blend AgX Rec.2020 display with a log-encoded display LUT."""
+    """Blend the AgX display render with a log-encoded display LUT.
+
+    feed="display" filters (print film emulation) encode the AgX render itself;
+    feed="scene" filters (camera output transforms, e.g. RED IPP2) act as parallel
+    renderers: they encode the scene-linear buffer and strength blends the two
+    complete renderings."""
     if filter_name == "none" or strength <= 0.0:
         flat = mapped_rec2020.reshape(-1, 3)
         return rec2020_to_output(flat, output_gamut).reshape(mapped_rec2020.shape)
@@ -87,13 +111,16 @@ def apply_display_filter_rec2020(
     flat = mapped_rec2020.reshape(-1, 3).astype(np.float32, copy=False)
     agx_display = rec2020_to_output(flat, output_gamut)
 
-    encoder_in = _linear_to_encoder_input(flat, spec)
+    if spec.feed == "scene":
+        if scene_rec2020 is None:
+            raise ValueError(f"display filter {filter_name} needs the scene-linear buffer (feed='scene')")
+        encoder_src = scene_rec2020.reshape(-1, 3).astype(np.float32, copy=False)
+    else:
+        encoder_src = flat
+    encoder_in = _linear_to_encoder_input(encoder_src, spec)
     encoded = encode_for_source(encoder_in, spec.source)
     lut_out = sample_cube(lut, encoded)
-    if spec.display_gamma > 1.0 + 1e-6:
-        display_709 = np.power(np.clip(lut_out, 0.0, 1.0), spec.display_gamma)
-    else:
-        display_709 = np.clip(lut_out, 0.0, 1.0)
+    display_709 = _decode_lut_display(lut_out, spec)
     filtered = srgb_to_output(display_709, output_gamut)
 
     s = np.float32(min(1.5, max(0.0, strength)))

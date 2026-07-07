@@ -56,7 +56,6 @@ DEFAULT_HDR_HEADROOM_EV = 3.0
 
 DEFAULT_GAINMAP_SCALE = 2
 
-TONY_LUT_CACHE: dict[tuple[str, int, int], Any] = {}
 
 XYZ_TO_RGB = {
     "sRGB": np.array(  # type: ignore[union-attr]

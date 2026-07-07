@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from dngscan.look import LOOK_FIELDS, apply_look_oklab
+from dngscan.look import LOOK_FIELDS, _hue_in_arc, apply_look_oklab
 
 
 class LookLayerTests(unittest.TestCase):
@@ -15,7 +15,7 @@ class LookLayerTests(unittest.TestCase):
         L = np.array([0.2, 0.5, 0.8], dtype=np.float32)
         a = np.array([0.08, 0.12, 0.05], dtype=np.float32)
         b = np.array([0.04, -0.06, 0.10], dtype=np.float32)
-        for look in ("classic", "reveal"):
+        for look in LOOK_FIELDS:
             L2, a2, b2 = apply_look_oklab(L, a, b, look, strength=0.0)
             np.testing.assert_allclose(L2, L, rtol=0, atol=1e-6)
             np.testing.assert_allclose(a2, a, rtol=0, atol=1e-6)
@@ -25,7 +25,7 @@ class LookLayerTests(unittest.TestCase):
         L = np.linspace(0.15, 0.85, 64, dtype=np.float32)
         a = np.full_like(L, 0.10)
         b = np.full_like(L, 0.05)
-        for look in ("classic", "reveal"):
+        for look in LOOK_FIELDS:
             L2, _, _ = apply_look_oklab(L, a, b, look, strength=1.0)
             np.testing.assert_allclose(L2, L, rtol=0, atol=1e-7)
 
@@ -50,6 +50,12 @@ class LookLayerTests(unittest.TestCase):
         c_out = float(np.hypot(a2.item(), b2.item()))
         self.assertLess(c_out, c_in * LOOK_FIELDS["classic"].mid_chroma_ratio + 0.02)
 
+    def test_hue_in_arc_peaks_at_center(self) -> None:
+        field = LOOK_FIELDS["classic"]
+        hues = np.array([20.0, 30.0, 40.0, 50.0, 60.0], dtype=np.float32)
+        w = _hue_in_arc(hues, field.skin_hue_lo, field.skin_hue_hi)
+        np.testing.assert_allclose(w, [0.0, 1.0, 1.0, 1.0, 0.0], atol=1e-5)
+
     def test_green_sector_rotates_toward_cyan(self) -> None:
         # Measured classic yellow-green sector (30-60°) has negative Δhue (toward cyan).
         field = LOOK_FIELDS["classic"]
@@ -64,6 +70,36 @@ class LookLayerTests(unittest.TestCase):
         h_out = float(np.degrees(np.arctan2(b2.item(), a2.item())) % 360.0)
         delta = (h_out - hue_deg + 180.0) % 360.0 - 180.0
         self.assertLess(delta, -0.5)
+
+    def test_optic_warm_cyan_cools_low_chroma_mids(self) -> None:
+        L = np.array([0.45], dtype=np.float32)
+        a = np.array([0.0], dtype=np.float32)
+        b = np.array([0.0], dtype=np.float32)
+        _, a2, b2 = apply_look_oklab(L, a, b, "optic_warm_cyan", 1.0)
+        self.assertLess(a2.item(), -0.002)
+        self.assertLess(b2.item(), -0.003)
+
+    def test_optic_warm_cyan_warms_skin_arc(self) -> None:
+        L = np.array([0.56], dtype=np.float32)
+        hue_deg = 42.0
+        c = 0.08
+        rad = np.radians(hue_deg)
+        a = np.array([c * np.cos(rad)], dtype=np.float32)
+        b = np.array([c * np.sin(rad)], dtype=np.float32)
+        _, a2, b2 = apply_look_oklab(L, a, b, "optic_warm_cyan", 1.0)
+        self.assertGreater(a2.item(), a.item())
+        self.assertGreater(b2.item(), b.item())
+
+    def test_optic_warm_cyan_tames_non_skin_magenta(self) -> None:
+        L = np.array([0.50], dtype=np.float32)
+        hue_deg = 315.0
+        c = 0.12
+        rad = np.radians(hue_deg)
+        a = np.array([c * np.cos(rad)], dtype=np.float32)
+        b = np.array([c * np.sin(rad)], dtype=np.float32)
+        _, a2, b2 = apply_look_oklab(L, a, b, "optic_warm_cyan", 1.0)
+        c_out = float(np.hypot(a2.item(), b2.item()))
+        self.assertLess(c_out, c * 0.95)
 
 
 if __name__ == "__main__":

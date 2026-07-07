@@ -7,45 +7,81 @@ from .look import LOOK_CHOICES, LOOK_FIELDS
 
 RENDER_MODE = "agx"
 
+LOOK_GRADE_PREFIX = "look:"
+FILTER_GRADE_PREFIX = "filter:"
+
 _LOOK_LABELS = {
     "none": "无",
     "classic": "ARRI Classic 709",
     "reveal": "ARRI Reveal 709",
+    "optic_warm_cyan": "Optic Warm/Cyan",
 }
 
 
-def grade_label(name: str) -> str:
-    if name == "none":
+def grade_id_for_look(name: str) -> str:
+    return f"{LOOK_GRADE_PREFIX}{name}"
+
+
+def grade_id_for_filter(name: str) -> str:
+    return f"{FILTER_GRADE_PREFIX}{name}"
+
+
+def parse_grade_id(grade: str) -> tuple[str, str]:
+    """Return (kind, bare_name) where kind is none | look | filter."""
+    if grade == "none":
+        return "none", "none"
+    if grade.startswith(LOOK_GRADE_PREFIX):
+        return "look", grade[len(LOOK_GRADE_PREFIX) :]
+    if grade.startswith(FILTER_GRADE_PREFIX):
+        return "filter", grade[len(FILTER_GRADE_PREFIX) :]
+    in_look = grade in LOOK_FIELDS
+    in_filter = grade in DISPLAY_FILTERS
+    if in_look and in_filter:
+        raise ValueError(
+            f"成片风格 ID 冲突：{grade!r} 同时存在色度 Look 与输出滤镜，"
+            f"请使用 {grade_id_for_look(grade)!r} 或 {grade_id_for_filter(grade)!r}"
+        )
+    if in_filter:
+        return "filter", grade
+    if in_look:
+        return "look", grade
+    raise ValueError(f"未知成片风格：{grade}")
+
+
+def grade_label(grade_id: str) -> str:
+    if grade_id == "none":
         return "无"
-    if name in DISPLAY_FILTERS:
-        return DISPLAY_FILTERS[name].label
-    return _LOOK_LABELS.get(name, name.replace("fuji_", "Fujifilm ").replace("_", " "))
+    kind, bare = parse_grade_id(grade_id)
+    if kind == "filter":
+        return DISPLAY_FILTERS[bare].label
+    return _LOOK_LABELS.get(bare, bare.replace("fuji_", "Fujifilm ").replace("_", " "))
 
 
 def grade_choices() -> tuple[str, ...]:
-    looks = tuple(n for n in LOOK_CHOICES if n != "none")
-    filters = tuple(n for n in FILTER_CHOICES if n != "none")
+    looks = tuple(grade_id_for_look(n) for n in LOOK_CHOICES if n != "none")
+    filters = tuple(grade_id_for_filter(n) for n in FILTER_CHOICES if n != "none")
     return ("none",) + looks + filters
 
 
 def is_filter_grade(name: str) -> bool:
-    return name in DISPLAY_FILTERS
+    kind, _ = parse_grade_id(name)
+    return kind == "filter"
 
 
 def is_look_grade(name: str) -> bool:
-    return name in LOOK_FIELDS
+    kind, _ = parse_grade_id(name)
+    return kind == "look"
 
 
 def resolve_grade(name: str, strength: float) -> tuple[str, float, str, float]:
-    """Map a single grade id to (look, look_strength, filter, filter_strength)."""
+    """Map a grade id to (look, look_strength, filter, filter_strength)."""
     s = max(0.0, min(1.5, float(strength)))
-    if name == "none":
+    kind, bare = parse_grade_id(name)
+    if kind == "none":
         return "none", 0.0, "none", 0.0
-    if name in DISPLAY_FILTERS:
-        return "none", 0.0, name, s
-    if name in LOOK_FIELDS:
-        return name, s, "none", 0.0
-    raise ValueError(f"未知成片风格：{name}")
+    if kind == "filter":
+        return "none", 0.0, bare, s
+    return bare, s, "none", 0.0
 
 
 def resolve_grade_params(params: dict) -> tuple[str, float, str, float]:
@@ -62,7 +98,7 @@ def resolve_grade_params(params: dict) -> tuple[str, float, str, float]:
     look_strength = float(params.get("lookStrength", 1.0))
     filter_strength = float(params.get("filterStrength", 1.0))
     if filt != "none":
-        return resolve_grade(filt, filter_strength)
+        return resolve_grade(grade_id_for_filter(filt), filter_strength)
     if look != "none":
-        return resolve_grade(look, look_strength)
+        return resolve_grade(grade_id_for_look(look), look_strength)
     return "none", 0.0, "none", 0.0

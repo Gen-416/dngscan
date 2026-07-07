@@ -123,9 +123,9 @@ def flog2_encode(x: np.ndarray) -> np.ndarray:  # Fujifilm F-Log2 (F-Gamut = BT.
 
 
 def cineon_encode(x: np.ndarray) -> np.ndarray:
-    """Minimal Cineon Film Log (Resolve FPE LUTs): 18% scene-linear -> ~0.5 code."""
+    """Resolve Film Look / Cineon Film Log (18% -> 0.5, wide highlight headroom)."""
     x = np.maximum(x, 1e-10)
-    return np.clip((np.log2(x / 0.18) + 1.0) * 0.5, 0.0, 1.0)
+    return np.clip((np.log2(x / 0.18) + 10.0) / 20.0, 0.0, 1.0)
 
 
 _LOG3G10_A = 0.224282
@@ -462,6 +462,7 @@ def run_self_tests() -> None:
 
 def append_look_fields_json(measured: dict[str, LookField]) -> Path:
     """Merge measured fields into dngscan_assets/look_fields.json (the user look registry)."""
+    from dngscan.display_filter import DISPLAY_FILTERS
     from dngscan.look import LOOK_FIELDS_JSON
 
     existing: dict[str, Any] = {}
@@ -470,7 +471,15 @@ def append_look_fields_json(measured: dict[str, LookField]) -> Path:
             existing = json.loads(LOOK_FIELDS_JSON.read_text(encoding="utf-8"))
         except ValueError:
             existing = {}
-    existing.update({k: asdict(v) for k, v in measured.items()})
+    for name in measured:
+        if name in DISPLAY_FILTERS:
+            print(
+                f"warning: skipping look {name!r} — name reserved for display filter; "
+                f"use a different --name",
+                file=sys.stderr,
+            )
+    filtered = {k: v for k, v in measured.items() if k not in DISPLAY_FILTERS}
+    existing.update({k: asdict(v) for k, v in filtered.items()})
     LOOK_FIELDS_JSON.write_text(json.dumps(existing, indent=2) + "\n", encoding="utf-8")
     return LOOK_FIELDS_JSON
 

@@ -7,7 +7,7 @@ import unittest
 
 import numpy as np
 
-from dngscan.color import rec2020_to_output
+from dngscan.color import bt1886_eotf, rec2020_to_output, rec709_inverse_oetf
 from dngscan.display_filter import (
     DISPLAY_FILTERS,
     apply_display_filter_rec2020,
@@ -18,8 +18,28 @@ from dngscan.log_encode import cineon_encode, log3g10_encode
 
 class DisplayFilterTests(unittest.TestCase):
     def test_cineon_anchor(self) -> None:
+        # Canonical Cineon: (685 + 300*log10(0.18)) / 1023
         got = float(cineon_encode(np.array([0.18]))[0])
-        self.assertAlmostEqual(got, 0.5, places=3)
+        self.assertAlmostEqual(got, 0.4512, places=3)
+
+    def test_cineon_preserves_highlight_headroom(self) -> None:
+        got = float(cineon_encode(np.array([1.0]))[0])
+        self.assertLess(got, 0.7)
+        self.assertGreater(got, 0.6)
+
+    def test_rec709_inverse_oetf_is_not_bt1886(self) -> None:
+        v = np.array([0.5], dtype=np.float32)
+        self.assertAlmostEqual(float(rec709_inverse_oetf(v)[0]), 0.2597, places=3)
+        self.assertAlmostEqual(float(bt1886_eotf(v)[0]), float(0.5**2.4), places=6)
+
+    def test_kodak_filter_no_channel_crush_on_green(self) -> None:
+        if not filter_available("kodak_2383_d65"):
+            self.skipTest("Kodak cube missing")
+        rec = np.array([[[0.18, 0.25, 0.14]]], dtype=np.float32)
+        out = apply_display_filter_rec2020(rec, "srgb", "kodak_2383_d65", 1.0)[0, 0]
+        self.assertGreater(float(out[0]), 0.05)
+        self.assertGreater(float(out[1]), 0.05)
+        self.assertGreater(float(out[2]), 0.05)
 
     def test_log3g10_midgray(self) -> None:
         from dngscan.log_encode import LOG3G10_MIDGRAY
@@ -58,10 +78,21 @@ class DisplayFilterTests(unittest.TestCase):
     def test_red_filter_preserves_color(self) -> None:
         if not filter_available("red_ipp2_rec709_medium"):
             self.skipTest("RED IPP2 cube missing")
-        rec = np.array([[[0.18, 0.22, 0.14]]], dtype=np.float32)
-        out = apply_display_filter_rec2020(rec, "srgb", "red_ipp2_rec709_medium", 1.0)
+        # IPP2 is feed="scene": it renders the scene-linear buffer in parallel to AgX.
+        scene = np.array([[[0.18, 0.22, 0.14]]], dtype=np.float32)
+        mapped = np.array([[[0.30, 0.36, 0.24]]], dtype=np.float32)  # stand-in AgX display
+        out = apply_display_filter_rec2020(
+            mapped, "srgb", "red_ipp2_rec709_medium", 1.0, scene_rec2020=scene
+        )
         spread = float(np.max(out) - np.min(out))
         self.assertGreater(spread, 0.05, "filter output should not be near grayscale")
+
+    def test_scene_feed_requires_scene_buffer(self) -> None:
+        if not filter_available("red_ipp2_rec709_medium"):
+            self.skipTest("RED IPP2 cube missing")
+        mapped = np.array([[[0.3, 0.3, 0.3]]], dtype=np.float32)
+        with self.assertRaises(ValueError):
+            apply_display_filter_rec2020(mapped, "srgb", "red_ipp2_rec709_medium", 1.0)
 
     def test_log3g10_monotonic(self) -> None:
         x = np.linspace(0.0, 1.0, 32, dtype=np.float64)

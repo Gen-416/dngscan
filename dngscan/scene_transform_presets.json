@@ -1,0 +1,92 @@
+{
+  "version": 1,
+  "transforms": {
+    "arri_skin_d55": {
+      "name": "arri_skin_d55",
+      "label": "ARRI skin prefeed (D55)",
+      "illuminant": "D55",
+      "working_space": "Rec2020",
+      "note": "Demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; replace curves with measured CSV data for production calibration.",
+      "regions": [
+        {
+          "name": "skin",
+          "matrix": [
+            [
+              0.8846761,
+              0.23588836,
+              -0.12056446
+            ],
+            [
+              0.0,
+              1.0,
+              -0.0
+            ],
+            [
+              0.00954935,
+              -0.13148449,
+              1.12193515
+            ]
+          ],
+          "mu_rg_bg": [
+            2.20154693,
+            0.15464065
+          ],
+          "cov_rg_bg": [
+            [
+              0.2224681731,
+              0.000344646
+            ],
+            [
+              0.000344646,
+              0.0016137297
+            ]
+          ],
+          "scale": 2.5,
+          "strength": 1.0
+        },
+        {
+          "name": "cyan",
+          "matrix": [
+            [
+              0.82222997,
+              -0.10958465,
+              0.28735468
+            ],
+            [
+              -0.0,
+              1.0,
+              -0.0
+            ],
+            [
+              0.19053753,
+              -0.2137184,
+              1.02318087
+            ]
+          ],
+          "mu_rg_bg": [
+            0.35802482,
+            0.9189952
+          ],
+          "cov_rg_bg": [
+            [
+              0.0096793562,
+              -0.0088866294
+            ],
+            [
+              -0.0088866294,
+              0.1051442576
+            ]
+          ],
+          "scale": 2.5,
+          "strength": 1.0
+        }
+      ]
+    }
+  },
+  "sources": {
+    "alev3_ssf": "CIC 23 paper, modelled ARRI ALEXA SSF; rough built-in values are placeholders.",
+    "imx410_qe": "ZWO ASI2400MC / Sony IMX410 RGB QE curve; rough built-in values are placeholders.",
+    "sigma_fp_hot_mirror": "sigmoid transmission with red cutoff 660nm, width 15nm.",
+    "skin_spectra": "Built-in analytic demo skin manifold unless --skin-csv is provided."
+  }
+}

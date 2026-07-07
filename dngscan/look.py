@@ -47,6 +47,24 @@ class LookField:
     skin_hue_center: float = 40.0
     skin_hue_pull: float = 0.0  # fraction of (center-hue) arc to close
     skin_chroma_scale: float = 1.0  # extra chroma trim in skin band vs mid
+    skin_warm_a: float = 0.0
+    skin_warm_b: float = 0.0
+    neutral_cool_a: float = 0.0
+    neutral_cool_b: float = 0.0
+    neutral_cool_l_lo: float = 0.16
+    neutral_cool_l_hi: float = 0.68
+    neutral_cool_l_falloff: float = 0.92
+    neutral_cool_chroma_hi: float = 0.075
+    highlight_warm_a: float = 0.0
+    highlight_warm_b: float = 0.0
+    highlight_warm_l_lo: float = 0.58
+    highlight_warm_l_hi: float = 0.92
+    highlight_warm_chroma_hi: float = 0.12
+    magenta_hue_lo: float = 300.0
+    magenta_hue_hi: float = 18.0
+    magenta_hue_center: float = 8.0
+    magenta_hue_pull: float = 0.0
+    magenta_chroma_scale: float = 1.0
 
 
 # Populated by tools/extract_arri_look.py --emit; re-run that script to refresh from local LUTs.
@@ -91,6 +109,44 @@ LOOK_FIELDS: dict[str, LookField] = {
         skin_hue_pull=0.001,
         skin_chroma_scale=0.951,
     ),
+    "optic_warm_cyan": LookField(
+        hue_rotation_deg=(-1.0, -2.5, 1.5, 4.8, 5.2, 2.4, 0.8, -0.6, -1.4, -1.0, 0.4, 0.8),
+        chroma_ratio=(1.04, 1.07, 1.00, 0.96, 0.94, 0.98, 1.02, 1.04, 0.98, 0.88, 0.86, 0.94),
+        mid_chroma_ratio=1.0,
+        shadow_chroma_ratio=0.92,
+        highlight_chroma_ratio=1.02,
+        shadow_cool_a=-0.0012,
+        shadow_cool_b=-0.0020,
+        shadow_l_lo=0.10,
+        shadow_l_hi=0.22,
+        highlight_l_lo=0.74,
+        highlight_l_hi=0.92,
+        sat_knee_c=0.22,
+        sat_knee_relief=1.04,
+        skin_hue_lo=20.0,
+        skin_hue_hi=64.0,
+        skin_hue_center=44.0,
+        skin_hue_pull=0.11,
+        skin_chroma_scale=1.045,
+        skin_warm_a=0.0025,
+        skin_warm_b=0.0065,
+        neutral_cool_a=-0.0045,
+        neutral_cool_b=-0.0060,
+        neutral_cool_l_lo=0.16,
+        neutral_cool_l_hi=0.66,
+        neutral_cool_l_falloff=0.92,
+        neutral_cool_chroma_hi=0.078,
+        highlight_warm_a=0.0010,
+        highlight_warm_b=0.0038,
+        highlight_warm_l_lo=0.58,
+        highlight_warm_l_hi=0.92,
+        highlight_warm_chroma_hi=0.13,
+        magenta_hue_lo=292.0,
+        magenta_hue_hi=18.0,
+        magenta_hue_center=8.0,
+        magenta_hue_pull=0.10,
+        magenta_chroma_scale=0.78,
+    ),
 }
 
 
@@ -98,16 +154,20 @@ def _load_json_fields() -> None:
     """Merge user-measured looks from dngscan_assets/look_fields.json into the registry.
 
     JSON entries win over same-named built-ins (re-measuring 'classic' overrides it).
-    Bad entries are skipped, never fatal — a broken JSON must not take the tool down."""
+    Names reserved for display filters are skipped. Bad entries are skipped, never fatal."""
     try:
         raw = json.loads(LOOK_FIELDS_JSON.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return
     if not isinstance(raw, dict):
         return
+    from .display_filter import DISPLAY_FILTERS
+
     allowed = {f.name for f in dataclass_fields(LookField)}
     for name, params in raw.items():
         if not isinstance(name, str) or not isinstance(params, dict) or name == "none":
+            continue
+        if name in DISPLAY_FILTERS:
             continue
         try:
             kwargs = {k: (tuple(v) if isinstance(v, list) else v) for k, v in params.items() if k in allowed}
@@ -141,15 +201,17 @@ def _periodic_interp(table: tuple[float, ...], hue_deg: Any) -> Any:
 
 
 def _hue_in_arc(hue_deg: Any, lo: float, hi: float) -> Any:
-    """Weight 1 inside the hue arc [lo, hi] on the circle, 0 outside."""
+    """Weight 1 in the hue arc interior, soft falloff to 0 within 6° of lo/hi."""
     h = hue_deg % 360.0
     if lo <= hi:
         inside = (h >= lo) & (h <= hi)
+        edge = np.minimum(h - lo, hi - h)
     else:
         inside = (h >= lo) | (h <= hi)
-    edge = np.minimum(np.abs(h - lo), np.abs(h - hi))
-    edge = np.minimum(edge, 360.0 - edge)
-    return inside.astype(np.float32) * _smoothstep(6.0, 0.0, edge)
+        d_lo = np.where(h >= lo, h - lo, 360.0 - lo + h)
+        d_hi = np.where(h <= hi, hi - h, 360.0 - h + hi)
+        edge = np.minimum(d_lo, d_hi)
+    return inside.astype(np.float32) * _smoothstep(0.0, 6.0, edge)
 
 
 def apply_look_oklab(lab_l: Any, lab_a: Any, lab_b: Any, look: str, strength: float = 1.0) -> tuple[Any, Any, Any]:
@@ -183,6 +245,17 @@ def apply_look_oklab(lab_l: Any, lab_a: Any, lab_b: Any, look: str, strength: fl
         a3 = a2 * cos_p - b2 * sin_p
         b3 = a2 * sin_p + b2 * cos_p
         a2, b2 = a3, b3
+        hue = np.degrees(np.arctan2(b2, a2)) % 360.0
+
+    magenta_w = _hue_in_arc(hue, field.magenta_hue_lo, field.magenta_hue_hi) * chroma_w * (1.0 - skin_w)
+    if field.magenta_hue_pull > 0.0:
+        delta = (field.magenta_hue_center - hue + 180.0) % 360.0 - 180.0
+        pull = np.radians(delta) * np.float32(field.magenta_hue_pull) * s * magenta_w
+        cos_m = np.cos(pull)
+        sin_m = np.sin(pull)
+        a3 = a2 * cos_m - b2 * sin_m
+        b3 = a2 * sin_m + b2 * cos_m
+        a2, b2 = a3, b3
 
     scale = _periodic_interp(field.chroma_ratio, hue).astype(np.float32)
     shadow_extra = field.shadow_chroma_ratio / field.mid_chroma_ratio
@@ -194,6 +267,8 @@ def apply_look_oklab(lab_l: Any, lab_a: Any, lab_b: Any, look: str, strength: fl
         scale = scale * (1.0 + (np.float32(field.sat_knee_relief) - 1.0) * knee_w)
     if field.skin_chroma_scale != 1.0:
         scale = scale * (1.0 + (np.float32(field.skin_chroma_scale) - 1.0) * skin_w)
+    if field.magenta_chroma_scale != 1.0:
+        scale = scale * (1.0 + (np.float32(field.magenta_chroma_scale) - 1.0) * magenta_w)
     scale = 1.0 + (scale - 1.0) * s
     a2 = a2 * scale
     b2 = b2 * scale
@@ -203,5 +278,32 @@ def apply_look_oklab(lab_l: Any, lab_a: Any, lab_b: Any, look: str, strength: fl
         a2 = a2 + np.float32(field.shadow_cool_a) * cool_w
     if field.shadow_cool_b != 0.0:
         b2 = b2 + np.float32(field.shadow_cool_b) * cool_w
+
+    neutral_chroma_w = 1.0 - _smoothstep(
+        field.neutral_cool_chroma_hi * 0.45, field.neutral_cool_chroma_hi, chroma
+    )
+    neutral_l_w = _smoothstep(field.neutral_cool_l_lo, field.neutral_cool_l_hi, lab_l)
+    neutral_l_w = neutral_l_w * (1.0 - _smoothstep(field.neutral_cool_l_hi, field.neutral_cool_l_falloff, lab_l))
+    neutral_w = s * neutral_chroma_w * neutral_l_w * (1.0 - skin_w)
+    if field.neutral_cool_a != 0.0:
+        a2 = a2 + np.float32(field.neutral_cool_a) * neutral_w
+    if field.neutral_cool_b != 0.0:
+        b2 = b2 + np.float32(field.neutral_cool_b) * neutral_w
+
+    skin_l_w = _smoothstep(0.22, 0.58, lab_l) * (1.0 - _smoothstep(0.88, 0.98, lab_l))
+    skin_tint_w = s * skin_w * skin_l_w
+    if field.skin_warm_a != 0.0:
+        a2 = a2 + np.float32(field.skin_warm_a) * skin_tint_w
+    if field.skin_warm_b != 0.0:
+        b2 = b2 + np.float32(field.skin_warm_b) * skin_tint_w
+
+    highlight_chroma_w = 1.0 - _smoothstep(
+        field.highlight_warm_chroma_hi * 0.50, field.highlight_warm_chroma_hi, chroma
+    )
+    highlight_w = s * highlight_chroma_w * _smoothstep(field.highlight_warm_l_lo, field.highlight_warm_l_hi, lab_l)
+    if field.highlight_warm_a != 0.0:
+        a2 = a2 + np.float32(field.highlight_warm_a) * highlight_w
+    if field.highlight_warm_b != 0.0:
+        b2 = b2 + np.float32(field.highlight_warm_b) * highlight_w
 
     return lab_l, a2, b2

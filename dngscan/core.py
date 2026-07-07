@@ -9,6 +9,7 @@ from .color import *  # noqa: F401,F403
 from .raw_io import *  # noqa: F401,F403
 from .tone import *  # noqa: F401,F403
 from .render import *  # noqa: F401,F403
+from .scene_transform import *  # noqa: F401,F403
 from .export import *  # noqa: F401,F403
 from .analysis import *  # noqa: F401,F403
 from .plot import *  # noqa: F401,F403
@@ -21,4 +22,3 @@ from . import agx as agx_engine  # noqa: F401
 from . import look as look_engine  # noqa: F401
 from . import metadata as dng_metadata  # noqa: F401
 from . import priors as sensor_priors  # noqa: F401
-
