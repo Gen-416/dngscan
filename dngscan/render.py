@@ -8,6 +8,7 @@ from ._deps import np
 from . import agx as agx_engine
 from . import display_filter as filter_engine
 from . import look as look_engine
+from . import punch as punch_engine
 from . import scene_transform as scene_transform_engine
 from .color import (
     fit_to_output_gamut, luminance_from_rgb_space, oklab_to_output_rgb, rec2020_to_output,
@@ -79,7 +80,12 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     filmic curve; the darktable-derived sigmoid supplies the curve shape, while the plan's
     black/white EV keep the log2 window anchored on the exposure we set.
     """
-    return agx_engine.apply_core(rgb_rec2020, plan, AGX_INSET, AGX_OUTSET)
+    mapped = agx_engine.apply_core(rgb_rec2020, plan, AGX_INSET, AGX_OUTSET)
+    # Scene-driven purity compensation (dngscan/punch.py). This wrapper is the single
+    # convergence point for the main render AND the auto-EV probe path, so both see the
+    # same transform; the look-field extractor calls agx_engine.apply_core directly and
+    # stays punch-free by construction. strength 0 short-circuits to identity.
+    return punch_engine.apply_punch_rec2020(mapped, float(getattr(plan, "punch_strength", 0.0)))
 
 
 def scene_render_to_agx_linear(

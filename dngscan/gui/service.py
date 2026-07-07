@@ -298,6 +298,14 @@ def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, gamut: str) -> 
     return dg.plan_for_mode(bundle, analysis, RENDER_MODE, gamut)
 
 
+def parse_punch(params: dict) -> float:
+    try:
+        value = float(params.get("punch", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
+    return max(0.0, min(1.5, value))
+
+
 def parse_scene_transform(params: dict) -> tuple[str, float]:
     transform = dg.validate_scene_transform(str(params.get("sceneTransform", "none")))
     strength = float(params.get("sceneTransformStrength", params.get("scene_transform_strength", 1.0)))
@@ -321,6 +329,7 @@ def export_preview_jpeg(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
     auto_ev: dg.AutoEvResult | None = None,
+    punch_scale: float = 1.0,
 ) -> dict:
     dg.require_dependencies()
     stat = inp.stat()
@@ -349,6 +358,7 @@ def export_preview_jpeg(
             gamut,
             scene_transform,
             scene_transform_strength,
+            punch_scale,
         )
         icc_profile = dg.output_icc_profile_bytes(gamut)
         rgb_u8 = dg.render_output_u8(
@@ -390,6 +400,7 @@ def run_preview(params: dict) -> dict:
         raise ValueError(f"未知白平衡模式：{wb}")
     look, look_strength, display_filter, filter_strength = parse_grade(params)
     scene_transform, scene_transform_strength = parse_scene_transform(params)
+    punch_scale = parse_punch(params)
     auto_ev_result = None
     if ev_auto:
         stat = inp.stat()
@@ -414,6 +425,7 @@ def run_preview(params: dict) -> dict:
             filter_strength=filter_strength,
             scene_transform=scene_transform,
             scene_transform_strength=scene_transform_strength,
+            punch_scale=punch_scale,
         )
         ev = auto_ev_result.ev
     return export_preview_jpeg(
@@ -430,6 +442,7 @@ def run_preview(params: dict) -> dict:
         scene_transform=scene_transform,
         scene_transform_strength=scene_transform_strength,
         auto_ev=auto_ev_result,
+        punch_scale=punch_scale,
     )
 
 
@@ -476,6 +489,7 @@ def run_export(params: dict) -> dict:
         raise ValueError(f"未知白平衡模式：{wb}")
     look, look_strength, display_filter, filter_strength = parse_grade(params)
     scene_transform, scene_transform_strength = parse_scene_transform(params)
+    punch_scale = parse_punch(params)
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
 
     analysis, y, ev_img = dg.analyze(bundle, 4)
@@ -491,6 +505,7 @@ def run_export(params: dict) -> dict:
             filter_strength=filter_strength,
             scene_transform=scene_transform,
             scene_transform_strength=scene_transform_strength,
+            punch_scale=punch_scale,
         )
         ev = auto_ev_result.ev
     bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
@@ -501,6 +516,7 @@ def run_export(params: dict) -> dict:
         gamut,
         scene_transform,
         scene_transform_strength,
+        punch_scale,
     )
 
     grade_id = str(params.get("grade", "none"))

@@ -53,6 +53,11 @@ def tone_plan_sample_scene_rec2020(
     )
 
 
+def _smoothstep_f(edge0: float, edge1: float, x: float) -> float:
+    t = clamp_float((x - edge0) / max(edge1 - edge0, 1e-9), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+
 def build_tone_compression_plan(
     bundle: RawBundle,
     analysis: Analysis,
@@ -60,6 +65,7 @@ def build_tone_compression_plan(
     ev_from_agx_inset: bool = False,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
 ) -> ToneCompressionPlan:
     rec2020 = tone_plan_sample_scene_rec2020(
         bundle,
@@ -103,12 +109,36 @@ def build_tone_compression_plan(
     if white_ev - black_ev < 5.5:
         black_ev = white_ev - 5.5
 
+    # Bright-scene gate (median luminance near mid gray; exposure- and transform-aware).
+    # Drives the shadow relief and the punch strength: night scenes gate to zero.
+    w_bright = _smoothstep_f(-3.0, -1.2, ev_p50)
+
     dynamic_range_ev = white_ev - black_ev
     shadow_term = clamp_float((10.0 - plan_dr) / 3.0, 0.0, 1.0) if math.isfinite(plan_dr) else 0.5
     shoulder_strength = max(clip_term, gamut_term)
     contrast = clamp_float(3.0 - 0.25 * shoulder_strength + 0.10 * clamp_float((9.0 - dynamic_range_ev) / 4.0, 0.0, 1.0), 2.45, 3.15)
     toe_power = clamp_float(1.5 - 0.25 * shadow_term, 1.15, 1.75)
+    # Shadow relief for bright scenes: a gentler toe lifts crushed shadows. Measured to be
+    # nearly colour-neutral, unlike widening black_ev (which flattens the window and washes
+    # subject colour ~20% — the opposite of the punch below, so it is deliberately not used).
+    toe_power = clamp_float(toe_power - 0.20 * w_bright, 1.15, 1.75)
     shoulder_power = clamp_float(3.3 - 0.85 * shoulder_strength, 2.10, 3.60)
+    # Scene-driven latitude, shoulder side only: wider tonal windows earn a longer
+    # linear run above the pivot so daylight subject colors are not washed from mid
+    # gray up. The toe side stays at zero — a lower run makes the recomputed toe
+    # steeper and darkens deep shadows (measured), the opposite of what we want.
+    latitude_hi_ev = clamp_float(0.25 * dynamic_range_ev, 1.0, 2.0)
+    latitude_lo_ev = 0.0
+
+    # Punch (post-AgX purity compensation, dngscan/punch.py): bright scenes with a
+    # quality sensor window (low ISO per priors) and a wide tonal window are the washed
+    # case; night/high-ISO gates to exactly zero, which short-circuits the operator so
+    # those renders stay byte-identical.
+    w_quality = _smoothstep_f(7.5, 9.5, plan_dr) if math.isfinite(plan_dr) else 0.5
+    w_dr = _smoothstep_f(6.5, 8.0, dynamic_range_ev)
+    punch_strength = clamp_float(
+        w_bright * w_quality * (0.55 + 0.45 * w_dr) * clamp_float(punch_scale, 0.0, 1.5), 0.0, 1.0
+    )
 
     if target_gamut == "Rec2020":
         rgb = rec2020
@@ -140,6 +170,9 @@ def build_tone_compression_plan(
         contrast=contrast,
         toe_power=toe_power,
         shoulder_power=shoulder_power,
+        latitude_lo_ev=latitude_lo_ev,
+        latitude_hi_ev=latitude_hi_ev,
+        punch_strength=punch_strength,
         chroma_strength=chroma_strength,
         chroma_p95=chroma_p95,
         negative_rgb_pct=negative_rgb_pct,
@@ -155,6 +188,7 @@ def plan_for_mode(
     output_gamut: str = "srgb",
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
 ) -> ToneCompressionPlan:
     """Build the tone plan in the space each mode actually works in.
 
@@ -175,4 +209,5 @@ def plan_for_mode(
         ev_from_agx_inset=(mode == "agx"),
         scene_transform=scene_transform if mode == "agx" else "none",
         scene_transform_strength=scene_transform_strength,
+        punch_scale=punch_scale if mode == "agx" else 0.0,
     )

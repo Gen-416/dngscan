@@ -122,6 +122,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="scene transform 强度 0-1.5（默认 1.0；0=关闭效果）",
     )
     parser.add_argument(
+        "--punch",
+        type=float,
+        default=1.0,
+        help="AgX 纯度补偿倍率 0-1.5（默认 1.0=场景自动值；0=关闭，等价纯 AgX Base；夜景自动为 0）",
+    )
+    parser.add_argument(
         "--wb",
         choices=WB_CHOICES,
         default="camera",
@@ -150,6 +156,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("--grade-strength must be between 0 and 1.5")
     if not 0.0 <= args.scene_transform_strength <= 1.5:
         parser.error("--scene-transform-strength must be between 0 and 1.5")
+    if not 0.0 <= args.punch <= 1.5:
+        parser.error("--punch must be between 0 and 1.5")
     if args.grade != "none" and args.output_format == "ultrahdr":
         parser.error("成片风格暂不支持 Ultra HDR 输出")
     return args
@@ -189,6 +197,7 @@ def main(argv: list[str]) -> int:
                 filter_strength,
                 args.scene_transform,
                 args.scene_transform_strength,
+                args.punch,
             )
         else:
             resolved_ev = float(ev_input)
@@ -207,6 +216,7 @@ def main(argv: list[str]) -> int:
                 jpeg_output_gamut,
                 args.scene_transform,
                 args.scene_transform_strength,
+                args.punch,
             )
             if jpeg_path is not None
             else None

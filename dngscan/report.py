@@ -269,6 +269,7 @@ def jpeg_tone_plan_cn(
             f"AgX 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV，"
             f"DR={plan.dynamic_range_ev:.2f}档；Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
             f"曲线 contrast={plan.contrast:.2f}, toe={plan.toe_power:.2f}, shoulder={plan.shoulder_power:.2f}；"
+            f"纯度补偿={plan.punch_strength:.2f}；"
             f"色度压缩={plan.chroma_strength:.2f}，{plan.target_gamut} 负通道={plan.negative_rgb_pct:.2f}%"
         )
     return ""

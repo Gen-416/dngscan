@@ -124,6 +124,10 @@ GRADE_OPTIONS
 SCENE_TRANSFORM_OPTIONS
       </select>
     </div>
+    <div style="flex:0;min-width:180px">
+      <label>纯度补偿 punch</label>
+      <div class="evrow"><input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="AgX 纯度补偿倍率：1=场景自动值，0=关闭（纯 Base）；夜景自动为 0"><span class="evval" id="punchVal">1.00</span></div>
+    </div>
     <div id="sceneTransformStrengthBlock" style="flex:0;min-width:180px;display:none">
       <label>前馈强度</label>
       <div class="evrow"><input type="range" id="sceneTransformStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="sceneTransformStrengthVal">1.00</span></div>
@@ -190,6 +194,7 @@ const $=s=>document.querySelector(s);
 const STORE_KEY="dngscan.settings.v4";
 function setGradeStrengthLabel(){const v=+$("#gradeStrength").value;$("#gradeStrengthVal").textContent=v.toFixed(2);}
 function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").value!=="none"?"block":"none";}
+function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v.toFixed(2);}
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
@@ -229,7 +234,7 @@ function saveSettings(){
     input:$("#input").value,ev:$("#ev").value,quality:$("#quality").value,
     highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
     grade:$("#grade").value,gradeStrength:$("#gradeStrength").value,
-    sceneTransform:$("#sceneTransform").value,sceneTransformStrength:$("#sceneTransformStrength").value,
+    sceneTransform:$("#sceneTransform").value,sceneTransformStrength:$("#sceneTransformStrength").value,punch:$("#punch").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
   }));}catch(e){}
 }
@@ -259,11 +264,12 @@ function restoreSettings(){
   else if(s.lookStrength!==undefined)$("#gradeStrength").value=s.lookStrength;
   if(s.sceneTransform&&[...$("#sceneTransform").options].some(o=>o.value===s.sceneTransform))$("#sceneTransform").value=s.sceneTransform;
   if(s.sceneTransformStrength!==undefined)$("#sceneTransformStrength").value=s.sceneTransformStrength;
+  if(s.punch!==undefined)$("#punch").value=s.punch;
   if(s.format)$("#format").value=s.format;
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
-  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();updateGradeUi();updateSceneTransformUi();
+  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();
 }
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
 ["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
@@ -272,6 +278,7 @@ $("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$
 $("#ev").oninput=()=>{setEvLabel();saveSettings();};
 $("#hdrHeadroom").oninput=()=>{setHdrLabel();saveSettings();};
 $("#gradeStrength").oninput=()=>{setGradeStrengthLabel();saveSettings();};
+$("#punch").oninput=()=>{setPunchLabel();saveSettings();};
 $("#sceneTransformStrength").oninput=()=>{setSceneTransformStrengthLabel();saveSettings();};
 restoreSettings();
 document.querySelectorAll("button[data-ev]").forEach(b=>b.onclick=()=>{$("#ev").value=b.dataset.ev;setEvLabel();saveSettings();});

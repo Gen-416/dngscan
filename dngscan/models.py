@@ -101,6 +101,14 @@ class ToneCompressionPlan:
     negative_rgb_pct: float
     over_rgb_pct: float
     tony_hdr_gain: float
+    # Linear latitude around the pivot (EV): shoulder starts latitude_hi_ev above mid
+    # gray instead of at it, keeping bright subject colors out of the channel-converging
+    # shoulder; a small lower run keeps upper shadows off the toe. Zero = pure sigmoid.
+    latitude_lo_ev: float = 0.0
+    latitude_hi_ev: float = 0.0
+    # Scene-driven purity compensation applied after the AgX curve (see dngscan/punch.py).
+    # 0 = identity (night/high-ISO scenes gate to exactly zero).
+    punch_strength: float = 0.0
 
 
 @dataclass

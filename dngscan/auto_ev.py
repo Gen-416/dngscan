@@ -91,6 +91,7 @@ def render_sample_linear_output(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
 ) -> Any:
     from .grade import RENDER_MODE
 
@@ -105,6 +106,7 @@ def render_sample_linear_output(
             gamut,
             scene_transform,
             scene_transform_strength,
+            punch_scale,
         ) if analysis is not None else None
     )
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
@@ -136,6 +138,7 @@ def max_safe_ev(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
 ) -> float:
     """Largest EV (>= from_ev) whose preview-scale output stays below highlight thresholds."""
     from .grade import RENDER_MODE
@@ -160,6 +163,7 @@ def max_safe_ev(
             filter_strength=filter_strength,
             scene_transform=scene_transform,
             scene_transform_strength=scene_transform_strength,
+            punch_scale=punch_scale,
         )
         return output_highlight_margin(rgb, gamut, baseline_stats)
 
@@ -175,6 +179,7 @@ def max_safe_ev(
         filter_strength=filter_strength,
         scene_transform=scene_transform,
         scene_transform_strength=scene_transform_strength,
+        punch_scale=punch_scale,
     )
     baseline_stats = output_highlight_stats(baseline_rgb, gamut)
     if output_highlight_margin(baseline_rgb, gamut, baseline_stats) <= 0.0:
@@ -209,6 +214,7 @@ def compute_auto_ev(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
 ) -> AutoEvResult:
     """Boost toward 18% gray median when scene is dark; never darken high-key captures.
 
@@ -231,6 +237,7 @@ def compute_auto_ev(
         filter_strength=filter_strength,
         scene_transform=scene_transform,
         scene_transform_strength=scene_transform_strength,
+        punch_scale=punch_scale,
     )
     boost_target = max(target, baseline_ev)
     ev = min(boost_target, cap)
@@ -256,6 +263,7 @@ def resolve_export_ev(
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
 ) -> tuple[float, AutoEvResult | None]:
     if not is_ev_auto(ev):
         return float(ev), None
@@ -270,6 +278,7 @@ def resolve_export_ev(
         filter_strength,
         scene_transform,
         scene_transform_strength,
+        punch_scale,
     )
     return result.ev, result
 
