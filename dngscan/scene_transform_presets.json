@@ -123,7 +123,7 @@
       "label": "ALEV material prefeed (D55 windows)",
       "illuminant": "D55",
       "working_space": "Rec2020",
-      "note": "Material-aware Sigma->ALEV simulation: per-material constrained fits on D55+A samples, windows in the D55 calibration frame (runtime von Kries transport applies), look_gain=1. Confidence folds fit quality into the effective weight. Data quality per dngscan_assets/spectral/README.md; regenerate after replacing CSVs. [skin window refit from real DNG samples 2026-07-07]",
+      "note": "Material-aware Sigma->ALEV simulation: per-material constrained fits on D55+A samples, windows in the D55 calibration frame (runtime von Kries transport applies), look_gain=1. Confidence folds fit quality into the effective weight. Data quality per dngscan_assets/spectral/README.md; regenerate after replacing CSVs. [skin window refit from real DNG samples 2026-07-07] [foliage window refit from real DNG samples 2026-07-07] [skin window refit from real DNG samples 2026-07-07]",
       "sources": {
         "alev3_ssf": "dngscan_assets/spectral/arri_alexa_alev3_ssf_digitized.csv",
         "imx410_qe": "dngscan_assets/spectral/sony_a7m3_ssf_weta_measured.csv",
@@ -156,20 +156,20 @@
             ]
           ],
           "mu_rg_bg": [
-            1.9185851306176753,
-            0.4201156098093058
+            1.904509603882612,
+            0.4244779572908895
           ],
           "cov_rg_bg": [
             [
-              0.028192196016837586,
-              -0.001264884562100376
+              0.03345710637997638,
+              -0.0029641109279723685
             ],
             [
-              -0.001264884562100376,
-              0.004116973335723905
+              -0.0029641109279723685,
+              0.004912895481805225
             ]
           ],
-          "scale": 1.5,
+          "scale": 2.0,
           "strength": 1.0,
           "confidence": 0.4409
         },
@@ -193,17 +193,17 @@
             ]
           ],
           "mu_rg_bg": [
-            0.21628298,
-            7e-08
+            0.9731175495463229,
+            0.9798033404218222
           ],
           "cov_rg_bg": [
             [
-              0.0083474753,
-              1.3e-09
+              0.004391384810176053,
+              0.006149129475141738
             ],
             [
-              1.3e-09,
-              1e-05
+              0.006149129475141738,
+              0.01635475560256933
             ]
           ],
           "scale": 2.0,
