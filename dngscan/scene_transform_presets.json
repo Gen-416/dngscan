@@ -6,7 +6,7 @@
       "label": "ARRI skin prefeed (D55)",
       "illuminant": "D55",
       "working_space": "Rec2020",
-      "note": "Demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; replace curves with measured CSV data for production calibration.",
+      "note": "Demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; replace curves with measured CSV data for production calibration. [skin window refit from real DNG samples 2026-07-06] [skin window refit from real DNG samples 2026-07-06]",
       "regions": [
         {
           "name": "skin",
@@ -28,20 +28,20 @@
             ]
           ],
           "mu_rg_bg": [
-            2.20154693,
-            0.15464065
+            1.9185851306176753,
+            0.4201156098093058
           ],
           "cov_rg_bg": [
             [
-              0.2224681731,
-              0.000344646
+              0.028192196016837586,
+              -0.001264884562100376
             ],
             [
-              0.000344646,
-              0.0016137297
+              -0.001264884562100376,
+              0.004116973335723905
             ]
           ],
-          "scale": 2.5,
+          "scale": 1.5,
           "strength": 1.0
         },
         {
