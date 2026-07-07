@@ -72,6 +72,8 @@ def curve_params(
     contrast: float = 3.0,
     toe_power: float = 1.5,
     shoulder_power: float = 3.3,
+    latitude_lo_ev: float = 0.0,
+    latitude_hi_ev: float = 0.0,
 ) -> dict[str, float | bool]:
     # Derived from darktable's GPLv3 AgX implementation:
     # https://github.com/darktable-org/darktable/blob/master/src/iop/agx.c
@@ -92,8 +94,19 @@ def curve_params(
     derivative_default = default_gamma * max(EPS, pivot_y_default) ** (default_gamma - 1.0)
     slope = range_adjusted_slope / (derivative_current / derivative_default)
 
-    toe_transition_x = max(EPS, pivot_x)
-    toe_transition_y = pivot_y
+    # Latitude: a linear mid segment through the pivot. With zero latitude the curve is
+    # Troy's pure sigmoid (toe meets shoulder at mid gray) — which converges channels and
+    # washes chroma from mid gray UP. Scene-driven latitude pushes the shoulder start
+    # above the subject's colorful range in bright wide-DR scenes. Clamped so the linear
+    # run cannot leave the display range.
+    lat_lo_x = _clamp_float(max(0.0, latitude_lo_ev) / range_ev, 0.0, pivot_x - EPS)
+    lat_hi_x = _clamp_float(max(0.0, latitude_hi_ev) / range_ev, 0.0, 1.0 - pivot_x - EPS)
+    if slope > EPS:
+        lat_lo_x = min(lat_lo_x, (pivot_y - 0.02) / slope)
+        lat_hi_x = min(lat_hi_x, (0.95 - pivot_y) / slope)
+
+    toe_transition_x = max(EPS, pivot_x - lat_lo_x)
+    toe_transition_y = max(EPS, pivot_y - slope * lat_lo_x)
     inverse_toe_limit_x = 1.0
     inverse_toe_limit_y = 1.0 - target_black
     inverse_toe_transition_x = 1.0 - toe_transition_x
@@ -113,8 +126,8 @@ def curve_params(
     toe_fallback_power = slope * toe_length_x / toe_dy
     toe_fallback_coefficient = toe_dy / max(EPS, toe_length_x) ** toe_fallback_power
 
-    shoulder_transition_x = min(1.0 - EPS, pivot_x)
-    shoulder_transition_y = pivot_y
+    shoulder_transition_x = min(1.0 - EPS, pivot_x + lat_hi_x)
+    shoulder_transition_y = min(1.0 - EPS, pivot_y + slope * lat_hi_x)
     shoulder_scale = scale(1.0, target_white, shoulder_transition_x, shoulder_transition_y, slope, shoulder_power)
     shoulder_length_x = 1.0 - shoulder_transition_x
     shoulder_dy = max(EPS, target_white - shoulder_transition_y)
@@ -136,6 +149,7 @@ def curve_params(
         "toe_fallback_power": toe_fallback_power,
         "toe_fallback_coefficient": toe_fallback_coefficient,
         "slope": slope,
+        "intercept": pivot_y - slope * pivot_x,
         "shoulder_power": shoulder_power,
         "shoulder_transition_x": shoulder_transition_x,
         "shoulder_transition_y": shoulder_transition_y,
@@ -164,11 +178,14 @@ def scaled_sigmoid(x: Any, scale_value: float, slope: float, power: float, trans
 def apply_curve(x: Any, params: dict[str, float | bool]) -> Any:
     x = np.asarray(x, dtype=np.float32)
     out = np.empty_like(x)
-    # Pure AgX sigmoid: no linear latitude. Toe and shoulder meet at the pivot, so every value
-    # is either toe (below pivot) or shoulder (>= pivot); both halves pass through pivot_y, so
-    # the split is continuous. (darktable's latitude control is intentionally not used.)
+    # Toe below, shoulder above, and a linear latitude segment through the pivot between
+    # them (empty when latitude is zero — then this degenerates to Troy's pure sigmoid).
+    # All three pieces share value and slope at the transitions, so the curve stays C1.
     toe = x < float(params["toe_transition_x"])
-    shoulder = ~toe
+    shoulder = x > float(params["shoulder_transition_x"])
+    mid = ~(toe | shoulder)
+    if np.any(mid):
+        out[mid] = float(params["slope"]) * x[mid] + float(params["intercept"])
     if np.any(toe):
         if bool(params["need_convex_toe"]):
             out[toe] = float(params["target_black"]) + np.maximum(
@@ -293,6 +310,8 @@ def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: An
         round(plan.contrast, 3),
         round(plan.toe_power, 3),
         round(plan.shoulder_power, 3),
+        round(float(getattr(plan, "latitude_lo_ev", 0.0)), 3),
+        round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
     )
     rgb = compress_into_gamut(rgb_rec2020.astype(np.float32, copy=False))
     inset = _apply_matrix3(rgb, inset_matrix)
