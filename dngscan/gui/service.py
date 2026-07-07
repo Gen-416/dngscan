@@ -330,6 +330,13 @@ def parse_tone_core(params: dict) -> tuple[str, str]:
     return core, norm
 
 
+def parse_agx_primaries(params: dict) -> str:
+    value = str(params.get("agxPrimaries", params.get("agx_primaries", "base")))
+    if value not in dg.agx_engine.AGX_PRIMARIES_PRESETS:
+        raise ValueError(f"未知 AgX 基调：{value}")
+    return value
+
+
 def export_preview_jpeg(
     inp: Path,
     highlight: str,
@@ -348,6 +355,7 @@ def export_preview_jpeg(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> dict:
     dg.require_dependencies()
     stat = inp.stat()
@@ -379,13 +387,14 @@ def export_preview_jpeg(
             punch_scale,
             tone_core,
             lum_norm,
+            agx_primaries=agx_primaries,
         )
         icc_profile = dg.output_icc_profile_bytes(gamut)
         rgb_u8 = dg.render_output_u8(
             proxy_bundle, cached.analysis, gamut, tone_plan,
             look, look_strength, display_filter, filter_strength,
             scene_transform, scene_transform_strength,
-            tone_core, lum_norm,
+            tone_core, lum_norm, agx_primaries,
         )
         if auto_ev is not None:
             rgb_u8 = annotate_preview_rgb_u8(rgb_u8, dg.auto_ev_overlay_lines(auto_ev))
@@ -425,6 +434,7 @@ def run_preview(params: dict) -> dict:
     scene_transform, scene_transform_strength = parse_scene_transform(params)
     punch_scale = parse_punch(params)
     tone_core, lum_norm = parse_tone_core(params)
+    agx_primaries = parse_agx_primaries(params)
     auto_ev_result = None
     if ev_auto:
         stat = inp.stat()
@@ -471,6 +481,7 @@ def run_preview(params: dict) -> dict:
         punch_scale=punch_scale,
         tone_core=tone_core,
         lum_norm=lum_norm,
+        agx_primaries=agx_primaries,
     )
 
 
@@ -484,11 +495,14 @@ def export_suffix_parts(
     scene_transform_strength: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> str:
     """Build the filename stem suffix for GUI JPEG/PNG exports."""
     parts = [tone_core]
     if tone_core == "lum" and lum_norm != "y":
         parts.append(lum_norm)
+    if agx_primaries != "base":
+        parts.append(agx_primaries)
     if highlight != "clip":
         parts.append(highlight)
     if gamut != "srgb":
@@ -523,6 +537,7 @@ def run_export(params: dict) -> dict:
     scene_transform, scene_transform_strength = parse_scene_transform(params)
     punch_scale = parse_punch(params)
     tone_core, lum_norm = parse_tone_core(params)
+    agx_primaries = parse_agx_primaries(params)
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
 
     analysis, y, ev_img = dg.analyze(bundle, 4)
@@ -554,6 +569,7 @@ def run_export(params: dict) -> dict:
         punch_scale,
         tone_core,
         lum_norm,
+        agx_primaries=agx_primaries,
     )
 
     grade_id = str(params.get("grade", "none"))
@@ -568,6 +584,7 @@ def run_export(params: dict) -> dict:
         scene_transform_strength,
         tone_core,
         lum_norm,
+        agx_primaries,
     )
     jpg_path = outdir / f"{inp.stem}_{suffix}.jpg"
     with RENDER_LOCK:

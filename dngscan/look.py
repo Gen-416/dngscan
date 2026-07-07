@@ -65,6 +65,12 @@ class LookField:
     magenta_hue_center: float = 8.0
     magenta_hue_pull: float = 0.0
     magenta_chroma_scale: float = 1.0
+    # Optional AgX-core overrides carried by the look (applied to the tone plan before
+    # the curve runs, unlike the Oklab field above which is post-AgX):
+    #   agx_hue_keep — fraction of per-channel hue skew kept (None = plan default 0.4);
+    #   agx_target_black — linear output floor, >0 lifts blacks for faded film looks.
+    agx_hue_keep: float | None = None
+    agx_target_black: float | None = None
 
 
 # Populated by tools/extract_arri_look.py --emit; re-run that script to refresh from local LUTs.
@@ -179,6 +185,56 @@ def _load_json_fields() -> None:
 _load_json_fields()
 
 LOOK_CHOICES = ("none",) + tuple(LOOK_FIELDS)
+
+# Per-look AgX-core defaults when LookField leaves agx_* unset (JSON-measured fields
+# win when explicitly set). hue_keep > 0.4 keeps more per-channel skew (sunset/orange);
+# target_black lifts the curve floor for faded film sims.
+AGX_LOOK_DEFAULTS: dict[str, dict[str, float]] = {
+    "fuji_velvia": {"agx_hue_keep": 0.55},
+    "fuji_provia": {"agx_hue_keep": 0.45},
+    "fuji_astia": {"agx_hue_keep": 0.42},
+    "fuji_reala_ace": {"agx_hue_keep": 0.42},
+    "fuji_classic_chrome": {"agx_hue_keep": 0.38, "agx_target_black": 0.008},
+    "fuji_classic_neg": {"agx_target_black": 0.022},
+    "fuji_pro_neg_std": {"agx_target_black": 0.018},
+    "fuji_eterna": {"agx_hue_keep": 0.35, "agx_target_black": 0.012},
+    "fuji_eterna_bb": {"agx_hue_keep": 0.38, "agx_target_black": 0.016},
+    "reveal": {"agx_hue_keep": 0.38},
+    "optic_warm_cyan": {"agx_hue_keep": 0.52},
+}
+
+
+def _look_agx_scalar(look: str, key: str) -> float | None:
+    field = LOOK_FIELDS.get(look)
+    if field is not None:
+        val = getattr(field, key, None)
+        if val is not None:
+            return float(val)
+    defaults = AGX_LOOK_DEFAULTS.get(look, {})
+    if key in defaults:
+        return float(defaults[key])
+    return None
+
+
+def agx_plan_overrides(look: str, strength: float = 1.0) -> dict[str, float]:
+    """AgX-core overrides carried by a look (hue keep, faded target black).
+
+    Returned keys match ToneCompressionPlan field names so callers can apply them with
+    dataclasses.replace. Strength scales the delta from the plan default (hue_keep 0.4,
+    target_black 0) so gradeStrength < 1 eases back toward base AgX."""
+    if look == "none":
+        return {}
+    s = max(0.0, min(1.5, float(strength)))
+    out: dict[str, float] = {}
+    hue = _look_agx_scalar(look, "agx_hue_keep")
+    if hue is not None:
+        base = 0.4
+        target = float(min(1.0, max(0.0, hue)))
+        out["hue_keep"] = base + s * (target - base)
+    black = _look_agx_scalar(look, "agx_target_black")
+    if black is not None:
+        out["target_black_linear"] = s * float(min(0.15, max(0.0, black)))
+    return out
 
 
 def _smoothstep(edge0: float, edge1: float, x: Any) -> Any:

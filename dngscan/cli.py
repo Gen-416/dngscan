@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from ._deps import IMPORT_ERRORS
+from .agx import AGX_PRIMARIES_CHOICES
 from .analysis import analyze
 from .auto_ev import AutoEvResult, compute_auto_ev, is_ev_auto, parse_ev_value, resolve_export_ev
 from .constants import (
@@ -128,6 +129,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="AgX 纯度补偿倍率 0-1.5（默认 1.0=场景自动值；0=关闭，等价纯 AgX Base；夜景自动为 0）",
     )
     parser.add_argument(
+        "--agx-primaries",
+        choices=AGX_PRIMARIES_CHOICES,
+        default="base",
+        help="AgX 基调（outset 预设）: base=Blender 原版；punchy=更高纯度恢复（浓郁）；smooth=反转 inset 旋转（柔和、近 sigmoid smooth）",
+    )
+    parser.add_argument(
         "--tone-core",
         choices=TONE_CORE_CHOICES,
         default="agx",
@@ -233,6 +240,7 @@ def main(argv: list[str]) -> int:
                 args.punch,
                 args.tone_core,
                 args.lum_norm,
+                agx_primaries=args.agx_primaries,
             )
             if jpeg_path is not None
             else None

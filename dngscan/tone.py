@@ -71,7 +71,11 @@ def build_tone_compression_plan(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> ToneCompressionPlan:
+    outset_purity, outset_rotation_reversal = agx_engine.AGX_PRIMARIES_PRESETS.get(
+        agx_primaries, agx_engine.AGX_PRIMARIES_PRESETS["base"]
+    )
     rec2020 = tone_plan_sample_scene_rec2020(
         bundle,
         scene_transform=scene_transform,
@@ -135,6 +139,19 @@ def build_tone_compression_plan(
     latitude_hi_ev = clamp_float(0.25 * dynamic_range_ev, 1.0, 2.0)
     latitude_lo_ev = 0.0
 
+    # Scene-adaptive pivot (darktable "pivot relative exposure", automated): pull the
+    # point of maximum contrast toward the median luminance so a dark subject is not
+    # left on the low-contrast toe. Dead zones keep ordinary scenes (median within
+    # [-0.75, +0.5] EV of gray) byte-identical; the pull is conservative (45%) and
+    # bounded. Brightness is preserved by the curve builder (the shifted pivot keeps
+    # the output the unshifted curve produced at that input).
+    if ev_p50 < -0.75:
+        pivot_ev_offset = clamp_float(0.45 * (ev_p50 + 0.75), -1.75, 0.0)
+    elif ev_p50 > 0.5:
+        pivot_ev_offset = clamp_float(0.45 * (ev_p50 - 0.5), 0.0, 0.75)
+    else:
+        pivot_ev_offset = 0.0
+
     # Punch (post-AgX purity compensation, dngscan/punch.py): bright scenes with a
     # quality sensor window (low ISO per priors) and a wide tonal window are the washed
     # case; night/high-ISO gates to exactly zero, which short-circuits the operator so
@@ -187,6 +204,9 @@ def build_tone_compression_plan(
         tony_hdr_gain=tony_hdr_gain,
         tone_core=tone_core,
         lum_norm=lum_norm,
+        pivot_ev_offset=pivot_ev_offset,
+        outset_purity=outset_purity,
+        outset_rotation_reversal=outset_rotation_reversal,
     )
 
 
@@ -200,6 +220,7 @@ def plan_for_mode(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> ToneCompressionPlan:
     """Build the tone plan in the space each mode actually works in.
 
@@ -225,4 +246,5 @@ def plan_for_mode(
         punch_scale=punch_scale if mode == "agx" and tone_core == "agx" else 0.0,
         tone_core=tone_core,
         lum_norm=lum_norm,
+        agx_primaries=agx_primaries if mode == "agx" and tone_core == "agx" else "base",
     )

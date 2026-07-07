@@ -9,14 +9,14 @@
 ## 功能概览
 
 - **诊断** — 六面板 PNG：SNR–档数曲线、逐通道 RAW 分布、RGB 曝光直方图、各输出色域的溢出风险、空间曝光分区图、剪切通道高光图；以及逐通道满阱 / 剪切 / 黑电平 / 白平衡读数。
-- **AgX 导出** — Rec.2020 原生 AgX 视图变换：inset → log2 → sigmoid → outset。通道串扰带来平滑的高光去饱和与 AgX 特有的色相 flourish。所有 JPEG 均走此管线。
+- **AgX 导出** — Rec.2020 原生 AgX：inset → log2 → sigmoid → outset。通道串扰带来平滑高光去饱和与 AgX 色相 flourish。色调曲线由场景分析驱动（黑白 EV、toe/shoulder、latitude），并借鉴 darktable 的防护：自适应内部 gamma 保持 pivot 在对角线上、shoulder/toe 保留最小 x 段避免窄 DR 场景曲线反转、暗场景自适应 pivot 把最大对比度移到主体上。可选 `--agx-primaries {base,punchy,smooth}` 调节 outset（纯度恢复 / 旋转反转）。色度 Look 可覆盖 `hue_keep`、抬黑（`target_black`）以匹配胶片模拟性格。
 - **AgX 前馈（实验）** — 可选 `--scene-transform arri_skin_d55`，在相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 域，对肤色/青色区域施加受限 3×3 色度矩阵；默认关闭。
 - **成片风格（互斥）** — AgX 之上可选一层（`--grade`）：
   - **色度 Look** — 由官方 LUT 实测的 Oklab 几何（富士胶片模拟、ARRI Classic / Reveal）。色调仍由 AgX 负责；只改色相 / 饱和度 / 肤色塑形。
   - **输出滤镜** — 完整 Log 编码输出变换（Kodak 2383 FPE、RED IPP2），经 Cineon / Log3G10 编码后采样 `.cube`。
 - **保色相色域适配** — 用 Oklab adaptive-L0 裁切（保色相、降色度），而非逐通道 clip；适用于 sRGB 与 Display P3。
-- **导出高质量去马赛克** — 全分辨率导出默认 `--demosaic auto`（Bayer 优先 DHT，非 Bayer / X-Trans 走 libraw 原生）；预览用轻量去马赛克。仅选插值画质，**不做降噪**。
-- **本地 Web GUI**（`python -m dngscan.gui`）— 选文件、曝光、成片风格、质量、去马赛克与输出色域；实时预览；单文件曝光余量估计；sRGB / Display P3；高光处理（clip / blend / reconstruct）。
+- **导出高质量去马赛克** — 全分辨率导出默认 `--demosaic auto`（Bayer 优先 DHT，非 Bayer / X-Trans 走 libraw 原生）；预览用轻量去马赛克。仅选插值画质，**不做降噪**。**富士 RAF**（X-Trans 与 Bayer）已适配：机型/ISO 从专有头与内嵌 JPEG EXIF 读取；去马赛克前捕获 CFA pattern 以保证分析正确。
+- **本地 Web GUI**（`python -m dngscan.gui`）— 选文件、曝光、AgX 基调、成片风格、质量、去马赛克与输出色域；实时预览；单文件曝光余量估计；sRGB / Display P3；高光处理（clip / blend / reconstruct）。控件按曝光 / 色彩与风格 / 输出分组；滑条数值与标签同行；输出文件夹可用浏览选择器（不必手填路径）。
 - **可选 Ultra HDR JPEG** — ISO/Ultra HDR gain-map，带 SDR 回退底图。成片风格目前仅 SDR。默认仍为普通 SDR JPEG。
 
 ## 处理管线
@@ -147,8 +147,17 @@ python -m dngscan photo.dng
 # AgX JPEG，+0.5 EV，Display P3
 python -m dngscan photo.dng --jpeg out.jpg --ev 0.5 --output-gamut p3
 
+# 富士 RAF（X-Trans）— 与 DNG 相同 CLI/GUI
+python -m dngscan photo.raf --jpeg out.jpg
+
 # 富士 Velvia 色度 Look（叠在 AgX 上的几何）
-python -m dngscan photo.dng --jpeg out.jpg --grade fuji_velvia --grade-strength 1.0
+python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_velvia --grade-strength 1.0
+
+# 更浓郁的 AgX outset（更高纯度恢复）
+python -m dngscan photo.dng --jpeg out.jpg --agx-primaries punchy
+
+# Classic Neg 褪色黑位（Look 内置 hue_keep + target_black）
+python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_classic_neg
 
 # 光学暖肤 / 青色环境 look（手写创意场，非厂商 LUT）
 python -m dngscan photo.dng --jpeg out.jpg --grade optic_warm_cyan --grade-strength 1.0
@@ -181,9 +190,12 @@ python -m dngscan.gui   # 启动 localhost 服务并打开浏览器
 
 ## 成片风格
 
-`--grade NAME` 选择 **一种** 可选风格（`--grade-strength 0–1.5`）。色度 Look 与输出滤镜 **互斥**。
+`--grade NAME` 选择 **一种** 可选风格（`--grade-strength 0–1.5`）。CLI/GUI 使用带前缀
+的 ID：`look:classic`、`filter:kodak_2383_d65` 等；无冲突时仍可用裸名。色度 Look 与输出滤镜 **互斥**。
 
-**色度 Look**（`classic`、`reveal`、`fuji_*` 等）在 AgX 成品上施加实测 Oklab 场。内置 ARRI 场来自官方显示 LUT 几何；富士场由 F-Log2 胶片模拟 `.cube` 实测。**导出时不采样 LUT**，只读 `dngscan_assets/look_fields.json` 中的色相/色度参数。
+**色度 Look**（`look:classic`、`look:reveal`、`look:fuji_*` 等）在 AgX 成品上施加实测 Oklab 场。内置 ARRI 场来自官方显示 LUT 几何；富士场由 F-Log2 胶片模拟 `.cube` 实测。**导出时不采样 LUT**，只读 `dngscan_assets/look_fields.json` 中的色相/色度参数。
+
+每个 Look 还可携带 **AgX 核心覆盖**（在 Oklab 层之前生效）：`hue_keep`（曲线后保留多少 per-channel 色相偏斜；Velvia 高于默认 0.4）、`target_black`（抬黑，用于 Eterna / Classic Neg 等褪色胶片感）。`--grade-strength` 会在默认 AgX 与 Look 目标值之间插值。
 
 `optic_warm_cyan` 是另一类：它是手写的创意 look，不是官方厂商 LUT 测量结果。它保留 AgX 的色调映射，
 然后把低色度环境色轻推向 cyan / blue-green，保护偏红/偏黄的暖肤色，并压低非肤色的洋红溢出。目标是在

@@ -13,7 +13,7 @@ from . import scene_transform as scene_transform_engine
 from .color import RGB_TO_XYZ, output_gamut_space, rec2020_to_output
 from .constants import EPS
 from .models import Analysis, AutoEvResult, RawBundle, ToneCompressionPlan
-from .render import apply_tone_core, finalize_output_linear
+from .render import apply_tone_core, finalize_output_linear, plan_with_look_overrides
 from .tone import compute_exposure_gain, plan_for_mode, scene_rec2020_to_float
 
 EV_AUTO_TOKEN = "auto"
@@ -95,6 +95,7 @@ def render_sample_linear_output(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
     sample_masks: Any | None = None,
 ) -> Any:
     from .grade import RENDER_MODE
@@ -113,6 +114,7 @@ def render_sample_linear_output(
             punch_scale,
             tone_core,
             lum_norm,
+            agx_primaries=agx_primaries,
         ) if analysis is not None else None
     )
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
@@ -123,7 +125,8 @@ def render_sample_linear_output(
     )
     if plan is not None and str(getattr(plan, "tone_core", "agx")) == "lum" and sample_masks is not None:
         rec = retreat_engine.apply_clip_retreat_rec2020(rec, sample_masks)
-    mapped_rec = apply_tone_core(rec, plan)
+    effective_plan = plan_with_look_overrides(plan, look, look_strength) if plan is not None else None
+    mapped_rec = apply_tone_core(rec, effective_plan)
     if display_filter != "none" and filter_strength > 0.0:
         output_linear = filter_engine.apply_display_filter_rec2020(
             mapped_rec, gamut, display_filter, filter_strength, scene_rec2020=rec

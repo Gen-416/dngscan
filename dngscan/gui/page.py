@@ -14,6 +14,7 @@ body{margin:0;font:14px/1.5 -apple-system,"PingFang SC",system-ui,sans-serif;bac
 .wrap{max-width:1480px;margin:0 auto;padding:22px}
 h1{font-size:17px;font-weight:600;margin:0 0 16px}
 .card{background:#1d2028;border:1px solid #2b2f3a;border-radius:12px;padding:16px;margin-bottom:14px}
+.secTitle{font-size:12px;font-weight:600;color:#8fa0c4;text-transform:uppercase;letter-spacing:.06em;margin:0 0 12px}
 .workspace{display:grid;grid-template-columns:minmax(360px,480px) minmax(0,1fr);gap:14px;align-items:start}
 .controlPanel{min-width:0}
 .previewCard{position:sticky;top:16px;min-height:calc(100vh - 44px);display:flex;flex-direction:column}
@@ -22,27 +23,30 @@ label{display:block;font-size:12px;color:#9aa1b0;margin:0 0 6px}
 input[type=text],input[type=number],select{width:100%;background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#e7e9ee;padding:8px 10px;font:inherit}
 .row{display:flex;gap:12px;flex-wrap:wrap}
 .row>div{flex:1;min-width:150px}
-.row>.evMain{flex:2 1 390px;min-width:360px}
-.modes{display:flex;gap:8px;flex-wrap:wrap}
-.modes button{flex:1;min-width:110px;background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#cdd2dd;padding:10px;cursor:pointer;font:inherit;text-align:left}
-.modes button .m{font-weight:600;color:#e7e9ee}
-.modes button .d{font-size:11px;color:#828a99}
+.row>.evMain{flex:1 1 100%;min-width:0}
+.modes{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.modes button{flex:1;min-width:56px;overflow:hidden;background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#cdd2dd;padding:8px 4px;cursor:pointer;font:inherit;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;line-height:1.25;min-height:48px}
+.modes button .m{font-weight:600;color:#e7e9ee;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.modes button .d{font-size:10px;color:#828a99;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .modes button.sel{border-color:#5b8cff;background:#1a2233}
-.evrow{display:flex;align-items:center;gap:12px;min-width:0}
-.sliderField{flex:0;min-width:230px}
-input[type=range]{flex:1 1 auto;min-width:120px}
-.evval{flex:0 0 74px;width:74px;text-align:right;font-variant-numeric:tabular-nums}
+.modes button#evAutoBtn{flex:1.8;min-width:100px}
+.sliderField{flex:1;min-width:170px}
+.labelRow{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}
+.labelRow label{margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.labelRow .val{font-size:13px;color:#e7e9ee;font-variant-numeric:tabular-nums;white-space:nowrap}
+input[type=range]{display:block;width:100%;margin:6px 0 2px;accent-color:#5b8cff;height:18px}
 button.go{background:#5b8cff;border:0;border-radius:9px;color:#fff;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer}
 button.go:disabled{opacity:.5;cursor:default}
-button.ghost{background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#cdd2dd;padding:8px 12px;cursor:pointer;font:inherit}
+button.ghost{background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color:#cdd2dd;padding:8px 12px;cursor:pointer;font:inherit;white-space:nowrap}
 button.preview{background:#2c3444;border:1px solid #46536b;border-radius:9px;color:#eef2ff;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer}
 button.preview:disabled{opacity:.5;cursor:default}
 .muted{color:#828a99;font-size:12px}
 #status{margin-top:10px;min-height:20px}
 .err{color:#ff8a8a}.ok{color:#8ae08a}
-#browser{display:none;margin-top:10px;border:1px solid #2b2f3a;border-radius:8px;max-height:260px;overflow:auto;background:#12141a}
-#browser div{padding:6px 10px;cursor:pointer;border-bottom:1px solid #20242e;font-size:13px}
-#browser div:hover{background:#1a2233}
+.browserList{display:none;margin-top:10px;border:1px solid #2b2f3a;border-radius:8px;max-height:260px;overflow:auto;background:#12141a}
+.browserList div{padding:6px 10px;cursor:pointer;border-bottom:1px solid #20242e;font-size:13px}
+.browserList div:hover{background:#1a2233}
+.browserList div.pick{color:#8ae08a;font-weight:600;position:sticky;top:0;background:#12141a}
 #previewWrap{position:relative;margin-top:12px;min-height:420px;flex:1;display:flex;align-items:center;justify-content:center;overflow:hidden;background:#11141a;border:1px solid #2b2f3a;border-radius:8px}
 #previewWrap.loading{min-height:420px}
 #preview{max-width:100%;max-height:calc(100vh - 190px);border-radius:8px;display:none;transition:opacity .15s ease;object-fit:contain}
@@ -52,14 +56,21 @@ button.preview:disabled{opacity:.5;cursor:default}
 @keyframes spin{to{transform:rotate(360deg)}}
 .dim{opacity:.45;pointer-events:none}
 .chk{display:flex;align-items:center;gap:8px}.chk input{width:auto}
+details.adv{background:#1d2028;border:1px solid #2b2f3a;border-radius:12px;padding:0;margin-bottom:14px;overflow:hidden}
+details.adv summary{cursor:pointer;padding:13px 16px;font-size:12px;font-weight:600;color:#8fa0c4;text-transform:uppercase;letter-spacing:.06em;user-select:none;list-style:none}
+details.adv summary::-webkit-details-marker{display:none}
+details.adv summary::before{content:"▸ ";color:#5b8cff}
+details.adv[open] summary::before{content:"▾ "}
+details.adv .advBody{padding:0 16px 16px}
+.outdirRow{display:flex;gap:8px;align-items:stretch}
+.outdirRow input{flex:1}
 @media (max-width:980px){
   .wrap{padding:14px}
   .workspace{display:block}
   .previewCard{position:static;min-height:0}
   #previewWrap{min-height:260px}
   #preview{max-height:none}
-  .row>.evMain{min-width:100%}
-  input[type=range]{min-width:0}
+  .modes button .d{display:none}
 }
 </style></head>
 <body><div class="wrap">
@@ -71,59 +82,40 @@ button.preview:disabled{opacity:.5;cursor:default}
     <div style="flex:4"><input type="text" id="input" placeholder="/path/to/photo.dng"></div>
     <div style="flex:0"><button class="ghost" id="browseBtn">浏览…</button></div>
   </div>
-  <div id="browser"></div>
+  <div id="browser" class="browserList"></div>
 </div>
 
 <div class="workspace">
 <div class="controlPanel">
+
 <div class="card">
+  <div class="secTitle">曝光</div>
   <div class="row">
     <div class="evMain">
-      <label>曝光补偿 EV（手动或 auto 对齐 18% 灰）</label>
-      <div class="evrow"><input type="range" id="ev" min="-3" max="3" step="0.05" value="0"><span class="evval" id="evval">+0.00</span></div>
-      <div class="modes" style="margin-top:8px">
+      <div class="labelRow"><label>曝光补偿 EV（手动或 auto 对齐 18% 灰）</label><span class="val" id="evval">+0.00</span></div>
+      <input type="range" id="ev" min="-3" max="3" step="0.05" value="0">
+      <div class="modes">
         <button type="button" data-ev="-0.50"><span class="m">-0.50</span></button>
         <button type="button" data-ev="0"><span class="m">0.00</span></button>
         <button type="button" data-ev="0.50"><span class="m">+0.50</span></button>
         <button type="button" data-ev="1.00"><span class="m">+1.00</span></button>
-        <button type="button" id="evAutoBtn"><span class="m">auto</span><br><span class="d">18%灰·高光保护</span></button>
+        <button type="button" id="evAutoBtn" title="对齐 18% 灰，带高光保护"><span class="m">auto</span><span class="d">18%灰·高光保护</span></button>
       </div>
     </div>
-    <div style="flex:0;min-width:120px">
-      <label>JPEG 质量</label>
-      <input type="number" id="quality" min="1" max="100" value="100">
-    </div>
-    <div style="flex:0;min-width:150px">
-      <label>色度采样</label>
-      <select id="chroma" title="444=满色度、最高保真、体积最大；420=最小体积、投递推荐">
-        <option value="444">4:4:4 · 满色度</option>
-        <option value="422">4:2:2</option>
-        <option value="420">4:2:0 · 最小</option>
-      </select>
-    </div>
-    <div style="flex:0;min-width:160px">
-      <label>高光处理</label>
-      <select id="highlight">
-        <option value="clip">clip · 硬剪切</option>
-        <option value="blend">blend · 高光混合</option>
-        <option value="reconstruct">reconstruct · 高光重建</option>
-      </select>
-    </div>
-    <div style="flex:0;min-width:150px">
-      <label>输出色域</label>
-      <select id="gamut">
-        <option value="srgb">sRGB · 兼容优先</option>
-        <option value="p3">Display P3 · 宽色域</option>
-      </select>
-    </div>
-    <div style="flex:0;min-width:170px">
+  </div>
+</div>
+
+<div class="card">
+  <div class="secTitle">色彩与风格</div>
+  <div class="row">
+    <div style="flex:1;min-width:160px">
       <label>Tone 核</label>
       <select id="toneCore" title="agx=现行 inset/outset AgX；lum=亮度域收肩 + raw clip 褪白">
         <option value="agx">AgX · 现行</option>
         <option value="lum">Lum · 亮度核</option>
       </select>
     </div>
-    <div id="lumNormBlock" style="flex:0;min-width:150px;display:none">
+    <div id="lumNormBlock" style="flex:1;min-width:140px;display:none">
       <label>lum norm</label>
       <select id="lumNorm">
         <option value="y">Y · 亮度</option>
@@ -131,38 +123,113 @@ button.preview:disabled{opacity:.5;cursor:default}
         <option value="max">max RGB</option>
       </select>
     </div>
-    <div style="flex:0;min-width:220px">
+    <div id="agxPrimariesBlock" style="flex:1;min-width:150px">
+      <label>AgX 基调</label>
+      <select id="agxPrimaries" title="outset 预设：base=Blender 原版；punchy=更高纯度恢复（浓郁）；smooth=反转 inset 旋转（柔和）">
+        <option value="base">base · 原版</option>
+        <option value="punchy">punchy · 浓郁</option>
+        <option value="smooth">smooth · 柔和</option>
+      </select>
+    </div>
+    <div style="flex:2;min-width:210px">
       <label>成片风格</label>
-      <select id="grade" title="色度 Look（Fujifilm/ARRI）与输出滤镜（Kodak/RED）互斥，一次只能选一种">
+      <select id="grade" title="色度 Look（Fujifilm/ARRI）与输出滤镜（Kodak/RED/Sony）互斥，一次只能选一种">
 GRADE_OPTIONS
       </select>
     </div>
-    <div style="flex:0;min-width:220px">
+    <div id="gradeStrengthBlock" class="sliderField" style="display:none">
+      <div class="labelRow"><label>风格强度</label><span class="val" id="gradeStrengthVal">1.00</span></div>
+      <input type="range" id="gradeStrength" min="0" max="1.5" step="0.05" value="1">
+    </div>
+  </div>
+  <div class="row" style="margin-top:12px">
+    <div style="flex:2;min-width:210px">
       <label>AgX 前馈</label>
       <select id="sceneTransform" title="相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 前馈">
 SCENE_TRANSFORM_OPTIONS
       </select>
     </div>
-    <div class="sliderField">
-      <label>纯度补偿 punch</label>
-      <div class="evrow"><input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="AgX 纯度补偿倍率：1=场景自动值，0=关闭（纯 Base）；夜景自动为 0"><span class="evval" id="punchVal">1.00</span></div>
-    </div>
     <div id="sceneTransformStrengthBlock" class="sliderField" style="display:none">
-      <label>前馈强度</label>
-      <div class="evrow"><input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1=推荐强度；>1 用于诊断/强化 A/B"><span class="evval" id="sceneTransformStrengthVal">1.00</span></div>
+      <div class="labelRow"><label>前馈强度</label><span class="val" id="sceneTransformStrengthVal">1.00</span></div>
+      <input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1=推荐强度；>1 用于诊断/强化 A/B">
     </div>
-    <div id="gradeStrengthBlock" class="sliderField" style="display:none">
-      <label>风格强度</label>
-      <div class="evrow"><input type="range" id="gradeStrength" min="0" max="1.5" step="0.05" value="1"><span class="evval" id="gradeStrengthVal">1.00</span></div>
+    <div class="sliderField">
+      <div class="labelRow"><label>纯度补偿 punch</label><span class="val" id="punchVal">1.00</span></div>
+      <input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="AgX 纯度补偿倍率：1=场景自动值，0=关闭（纯 Base）；夜景自动为 0">
     </div>
-    <div style="flex:0;min-width:150px">
+  </div>
+</div>
+
+<div class="card">
+  <div class="secTitle">输出</div>
+  <div class="row">
+    <div style="flex:1;min-width:170px">
+      <label>输出格式</label>
+      <select id="format">
+        <option value="sdr">SDR JPEG</option>
+        <option value="ultrahdr">HDR gain-map JPEG</option>
+      </select>
+    </div>
+    <div style="flex:1;min-width:140px">
+      <label>输出色域</label>
+      <select id="gamut">
+        <option value="srgb">sRGB · 兼容优先</option>
+        <option value="p3">Display P3 · 宽色域</option>
+      </select>
+    </div>
+    <div style="flex:0;min-width:110px">
+      <label>JPEG 质量</label>
+      <input type="number" id="quality" min="1" max="100" value="100">
+    </div>
+    <div style="flex:1;min-width:140px">
+      <label>色度采样</label>
+      <select id="chroma" title="444=满色度、最高保真、体积最大；420=最小体积、投递推荐">
+        <option value="444">4:4:4 · 满色度</option>
+        <option value="422">4:2:2</option>
+        <option value="420">4:2:0 · 最小</option>
+      </select>
+    </div>
+  </div>
+  <div class="row" id="hdrBlock" style="margin-top:12px">
+    <div style="min-width:220px">
+      <div class="labelRow"><label>HDR headroom（仅 HDR 输出）</label><span class="val" id="hdrHeadroomVal">+3.00</span></div>
+      <input type="range" id="hdrHeadroom" min="1" max="5" step="0.25" value="3">
+      <div class="muted" id="hdrHint">微信/QQ 想保住 HDR：走原图或文件，别走朋友圈。</div>
+    </div>
+  </div>
+  <div style="margin-top:12px">
+    <label>输出文件夹（留空=与源文件同目录）</label>
+    <div class="outdirRow">
+      <input type="text" id="outdir" placeholder="默认：源文件所在文件夹">
+      <button class="ghost" id="outdirBtn">选择…</button>
+    </div>
+    <div id="outdirBrowser" class="browserList"></div>
+  </div>
+  <div class="chk" style="margin-top:12px">
+    <input type="checkbox" id="png"><label for="png" style="margin:0">同时导出六面板分析 PNG</label>
+  </div>
+</div>
+
+<details class="adv">
+  <summary>高级 · 高光处理 / 白平衡 / 去马赛克</summary>
+  <div class="advBody">
+  <div class="row">
+    <div style="flex:1;min-width:160px">
+      <label>高光处理</label>
+      <select id="highlight">
+        <option value="clip">clip · 硬剪切</option>
+        <option value="blend">blend · 高光混合</option>
+        <option value="reconstruct">reconstruct · 高光重建</option>
+      </select>
+    </div>
+    <div style="flex:1;min-width:150px">
       <label>白平衡</label>
       <select id="wb" title="camera=相机 AsShot；daylight=固定日光配平（胶片式，整卷一致）">
         <option value="camera">相机 AsShot</option>
         <option value="daylight">日光固定配平</option>
       </select>
     </div>
-    <div style="flex:0;min-width:170px">
+    <div style="flex:1;min-width:170px">
       <label>去马赛克（画质·非降噪）</label>
       <select id="demosaic" title="彩色重建的插值算法，仅影响细节画质、仅全分辨率导出生效；本工具不做任何降噪">
         <option value="auto">auto · 自动(DHT优先)</option>
@@ -174,27 +241,10 @@ SCENE_TRANSFORM_OPTIONS
         <option value="ppg">PPG</option>
       </select>
     </div>
-    <div style="flex:0;min-width:190px">
-      <label>输出格式</label>
-      <select id="format">
-        <option value="sdr">SDR JPEG</option>
-        <option value="ultrahdr">HDR gain-map JPEG</option>
-      </select>
-    </div>
-    <div style="min-width:220px">
-      <label>HDR headroom（仅 HDR 输出）</label>
-      <div class="evrow"><input type="range" id="hdrHeadroom" min="1" max="5" step="0.25" value="3"><span class="evval" id="hdrHeadroomVal">+3.00</span></div>
-      <div class="muted" id="hdrHint">微信/QQ 想保住 HDR：走原图或文件，别走朋友圈。</div>
-    </div>
   </div>
-  <div style="margin-top:12px">
-    <label>输出文件夹（留空=与源文件同目录）</label>
-    <input type="text" id="outdir" placeholder="默认：源文件所在文件夹">
   </div>
-  <div class="chk" style="margin-top:12px">
-    <input type="checkbox" id="png"><label for="png" style="margin:0">同时导出六面板分析 PNG</label>
-  </div>
-</div>
+</details>
+
 </div>
 
 <div class="card previewCard">
@@ -216,7 +266,8 @@ function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").valu
 function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v.toFixed(2);}
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
-function updateToneCoreUi(){$("#lumNormBlock").style.display=$("#toneCore").value==="lum"?"block":"none";}
+function updateToneCoreUi(){const lum=$("#toneCore").value==="lum";$("#lumNormBlock").style.display=lum?"block":"none";$("#agxPrimariesBlock").style.display=lum?"none":"block";}
+function updateFormatUi(){$("#hdrBlock").style.display=$("#format").value==="ultrahdr"?"flex":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
 function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}
 function fmtPct(v){if(v===undefined||!isFinite(v))return "";if(v<=0)return "0%";if(v<0.005)return "<0.01%";if(v<1)return "~"+v.toFixed(2)+"%";return v.toFixed(1)+"%";}
@@ -258,7 +309,7 @@ function saveSettings(){
   try{localStorage.setItem(STORE_KEY,JSON.stringify({
     input:$("#input").value,ev:$("#ev").value,quality:$("#quality").value,
     highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
-    toneCore:$("#toneCore").value,lumNorm:$("#lumNorm").value,
+    toneCore:$("#toneCore").value,lumNorm:$("#lumNorm").value,agxPrimaries:$("#agxPrimaries").value,
     grade:$("#grade").value,gradeStrength:$("#gradeStrength").value,
     sceneTransform:$("#sceneTransform").value,sceneTransformStrength:$("#sceneTransformStrength").value,punch:$("#punch").value,
     hdrHeadroom:$("#hdrHeadroom").value,outdir:$("#outdir").value,png:$("#png").checked
@@ -276,6 +327,7 @@ function restoreSettings(){
   if(s.chroma)$("#chroma").value=s.chroma;
   if(s.toneCore&&[...$("#toneCore").options].some(o=>o.value===s.toneCore))$("#toneCore").value=s.toneCore;
   if(s.lumNorm&&[...$("#lumNorm").options].some(o=>o.value===s.lumNorm))$("#lumNorm").value=s.lumNorm;
+  if(s.agxPrimaries&&[...$("#agxPrimaries").options].some(o=>o.value===s.agxPrimaries))$("#agxPrimaries").value=s.agxPrimaries;
   if(s.grade&&[...$("#grade").options].some(o=>o.value===s.grade))$("#grade").value=s.grade;
   else if(s.filter&&s.filter!=="none"){
     const fid="filter:"+s.filter;
@@ -297,14 +349,15 @@ function restoreSettings(){
   if(s.hdrHeadroom!==undefined)$("#hdrHeadroom").value=s.hdrHeadroom;
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
-  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();updateToneCoreUi();
+  setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();updateToneCoreUi();updateFormatUi();
 }
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
 ["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
 $("#toneCore").addEventListener("change",()=>{updateToneCoreUi();saveSettings();});
 $("#lumNorm").addEventListener("change",saveSettings);
+$("#agxPrimaries").addEventListener("change",saveSettings);
 $("#sceneTransform").addEventListener("change",()=>{updateSceneTransformUi();saveSettings();});
-$("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$("#gamut").value="p3";saveSettings();});
+$("#format").addEventListener("change",()=>{if($("#format").value==="ultrahdr")$("#gamut").value="p3";updateFormatUi();saveSettings();});
 $("#ev").oninput=()=>{setEvLabel();saveSettings();};
 $("#hdrHeadroom").oninput=()=>{setHdrLabel();saveSettings();};
 $("#gradeStrength").oninput=()=>{setGradeStrengthLabel();saveSettings();};
@@ -325,12 +378,31 @@ async function listDir(d){
 }
 $("#browseBtn").onclick=()=>{const b=$("#browser");if(b.style.display==="block"){b.style.display="none";}else{b.style.display="block";listDir(curDir);}};
 
+async function listOutDir(d){
+  const r=await fetch("/list?dir="+encodeURIComponent(d));const j=await r.json();
+  const b=$("#outdirBrowser");b.innerHTML="";
+  const mk=(t,fn,cls)=>{const e=document.createElement("div");e.textContent=t;e.onclick=fn;if(cls)e.className=cls;b.appendChild(e);};
+  mk("✓ 就用这里："+j.cwd,()=>{$("#outdir").value=j.cwd;b.style.display="none";saveSettings();},"pick");
+  mk("✕ 清空（与源文件同目录）",()=>{$("#outdir").value="";b.style.display="none";saveSettings();});
+  mk("⬆︎ "+j.parent,()=>listOutDir(j.parent));
+  j.dirs.forEach(d2=>mk("📁 "+d2,()=>listOutDir(j.cwd+"/"+d2)));
+}
+$("#outdirBtn").onclick=()=>{
+  const b=$("#outdirBrowser");
+  if(b.style.display==="block"){b.style.display="none";return;}
+  b.style.display="block";
+  const seed=$("#outdir").value.trim()
+    ||($("#input").value.trim()?$("#input").value.trim().replace(/\\/[^\\/]*$/,""):"")
+    ||curDir;
+  listOutDir(seed);
+};
+
 function payload(){
   const input=$("#input").value.trim();
   if(!input){setStatus("请先选择一个 DNG/RAW 文件","err");return null;}
   return {
     input,highlight:$("#highlight").value,gamut:$("#gamut").value,wb:$("#wb").value,demosaic:$("#demosaic").value,chroma:$("#chroma").value,format:$("#format").value,
-    toneCore:$("#toneCore").value,lumNorm:$("#lumNorm").value,
+    toneCore:$("#toneCore").value,lumNorm:$("#lumNorm").value,agxPrimaries:$("#agxPrimaries").value,
     grade:$("#grade").value,gradeStrength:+$("#gradeStrength").value,
     sceneTransform:$("#sceneTransform").value,sceneTransformStrength:+$("#sceneTransformStrength").value,
     punch:+$("#punch").value,
@@ -428,7 +500,7 @@ def _grade_options_html() -> str:
         gid = grade_id_for_look(name)
         lines.append(f'          <option value="{gid}">{label}</option>')
     lines.append("        </optgroup>")
-    lines.append('        <optgroup label="输出滤镜（Kodak / RED IPP2）">')
+    lines.append('        <optgroup label="输出滤镜（Kodak / RED IPP2 / Sony）">')
     for name in FILTER_CHOICES:
         if name == "none":
             continue

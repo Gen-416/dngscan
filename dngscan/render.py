@@ -75,6 +75,19 @@ def agx_compress_into_gamut(rgb: Any) -> Any:
     return agx_engine.compress_into_gamut(rgb)
 
 
+def plan_with_look_overrides(
+    plan: ToneCompressionPlan, look: str, look_strength: float = 1.0
+) -> ToneCompressionPlan:
+    """Apply a chromatic look's AgX-core overrides (hue keep, faded target black) to the
+    tone plan. Identity when the look carries none, so renders stay byte-identical."""
+    overrides = look_engine.agx_plan_overrides(look, look_strength)
+    if not overrides:
+        return plan
+    from dataclasses import replace
+
+    return replace(plan, **overrides)
+
+
 def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     """AgX in Rec.2020 working space: inset -> log2 -> sigmoid curve -> outset -> gamma.
 
@@ -153,7 +166,7 @@ def scene_render_to_agx_u8(
     return output_linear_to_u8(
         scene_render_to_agx_linear(
             bundle,
-            plan,
+            plan_with_look_overrides(plan, look, look_strength),
             output_gamut,
             display_filter,
             filter_strength,
@@ -179,17 +192,26 @@ def render_output_linear(
     scene_transform_strength: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> Any:
     if look != "none" and display_filter != "none":
         raise ValueError("色度 look 与输出滤镜不能同时启用")
     if analysis is None:
         raise ValueError("AgX 导出需要分析结果")
     plan = tone_plan if tone_plan is not None else plan_for_mode(
-        bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=tone_core, lum_norm=lum_norm
+        bundle,
+        analysis,
+        "agx",
+        output_gamut,
+        scene_transform,
+        scene_transform_strength,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
+        agx_primaries=agx_primaries,
     )
     agx_linear = scene_render_to_agx_linear(
         bundle,
-        plan,
+        plan_with_look_overrides(plan, look, look_strength),
         output_gamut,
         display_filter,
         filter_strength,
@@ -212,20 +234,18 @@ def render_output_u8(
     scene_transform_strength: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> Any:
     if look != "none" and display_filter != "none":
         raise ValueError("色度 look 与输出滤镜不能同时启用")
     if analysis is None:
         raise ValueError("AgX 导出需要分析结果")
-    plan = tone_plan if tone_plan is not None else plan_for_mode(
-        bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=tone_core, lum_norm=lum_norm
-    )
     return quantize_final_output_linear_to_u8(
         render_output_linear(
             bundle,
             analysis,
             output_gamut,
-            plan,
+            tone_plan,
             look,
             look_strength,
             display_filter,
@@ -234,13 +254,24 @@ def render_output_u8(
             scene_transform_strength,
             tone_core,
             lum_norm,
+            agx_primaries,
         ),
     )
 
 
 def scene_render_to_reference_linear(bundle: RawBundle, output_gamut: str = "p3") -> Any:
     """Unclipped scene-linear output-space reference used as the HDR reservoir."""
-    return scene_render_to_neutral_linear(bundle, output_gamut)
+    scene = bundle.scene_rec2020_render
+    h, w = scene.shape[:2]
+    flat_scene = scene.reshape(-1, scene.shape[-1])
+    out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
+    chunk = 1_000_000
+    for start in range(0, flat_scene.shape[0], chunk):
+        end = min(start + chunk, flat_scene.shape[0])
+        rec = scene_rec2020_to_float(flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain)
+        output_linear = rec2020_to_output(rec, output_gamut)
+        out[start:end] = np.nan_to_num(output_linear, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32, copy=False)
+    return out.reshape(h, w, 3)
 
 
 def hdr_highlight_weight(sdr_base_linear: Any, hdr_reference_linear: Any, output_gamut: str) -> Any:

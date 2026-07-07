@@ -117,6 +117,19 @@ class ToneCompressionPlan:
     tone_core: str = "agx"
     # Norm for the luminance core: "y", "power", or "max".
     lum_norm: str = "y"
+    # Scene-adaptive pivot: EV offset (relative to mid gray) of the point of maximum
+    # contrast. Dark scenes pull it toward the median so the subject gets the steep part
+    # of the curve; output brightness at the pivot is preserved by the curve builder.
+    pivot_ev_offset: float = 0.0
+    # Fraction of the per-channel AgX hue skew kept after the curve (Blender default 0.4).
+    # Chromatic looks may override (e.g. sunsets benefit from keeping more skew).
+    hue_keep: float = 0.4
+    # Linear output floor of the curve; >0 lifts blacks for faded film looks.
+    target_black_linear: float = 0.0
+    # AgX primaries scalars deriving the effective outset (see agx.AGX_PRIMARIES_PRESETS):
+    # purity 1 + reversal 0 reproduces Blender's outset exactly.
+    outset_purity: float = 1.0
+    outset_rotation_reversal: float = 0.0
 
 
 @dataclass

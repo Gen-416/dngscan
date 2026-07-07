@@ -292,6 +292,15 @@ def load_raw(
             daylight_wb = [float(v) for v in daylight_attr] if daylight_attr is not None else None
             wb_kwargs = wb_postprocess_kwargs(wb_mode, daylight_wb)
 
+            # Capture the CFA pattern BEFORE postprocess: libraw mutates raw_pattern
+            # during demosaic on some sensors (X-Trans collapses 6x6 -> [[6]]), which
+            # would poison the CFA-plane analysis downstream.
+            raw_pattern_arr = getattr(raw, "raw_pattern", None)
+            if raw_pattern_arr is None:
+                raw_pattern: list[list[int]] = []
+            else:
+                raw_pattern = np.asarray(raw_pattern_arr).astype(int).tolist()
+
             demosaic_alg = resolve_demosaic_algorithm(raw, demosaic)
             xyz_render = render_to_xyz(raw, scene_highlight_mode, demosaic_alg, scene_half_size, wb_kwargs)
             if xyz_render.ndim != 3 or xyz_render.shape[2] < 3:
@@ -320,8 +329,6 @@ def load_raw(
             camera_wb = list(wb_attr) if wb_attr is not None else []
             camera_white_levels = list(white_pc_attr) if white_pc_attr is not None else []
             color_desc = decode_color_desc(getattr(raw, "color_desc", ""))
-            raw_pattern_arr = getattr(raw, "raw_pattern", [])
-            raw_pattern = np.asarray(raw_pattern_arr).astype(int).tolist() if np is not None else []
             clip_masks = build_clip_masks(
                 raw_image,
                 raw_colors,

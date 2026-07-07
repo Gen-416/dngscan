@@ -269,12 +269,25 @@ def jpeg_tone_plan_cn(
             bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=mode
         )
         label = "AgX" if mode == "agx" else f"lum({plan.lum_norm})"
+        extras = []
+        if abs(plan.pivot_ev_offset) > 1e-3:
+            extras.append(f"pivot={plan.pivot_ev_offset:+.2f}EV")
+        if abs(plan.hue_keep - 0.4) > 1e-3:
+            extras.append(f"hue_keep={plan.hue_keep:.2f}")
+        if plan.target_black_linear > 1e-4:
+            extras.append(f"lift黑={plan.target_black_linear:.3f}")
+        if plan.outset_purity != 1.0 or plan.outset_rotation_reversal != 0.0:
+            extras.append(
+                f"outset purity={plan.outset_purity:.2f} rot={plan.outset_rotation_reversal:.2f}"
+            )
+        extra_text = ("；" + "，".join(extras)) if extras else ""
         return (
             f"{label} 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV，"
             f"DR={plan.dynamic_range_ev:.2f}档；Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
             f"曲线 contrast={plan.contrast:.2f}, toe={plan.toe_power:.2f}, shoulder={plan.shoulder_power:.2f}；"
             f"纯度补偿={plan.punch_strength:.2f}；"
             f"色度压缩={plan.chroma_strength:.2f}，{plan.target_gamut} 负通道={plan.negative_rgb_pct:.2f}%"
+            f"{extra_text}"
         )
     return ""
 

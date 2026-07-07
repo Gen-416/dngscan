@@ -19,7 +19,13 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
   full-well / clip / black-level / white-balance readouts.
 - **AgX export** — Rec.2020-native AgX view transform: inset → log2 → sigmoid →
   outset. Channel crosstalk gives smooth highlight desaturation and AgX's signature hue
-  flourish. All JPEG output uses this pipeline.
+  flourish. The tone curve is analysis-driven (black/white EV, toe/shoulder, latitude)
+  with darktable-aligned safeguards: adaptive internal gamma keeps the pivot on the
+  diagonal, a minimum shoulder/toe run prevents curve inversion on narrow-DR scenes, and
+  scene-adaptive pivot placement puts maximum contrast on the subject in dark frames.
+  Optional `--agx-primaries {base,punchy,smooth}` reshapes the outset (purity /
+  rotation-reversal scalars). Chromatic looks may override `hue_keep` and lift blacks
+  (`target_black`) for film-sim character.
 - **Pre-AgX scene transform (experimental)** — optional `--scene-transform arri_skin_d55`
   runs in scene-linear Rec.2020 after camera colour interpretation and before AgX,
   blending constrained 3x3 matrices inside skin/cyan chromaticity masks. Off by default.
@@ -33,9 +39,14 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
 - **High-quality demosaic on export** — full-res exports use `--demosaic auto` (DHT
   preferred, libraw-native for non-Bayer / X-Trans sensors) or a manual algorithm;
   preview uses a light demosaic. Interpolation quality only — **no noise reduction**.
-- **Local web GUI** (`python -m dngscan.gui`) — pick a file, exposure, grade, quality,
-  demosaic and output gamut; live preview; per-file exposure-headroom estimate; sRGB or
-  Display P3; highlight handling (clip / blend / reconstruct).
+  **Fujifilm RAF** (X-Trans and Bayer) is supported: camera model / ISO are read from
+  the proprietary header and embedded JPEG EXIF; CFA pattern is captured before
+  demosaic for correct analysis.
+- **Local web GUI** (`python -m dngscan.gui`) — pick a file, exposure, AgX primaries,
+  grade, quality, demosaic and output gamut; live preview; per-file exposure-headroom
+  estimate; sRGB or Display P3; highlight handling (clip / blend / reconstruct).
+  Controls are grouped (exposure / color & style / output); sliders show values inline;
+  output folder can be chosen with a browse picker (not only typed paths).
 - **Optional Ultra HDR JPEG** — ISO/Ultra HDR gain-map output with an SDR fallback.
   Grades are SDR-only today. SDR JPEG remains the default.
 
@@ -201,8 +212,17 @@ python -m dngscan photo.dng
 # AgX JPEG, +0.5 EV, Display P3
 python -m dngscan photo.dng --jpeg out.jpg --ev 0.5 --output-gamut p3
 
+# Fujifilm RAF (X-Trans) — same CLI/GUI as DNG
+python -m dngscan photo.raf --jpeg out.jpg
+
 # Fujifilm Velvia look (chromatic geometry on AgX)
-python -m dngscan photo.dng --jpeg out.jpg --grade fuji_velvia --grade-strength 1.0
+python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_velvia --grade-strength 1.0
+
+# Punchier AgX outset (more purity restoration)
+python -m dngscan photo.dng --jpeg out.jpg --agx-primaries punchy
+
+# Faded-film blacks via Classic Neg look (hue_keep + target_black baked in)
+python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_classic_neg
 
 # Optical warm/cyan look: cyan-biased environment, warm skin/highlights
 python -m dngscan photo.dng --jpeg out.jpg --grade optic_warm_cyan --grade-strength 1.0
@@ -237,13 +257,20 @@ gain map.
 
 ## Grades
 
-`--grade NAME` picks **one** optional style (`--grade-strength 0–1.5`). Chromatic looks
-and display filters are mutually exclusive.
+`--grade NAME` picks **one** optional style (`--grade-strength 0–1.5`). Use prefixed
+IDs in CLI/GUI: `look:classic`, `filter:kodak_2383_d65`, etc. Bare names still work
+when unambiguous. Chromatic looks and display filters are mutually exclusive.
 
-**Chromatic looks** (`classic`, `reveal`, `fuji_*`, …) apply a measured Oklab field on the
-AgX render. Built-in ARRI fields come from official display LUT geometry; Fujifilm fields
-are measured from F-Log2 film-sim `.cube` files. **No LUT is sampled at export time** for
-looks — only pre-measured hue/chroma parameters in `dngscan_assets/look_fields.json`.
+**Chromatic looks** (`look:classic`, `look:reveal`, `look:fuji_*`, …) apply a measured
+Oklab field on the AgX render. Built-in ARRI fields come from official display LUT
+geometry; Fujifilm fields are measured from F-Log2 film-sim `.cube` files. **No LUT is
+sampled at export time** for looks — only pre-measured hue/chroma parameters in
+`dngscan_assets/look_fields.json`.
+
+Each look may also carry **AgX-core overrides** applied before the Oklab pass:
+`hue_keep` (how much per-channel hue skew survives the curve; Velvia keeps more than
+base) and `target_black` (lifted blacks for Eterna / Classic Neg–style fades).
+`--grade-strength` blends these toward the default AgX (0.4 hue keep, zero lift).
 
 `optic_warm_cyan` is different: it is a hand-authored creative look, not an official
 vendor LUT measurement. It keeps AgX tone mapping, then biases low-chroma environment
