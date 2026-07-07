@@ -107,13 +107,16 @@ def render_sample_linear_output(
             scene_transform_strength,
         ) if analysis is not None else None
     )
+    wb_adapt = scene_transform_engine.wb_adaptation_ratios(
+        ev_bundle.wb_mode, ev_bundle.camera_wb, ev_bundle.daylight_wb
+    )
     rec = scene_transform_engine.apply_scene_transform_rec2020(
-        rec, scene_transform, scene_transform_strength
+        rec, scene_transform, scene_transform_strength, wb_adapt
     )
     mapped_rec = apply_agx_core(rec, plan)
     if display_filter != "none" and filter_strength > 0.0:
         output_linear = filter_engine.apply_display_filter_rec2020(
-            mapped_rec, gamut, display_filter, filter_strength
+            mapped_rec, gamut, display_filter, filter_strength, scene_rec2020=rec
         )
     else:
         output_linear = rec2020_to_output(mapped_rec, gamut)

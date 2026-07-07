@@ -97,11 +97,14 @@ def scene_render_to_agx_linear(
     out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
 
+    wb_adapt = scene_transform_engine.wb_adaptation_ratios(
+        bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
+    )
     for start in range(0, flat_scene.shape[0], chunk):
         end = min(start + chunk, flat_scene.shape[0])
         rec = scene_rec2020_to_float(flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain)
         rec = scene_transform_engine.apply_scene_transform_rec2020(
-            rec, scene_transform, scene_transform_strength
+            rec, scene_transform, scene_transform_strength, wb_adapt
         )
         mapped_rec = apply_agx_core(rec, plan)
         if display_filter != "none" and filter_strength > 0.0:

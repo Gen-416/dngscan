@@ -100,6 +100,32 @@ def validate_scene_transform(name: str) -> str:
     raise ValueError(f"未知 scene transform：{name}")
 
 
+def wb_adaptation_ratios(
+    wb_mode: str, applied_wb: list[float] | None, daylight_wb: list[float] | None
+) -> tuple[float, float] | None:
+    """(R/G, B/G) chromaticity transport from the calibration balance to the applied one.
+
+    Region anchors are calibrated under a daylight-balanced render (the preset's D55 is
+    approximated by libraw's daylight multipliers). When the export uses a different
+    balance (AsShot), a surface that sat at chromaticity (rg, bg) in the calibration
+    render sits at ~(rg*rR, bg*rB) now, with r = G-normalized(applied/daylight) — a
+    von Kries transport of the anchor. Returns None (identity) for the daylight balance
+    or when either multiplier set is unusable."""
+    if wb_mode == "daylight":
+        return None
+    if not applied_wb or not daylight_wb or len(applied_wb) < 3 or len(daylight_wb) < 3:
+        return None
+    ar, ag, ab = (float(v) for v in applied_wb[:3])
+    dr, dg, db = (float(v) for v in daylight_wb[:3])
+    if min(ar, ag, ab, dr, dg, db) <= 0.0:
+        return None
+    r_r = min(5.0, max(0.2, (ar / ag) / (dr / dg)))
+    r_b = min(5.0, max(0.2, (ab / ag) / (db / dg)))
+    if abs(r_r - 1.0) < 1e-3 and abs(r_b - 1.0) < 1e-3:
+        return None
+    return (r_r, r_b)
+
+
 def _apply_matrix(rgb: Any, matrix: Any) -> Any:
     out = np.empty_like(rgb, dtype=np.float32)
     out[:, 0] = matrix[0, 0] * rgb[:, 0] + matrix[0, 1] * rgb[:, 1] + matrix[0, 2] * rgb[:, 2]
@@ -108,7 +134,7 @@ def _apply_matrix(rgb: Any, matrix: Any) -> Any:
     return out
 
 
-def _region_weight(rgb: Any, region: SceneTransformRegion) -> Any:
+def _region_weight(rgb: Any, region: SceneTransformRegion, wb_adapt: tuple[float, float] | None = None) -> Any:
     denom = np.maximum(rgb[:, 1], np.float32(EPS))
     chroma = np.empty((rgb.shape[0], 2), dtype=np.float32)
     chroma[:, 0] = rgb[:, 0] / denom
@@ -116,6 +142,13 @@ def _region_weight(rgb: Any, region: SceneTransformRegion) -> Any:
 
     mu = np.asarray(region.mu_rg_bg, dtype=np.float32)
     cov = np.asarray(region.cov_rg_bg, dtype=np.float32) * np.float32(max(region.scale, EPS) ** 2)
+    if wb_adapt is not None:
+        # Transport the calibrated window to the applied white balance: the anchor moves
+        # with the chromaticity ratios and the covariance stretches with them (the
+        # region matrix itself is a spectral-crosstalk correction and stays fixed).
+        scale_vec = np.asarray(wb_adapt, dtype=np.float32)
+        mu = mu * scale_vec
+        cov = cov * np.outer(scale_vec, scale_vec).astype(np.float32)
     try:
         inv_cov = np.linalg.inv(cov).astype(np.float32, copy=False)
     except np.linalg.LinAlgError:
@@ -128,12 +161,19 @@ def _region_weight(rgb: Any, region: SceneTransformRegion) -> Any:
     return np.where(signal > np.float32(EPS), weight, np.float32(0.0))
 
 
-def apply_scene_transform_rec2020(rgb: Any, transform: str = "none", strength: float = 1.0) -> Any:
+def apply_scene_transform_rec2020(
+    rgb: Any,
+    transform: str = "none",
+    strength: float = 1.0,
+    wb_adapt: tuple[float, float] | None = None,
+) -> Any:
     """Apply a soft chromaticity-windowed 3x3 scene transform in linear Rec.2020.
 
     `strength=0` is exact identity.  Multiple regions blend by normalizing only
     when their raw weights sum above one, so a single region keeps its full mask
-    while overlap cannot double-apply competing matrices.
+    while overlap cannot double-apply competing matrices.  `wb_adapt` transports the
+    calibrated chromaticity windows to the applied white balance (see
+    wb_adaptation_ratios); None keeps the calibration-balance windows.
     """
     if transform == "none" or strength <= 0.0:
         return rgb
@@ -144,7 +184,7 @@ def apply_scene_transform_rec2020(rgb: Any, transform: str = "none", strength: f
     rgb32 = np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=0.0)
     weights: list[Any] = []
     for region in preset.regions:
-        weights.append(_region_weight(rgb32, region) * np.float32(max(0.0, region.strength)))
+        weights.append(_region_weight(rgb32, region, wb_adapt) * np.float32(max(0.0, region.strength)))
     total = np.zeros((rgb32.shape[0],), dtype=np.float32)
     for w in weights:
         total += w

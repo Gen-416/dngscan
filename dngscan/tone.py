@@ -45,8 +45,11 @@ def tone_plan_sample_scene_rec2020(
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
     rec2020 = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, bundle.exposure_gain)
+    wb_adapt = scene_transform_engine.wb_adaptation_ratios(
+        bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
+    )
     return scene_transform_engine.apply_scene_transform_rec2020(
-        rec2020, scene_transform, scene_transform_strength
+        rec2020, scene_transform, scene_transform_strength, wb_adapt
     )
 
 
