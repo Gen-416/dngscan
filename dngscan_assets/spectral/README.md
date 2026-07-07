@@ -12,3 +12,18 @@ Current files are bootstrap-quality approximations, not authoritative measuremen
 - `demo_cyan_reflectance.csv`: analytic cyan/blue-green material manifold. Replace or augment with measured surface spectra. The MLS dataset is one open source of real measured object/illumination spectra under CC BY-SA 4.0: https://github.com/visillect/mls-dataset
 
 Accepted formats include wide `wavelength_nm,sample_1,sample_2,...`, tidy `sample,wavelength_nm,reflectance`, and single `wavelength_nm,value` CSVs.
+
+## Material mode (`--preset-mode material`)
+
+Additional optional per-material reflectance CSVs (same accepted formats); analytic
+demo families are used when a file is absent:
+
+- `foliage_reflectance.csv`: vegetation with red edge. Open sources: USGS spectral library, ECOSTRESS.
+- `magenta_reflectance.csv`: magenta/purple dyes and fabrics.
+- `neutral_reflectance.csv`: near-neutral ramps.
+
+Outputs: preset `alev_material_d55` (merged into scene_transform_presets.json) and
+`calibration_report.json` here (per-material before/after Oklab divergence per
+illuminant, confidence, and the D55 cross-material leakage table). Windows can be
+re-fit from real photos per material with `tools/fit_skin_window.py --preset
+alev_material_d55 --region <name>`.

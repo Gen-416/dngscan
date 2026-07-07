@@ -117,6 +117,211 @@
           "strength": 0.42
         }
       ]
+    },
+    "alev_material_d55": {
+      "name": "alev_material_d55",
+      "label": "ALEV material prefeed (D55 windows)",
+      "illuminant": "D55",
+      "working_space": "Rec2020",
+      "note": "Material-aware Sigma->ALEV simulation: per-material constrained fits on D55+A samples, windows in the D55 calibration frame (runtime von Kries transport applies), look_gain=1. Confidence folds fit quality into the effective weight. Data quality per dngscan_assets/spectral/README.md; regenerate after replacing CSVs. [skin window refit from real DNG samples 2026-07-07]",
+      "sources": {
+        "alev3_ssf": "dngscan_assets/spectral/arri_alexa_alev3_ssf_digitized.csv",
+        "imx410_qe": "dngscan_assets/spectral/sony_imx410_qe_zwo_asi2400mc_digitized.csv",
+        "sigma_fp_hot_mirror": "dngscan_assets/spectral/sigma_fp_hot_mirror_model_420_660.csv",
+        "cmf": "CIE 1931 2° via auto",
+        "skin_spectra": "dngscan_assets/spectral/demo_skin_reflectance.csv",
+        "foliage_spectra": "analytic foliage demo (red-edge family)",
+        "cyan_spectra": "dngscan_assets/spectral/demo_cyan_reflectance.csv",
+        "neutral_spectra": "analytic neutral ramps",
+        "magenta_spectra": "analytic magenta dye demo"
+      },
+      "regions": [
+        {
+          "name": "skin",
+          "matrix": [
+            [
+              0.97545381,
+              0.10142932,
+              -0.07688313
+            ],
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              -0.02140505,
+              0.04545887,
+              0.97594617
+            ]
+          ],
+          "mu_rg_bg": [
+            1.9185851306176753,
+            0.4201156098093058
+          ],
+          "cov_rg_bg": [
+            [
+              0.028192196016837586,
+              -0.001264884562100376
+            ],
+            [
+              -0.001264884562100376,
+              0.004116973335723905
+            ]
+          ],
+          "scale": 1.5,
+          "strength": 1.0,
+          "confidence": 0.1716
+        },
+        {
+          "name": "foliage",
+          "matrix": [
+            [
+              1.21179301,
+              -0.14764549,
+              -0.06414752
+            ],
+            [
+              0.0,
+              1.0,
+              -0.0
+            ],
+            [
+              1e-08,
+              0.0,
+              0.99999999
+            ]
+          ],
+          "mu_rg_bg": [
+            0.49828928,
+            1.1e-07
+          ],
+          "cov_rg_bg": [
+            [
+              0.0060238685,
+              1.6e-09
+            ],
+            [
+              1.6e-09,
+              1e-05
+            ]
+          ],
+          "scale": 2.0,
+          "strength": 0.9,
+          "confidence": 0.8638
+        },
+        {
+          "name": "cyan",
+          "matrix": [
+            [
+              1.24023063,
+              -0.15906374,
+              -0.08116689
+            ],
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.7208272,
+              -0.38327318,
+              0.66244598
+            ]
+          ],
+          "mu_rg_bg": [
+            0.53996541,
+            0.24810795
+          ],
+          "cov_rg_bg": [
+            [
+              0.0169975261,
+              0.0313741779
+            ],
+            [
+              0.0313741779,
+              0.0811903033
+            ]
+          ],
+          "scale": 2.2,
+          "strength": 0.9,
+          "confidence": 0.5723
+        },
+        {
+          "name": "neutral",
+          "matrix": [
+            [
+              1.21795279,
+              -0.23543525,
+              0.01748246
+            ],
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.15038837,
+              -0.29408017,
+              1.1436918
+            ]
+          ],
+          "mu_rg_bg": [
+            1.00001534,
+            0.99869119
+          ],
+          "cov_rg_bg": [
+            [
+              5.2176e-05,
+              0.0001723653
+            ],
+            [
+              0.0001723653,
+              0.0032950211
+            ]
+          ],
+          "scale": 1.2,
+          "strength": 0.5,
+          "confidence": 0.8301
+        },
+        {
+          "name": "magenta",
+          "matrix": [
+            [
+              1.12355341,
+              -0.04864988,
+              -0.07490353
+            ],
+            [
+              -0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.17560448,
+              0.06447588,
+              0.75991964
+            ]
+          ],
+          "mu_rg_bg": [
+            1.54465588,
+            2.67930114
+          ],
+          "cov_rg_bg": [
+            [
+              0.0075903972,
+              -0.0051255369
+            ],
+            [
+              -0.0051255369,
+              0.0341028632
+            ]
+          ],
+          "scale": 2.0,
+          "strength": 0.85,
+          "confidence": 0.7026
+        }
+      ]
     }
   },
   "sources": {

@@ -55,3 +55,26 @@ class SceneTransformTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_region_confidence_scales_effect(self) -> None:
+        from dataclasses import replace as dc_replace
+
+        from dngscan.scene_transform import SCENE_TRANSFORMS
+
+        preset = SCENE_TRANSFORMS["alev_material_d55"]
+        names = [r.name for r in preset.regions]
+        self.assertEqual(set(names), {"skin", "foliage", "cyan", "neutral", "magenta"})
+        for region in preset.regions:
+            self.assertGreaterEqual(region.confidence, 0.0)
+            self.assertLessEqual(region.confidence, 1.0)
+        # zero-confidence copy must be inert even inside its own window
+        skin = next(r for r in preset.regions if r.name == "skin")
+        mu = skin.mu_rg_bg
+        rgb = dg.np.asarray([[mu[0], 1.0, mu[1]]], dtype=dg.np.float32)
+        import dngscan.scene_transform as st
+
+        w_full = st._region_weight(rgb, skin, None) * skin.strength * skin.confidence
+        zero = dc_replace(skin, confidence=0.0)
+        w_zero = st._region_weight(rgb, zero, None) * zero.strength * zero.confidence
+        self.assertGreater(float(w_full[0]), 0.0)
+        self.assertEqual(float(w_zero[0]), 0.0)

@@ -575,6 +575,248 @@ def preserve_window(region: dict, existing: dict[str, dict]) -> dict:
     return region
 
 
+# --- material-aware ALEV simulation (strict mode) ---------------------------
+# Layer 1 of the material prefeed: per-material Sigma->ALEV fits with an explicit
+# error report (before/after divergence in Oklab) and a cross-material leakage table
+# that justifies the runtime windows. Layer 2 (runtime) consumes the emitted regions:
+# each window carries its own matrix and a confidence in [0,1] that scene_transform
+# folds into the effective weight.
+
+REC2020_TO_XYZ_D65 = np.array([
+    [0.6369580, 0.1446169, 0.1688810],
+    [0.2627002, 0.6779981, 0.0593017],
+    [0.0000000, 0.0280727, 1.0609851],
+])
+_OK_M1 = np.array([
+    [0.8189330101, 0.3618667424, -0.1288597137],
+    [0.0329845436, 0.9293118715, 0.0361456387],
+    [0.0482003018, 0.2643662691, 0.6338517070],
+])
+_OK_M2 = np.array([
+    [0.2104542553, 0.7936177850, -0.0040720468],
+    [1.9779984951, -2.4285922050, 0.4505937099],
+    [0.0259040371, 0.7827717662, -0.8086757660],
+])
+
+
+def rec2020_to_oklab(rgb: np.ndarray) -> np.ndarray:
+    xyz = np.maximum(rgb, 0.0) @ REC2020_TO_XYZ_D65.T
+    lms = np.cbrt(np.maximum(xyz @ _OK_M1.T, 0.0))
+    return lms @ _OK_M2.T
+
+
+def oklab_divergence(a_rgb: np.ndarray, b_rgb: np.ndarray) -> np.ndarray:
+    """Per-sample Oklab distance between two chroma-normalized Rec.2020 renders."""
+    a = normalize_chroma(a_rgb) * 0.18
+    b = normalize_chroma(b_rgb) * 0.18
+    return np.linalg.norm(rec2020_to_oklab(a) - rec2020_to_oklab(b), axis=1)
+
+
+def demo_foliage_spectra() -> np.ndarray:
+    """Chlorophyll-style reflectance with an explicit red edge.
+
+    The red edge (steep rise past ~690nm) is where the fp hot-mirror (~660nm cutoff)
+    and ALEV's wider red response diverge hardest, so foliage is the class with the
+    largest native camera disagreement — the per-material fit must capture it."""
+    spectra: list[np.ndarray] = []
+    for green_peak in np.linspace(0.12, 0.30, 5):
+        for edge_nm in np.linspace(686.0, 700.0, 3):
+            for dry in np.linspace(0.0, 0.35, 3):
+                bump = green_peak * np.exp(-0.5 * ((WL - 552.0) / 32.0) ** 2)
+                red_edge = 0.42 / (1.0 + np.exp(-(WL - edge_nm) / 7.0))
+                base = 0.035 + dry * 0.10 * np.clip((WL - 520.0) / 180.0, 0.0, 1.0)
+                spectra.append(np.clip(base + bump + red_edge, 0.015, 0.85))
+    return np.asarray(spectra, dtype=np.float64)
+
+
+def demo_magenta_spectra() -> np.ndarray:
+    """Magenta/purple dye family (wigs, costume fabric): blue+red high, green trough."""
+    spectra: list[np.ndarray] = []
+    for blue in np.linspace(0.22, 0.55, 4):
+        for red in np.linspace(0.25, 0.65, 4):
+            for trough in np.linspace(500.0, 560.0, 3):
+                b = blue * np.exp(-0.5 * ((WL - 445.0) / 38.0) ** 2)
+                r = red / (1.0 + np.exp(-(WL - 605.0) / 22.0))
+                g = 0.05 + 0.02 * np.exp(-0.5 * ((WL - trough) / 60.0) ** 2)
+                spectra.append(np.clip(b + r + g, 0.02, 0.9))
+    return np.asarray(spectra, dtype=np.float64)
+
+
+def demo_sky_reflectance(d55: np.ndarray) -> np.ndarray:
+    """Sky radiance family expressed as equivalent reflectance under D55 (SPD ratio),
+    so the standard reflectance pipeline reproduces sky colours exactly. Profile- and
+    report-only: sky is an emitter and gets no runtime window."""
+    spectra: list[np.ndarray] = []
+    for k in np.linspace(0.6, 2.2, 5):
+        sky = d55 * (WL / 550.0) ** (-k)
+        ratio = sky / np.maximum(d55, 1e-9)
+        spectra.append(np.clip(ratio / max(float(ratio.max()), 1e-9) * 0.8, 0.02, 1.0))
+    return np.asarray(spectra, dtype=np.float64)
+
+
+MATERIAL_BASE_STRENGTH = {"skin": 1.0, "foliage": 0.9, "cyan": 0.9, "neutral": 0.5, "magenta": 0.85}
+MATERIAL_MASK_SCALE = {"skin": 1.6, "foliage": 2.0, "cyan": 2.2, "neutral": 1.2, "magenta": 2.0}
+
+
+def material_spectra_sets(args: argparse.Namespace) -> dict[str, tuple[np.ndarray, str]]:
+    def from_file(fname: str, fallback: np.ndarray, label: str) -> tuple[np.ndarray, str]:
+        path = default_data_path(args.data_dir, fname)
+        if path is not None:
+            return load_spectra_csv(path), source_label(path, label)
+        return fallback, label
+
+    skin_path = args.skin_csv if args.skin_csv is not None else (None if args.skin_dir else default_data_path(args.data_dir, DEFAULT_SKIN_CSV))
+    cyan_path = args.cyan_csv if args.cyan_csv is not None else (None if args.cyan_dir else default_data_path(args.data_dir, DEFAULT_CYAN_CSV))
+    skin, skin_src = load_spectra_input(skin_path, args.skin_dir, demo_skin_spectra())
+    cyan, cyan_src = load_spectra_input(cyan_path, args.cyan_dir, demo_cyan_spectra())
+    foliage, fol_src = from_file("foliage_reflectance.csv", demo_foliage_spectra(), "analytic foliage demo (red-edge family)")
+    magenta, mag_src = from_file("magenta_reflectance.csv", demo_magenta_spectra(), "analytic magenta dye demo")
+    neutral, neu_src = from_file("neutral_reflectance.csv", demo_neutral_spectra(), "analytic neutral ramps")
+    return {
+        "skin": (skin, skin_src),
+        "foliage": (foliage, fol_src),
+        "cyan": (cyan, cyan_src),
+        "neutral": (neutral, neu_src),
+        "magenta": (magenta, mag_src),
+    }
+
+
+def run_material_mode(
+    args: argparse.Namespace,
+    alexa_ssf: np.ndarray,
+    fp_ssf: np.ndarray,
+    cmf: np.ndarray,
+    base_sources: dict[str, str],
+) -> int:
+    ill_names = [s.strip() for s in args.fit_illuminants.split(",") if s.strip()]
+    if "D55" not in ill_names:
+        ill_names.insert(0, "D55")
+    ills = {name: illuminant_spd(name, args.standard_data) for name in ill_names}
+    d55 = ills["D55"]
+
+    materials = material_spectra_sets(args)
+    sky = demo_sky_reflectance(d55)
+    profile = np.concatenate([spec for spec, _ in materials.values()] + [demo_colour_spectra(), sky], axis=0)
+
+    # Per-illuminant camera profiles: each camera is balanced to that illuminant,
+    # matching the runtime WB convention (and the daylight-frame window transport).
+    profiles: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for name, spd in ills.items():
+        target = spectra_to_rec2020(profile, spd, cmf)
+        profiles[name] = (
+            camera_to_rec2020_matrix(integrate_response(profile, spd, fp_ssf), target),
+            camera_to_rec2020_matrix(integrate_response(profile, spd, alexa_ssf), target),
+        )
+
+    gain = float(args.material_look_gain)
+    fits: dict[str, dict] = {}
+    responses: dict[str, dict[str, tuple[np.ndarray, np.ndarray]]] = {}
+    for mat, (spectra, source) in materials.items():
+        per_ill: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        for name in ill_names:
+            spd = ills[name]
+            fp2020, alexa2020 = profiles[name]
+            fp = camera_rec2020_response(spectra, spd, fp_ssf, fp2020)
+            alexa = camera_rec2020_response(spectra, spd, alexa_ssf, alexa2020)
+            per_ill[name] = (fp, alexa)
+        responses[mat] = per_ill
+        src = np.concatenate([fp for fp, _ in per_ill.values()])
+        dst = np.concatenate([alexa for _, alexa in per_ill.values()])
+        matrix = strengthen_matrix(constrained_row_sum_fit(src, dst), gain)
+
+        errors: dict[str, dict[str, float]] = {}
+        conf_terms: list[float] = []
+        for name, (fp, alexa) in per_ill.items():
+            before = oklab_divergence(fp, alexa)
+            after = oklab_divergence(np.clip(fp @ matrix.T, 1e-8, None), alexa)
+            errors[name] = {
+                "before_mean": float(before.mean()), "before_p95": float(np.percentile(before, 95.0)),
+                "after_mean": float(after.mean()), "after_p95": float(np.percentile(after, 95.0)),
+            }
+            if before.mean() < 1e-5:
+                conf_terms.append(1.0)
+            else:
+                conf_terms.append(max(0.0, min(1.0, 1.0 - after.mean() / before.mean())))
+        confidence = float(np.mean(conf_terms))
+        fits[mat] = {"matrix": matrix, "errors": errors, "confidence": confidence, "source": source}
+
+    # Cross-material leakage under D55: applying material k's matrix to material j.
+    # Large off-diagonal degradation is the physical argument for windowed application.
+    leakage: dict[str, dict[str, float]] = {}
+    for k, fit_k in fits.items():
+        row: dict[str, float] = {}
+        for j in fits:
+            fp_j, alexa_j = responses[j]["D55"]
+            after = oklab_divergence(np.clip(fp_j @ fit_k["matrix"].T, 1e-8, None), alexa_j)
+            row[j] = float(after.mean())
+        leakage[k] = row
+
+    regions = []
+    for mat, fit in fits.items():
+        fp_d55, _ = responses[mat]["D55"]
+        mu, cov = mask_params(fp_d55, MATERIAL_MASK_SCALE[mat])
+        regions.append({
+            "name": mat,
+            "matrix": [[round(float(v), 8) for v in row] for row in fit["matrix"]],
+            "mu_rg_bg": [round(float(v), 8) for v in mu],
+            "cov_rg_bg": [[round(float(v), 10) for v in row] for row in cov],
+            "scale": MATERIAL_MASK_SCALE[mat],
+            "strength": MATERIAL_BASE_STRENGTH[mat],
+            "confidence": round(fit["confidence"], 4),
+        })
+
+    key = args.material_key
+    preset = {
+        "name": key,
+        "label": "ALEV material prefeed (D55 windows)",
+        "illuminant": "D55",
+        "working_space": "Rec2020",
+        "note": (
+            f"Material-aware Sigma->ALEV simulation: per-material constrained fits on "
+            f"{'+'.join(ill_names)} samples, windows in the D55 calibration frame "
+            f"(runtime von Kries transport applies), look_gain={gain:g}. Confidence "
+            f"folds fit quality into the effective weight. Data quality per "
+            f"dngscan_assets/spectral/README.md; regenerate after replacing CSVs."
+        ),
+        "sources": dict(base_sources, **{f"{m}_spectra": f["source"] for m, f in fits.items()}),
+        "regions": regions,
+    }
+
+    out = args.out
+    existing: dict = {}
+    if out.is_file():
+        try:
+            existing = json.loads(out.read_text(encoding="utf-8"))
+        except Exception:
+            existing = {}
+    existing.setdefault("version", 1)
+    existing.setdefault("transforms", {})[key] = preset
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    report = {
+        "illuminants": ill_names,
+        "look_gain": gain,
+        "materials": {m: {"errors": f["errors"], "confidence": f["confidence"], "source": f["source"]} for m, f in fits.items()},
+        "leakage_d55_after_mean": leakage,
+    }
+    report_path = args.report_json or (args.data_dir / "calibration_report.json")
+    report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    print(f"wrote preset '{key}' -> {out}")
+    print(f"wrote report -> {report_path}\n")
+    print(f"{'材料':10s}{'光源':6s}{'拟合前ΔOk':>12s}{'拟合后ΔOk':>12s}{'p95后':>10s}{'置信度':>8s}")
+    for mat, fit in fits.items():
+        for name, err in fit["errors"].items():
+            print(f"{mat:10s}{name:6s}{err['before_mean']:>12.5f}{err['after_mean']:>12.5f}{err['after_p95']:>10.5f}{fit['confidence']:>8.3f}")
+    print("\n跨材料泄漏 (D55, 用k矩阵处理j材料后的平均ΔOk; 对角=本类):")
+    mats = list(fits)
+    print(f"{'k/j':10s}" + "".join(f"{j:>10s}" for j in mats))
+    for k in mats:
+        print(f"{k:10s}" + "".join(f"{leakage[k][j]:>10.5f}" for j in mats))
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Calibrate dngscan scene-transform skin/cyan preset.")
     parser.add_argument("--out", type=Path, default=Path("dngscan/scene_transform_presets.json"))
@@ -622,6 +864,16 @@ def parse_args() -> argparse.Namespace:
                         help="Optional directory of extra reflectance CSVs for camera profile fitting.")
     parser.add_argument("--write-bootstrap-csv", type=Path,
                         help="Write the current rough built-in spectral data as replaceable CSV files and exit.")
+    parser.add_argument("--preset-mode", choices=("skin", "material"), default="skin",
+                        help="skin=旧版 skin/cyan 预设；material=多材料 ALEV 仿真前馈（逐类拟合+误差报告+置信度）")
+    parser.add_argument("--fit-illuminants", default="D55,A",
+                        help="material 模式的联合拟合光源列表（窗口恒在 D55 标定系）")
+    parser.add_argument("--material-look-gain", type=float, default=1.0,
+                        help="material 模式的残差增益；1.0=严格物理拟合，不做风格放大")
+    parser.add_argument("--material-key", default="alev_material_d55",
+                        help="material 模式写入的 preset 键名（合并写入，不清空其他 preset）")
+    parser.add_argument("--report-json", type=Path,
+                        help="误差/泄漏报告输出路径（默认 data-dir/calibration_report.json）")
     return parser.parse_args()
 
 
@@ -729,6 +981,13 @@ def main() -> int:
     fp_ssf = imx410_qe * transmission[:, None]
     illum = illuminant_spd(args.illuminant, args.standard_data, args.illuminant_csv)
     cmf = cie_1931_cmf(WL, args.standard_data, args.cmf_csv)
+    if args.preset_mode == "material":
+        return run_material_mode(args, alexa_ssf, fp_ssf, cmf, {
+            "alev3_ssf": source_label(alexa_path, "built-in rough ALEV3 SSF placeholder"),
+            "imx410_qe": source_label(imx410_path, "built-in rough IMX410 QE placeholder"),
+            "sigma_fp_hot_mirror": source_label(ir_path, f"sigmoid transmission, cutoff {args.ir_cutoff:g}nm width {args.ir_width:g}nm"),
+            "cmf": f"CIE 1931 2° via {args.standard_data}",
+        })
     skin, skin_source = load_spectra_input(skin_path, args.skin_dir, demo_skin_spectra())
     cyan, cyan_source = load_spectra_input(cyan_path, args.cyan_dir, demo_cyan_spectra())
     profile_spectra = camera_profile_spectra(skin, cyan)

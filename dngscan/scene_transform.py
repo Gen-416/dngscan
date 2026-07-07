@@ -27,6 +27,10 @@ class SceneTransformRegion:
     cov_rg_bg: tuple[tuple[float, float], tuple[float, float]]
     scale: float = 2.5
     strength: float = 1.0
+    # Calibration confidence in [0,1]: how much of the fp->target divergence the fitted
+    # matrix actually explains on its material class (from the calibrator's error report).
+    # Folded into the effective region weight so poorly-constrained fits act gently.
+    confidence: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,7 @@ def _region_from_dict(name: str, raw: dict[str, Any]) -> SceneTransformRegion:
         cov_rg_bg=tuple(tuple(float(v) for v in row) for row in raw["cov_rg_bg"]),  # type: ignore[arg-type]
         scale=float(raw.get("scale", 2.5)),
         strength=float(raw.get("strength", 1.0)),
+        confidence=float(raw.get("confidence", 1.0)),
     )
 
 
@@ -184,7 +189,8 @@ def apply_scene_transform_rec2020(
     rgb32 = np.nan_to_num(rgb.astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=0.0)
     weights: list[Any] = []
     for region in preset.regions:
-        weights.append(_region_weight(rgb32, region, wb_adapt) * np.float32(max(0.0, region.strength)))
+        eff = max(0.0, region.strength) * min(1.0, max(0.0, region.confidence))
+        weights.append(_region_weight(rgb32, region, wb_adapt) * np.float32(eff))
     total = np.zeros((rgb32.shape[0],), dtype=np.float32)
     for w in weights:
         total += w
