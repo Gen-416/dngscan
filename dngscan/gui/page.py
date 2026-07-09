@@ -13,7 +13,7 @@ PAGE = """<!doctype html>
 body{margin:0;font:14px/1.5 -apple-system,"PingFang SC",system-ui,sans-serif;background:#15171c;color:#e7e9ee}
 .wrap{max-width:1480px;margin:0 auto;padding:22px}
 h1{font-size:17px;font-weight:600;margin:0 0 16px}
-.card{background:#1d2028;border:1px solid #2b2f3a;border-radius:12px;padding:16px;margin-bottom:14px}
+.card{background:#1d2028;border:1px solid #2b2f3a;border-radius:8px;padding:16px;margin-bottom:14px}
 .secTitle{font-size:12px;font-weight:600;color:#8fa0c4;text-transform:uppercase;letter-spacing:.06em;margin:0 0 12px}
 .workspace{display:grid;grid-template-columns:minmax(360px,480px) minmax(0,1fr);gap:14px;align-items:start}
 .controlPanel{min-width:0}
@@ -29,7 +29,7 @@ input[type=text],input[type=number],select{width:100%;background:#12141a;border:
 .modes button .m{font-weight:600;color:#e7e9ee;font-size:13px;font-variant-numeric:tabular-nums;white-space:nowrap}
 .modes button .d{font-size:10px;color:#828a99;white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .modes button.sel{border-color:#5b8cff;background:#1a2233}
-.modes button#evAutoBtn{flex:1.8;min-width:100px}
+.modes button#evReferenceBtn{flex:1.8;min-width:100px}
 .sliderField{flex:1;min-width:170px}
 .labelRow{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin-bottom:6px}
 .labelRow label{margin:0;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -41,6 +41,9 @@ button.ghost{background:#12141a;border:1px solid #2b2f3a;border-radius:8px;color
 button.preview{background:#2c3444;border:1px solid #46536b;border-radius:9px;color:#eef2ff;padding:11px 18px;font:inherit;font-weight:600;cursor:pointer}
 button.preview:disabled{opacity:.5;cursor:default}
 .muted{color:#828a99;font-size:12px}
+.coreFacts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.coreFacts span{background:#151922;border:1px solid #303746;border-radius:6px;padding:5px 8px;color:#9aa1b0;font-size:12px}
+.coreFacts b{color:#e7e9ee;font-weight:500}
 #status{margin-top:10px;min-height:20px}
 .err{color:#ff8a8a}.ok{color:#8ae08a}
 .browserList{display:none;margin-top:10px;border:1px solid #2b2f3a;border-radius:8px;max-height:260px;overflow:auto;background:#12141a}
@@ -56,12 +59,6 @@ button.preview:disabled{opacity:.5;cursor:default}
 @keyframes spin{to{transform:rotate(360deg)}}
 .dim{opacity:.45;pointer-events:none}
 .chk{display:flex;align-items:center;gap:8px}.chk input{width:auto}
-details.adv{background:#1d2028;border:1px solid #2b2f3a;border-radius:12px;padding:0;margin-bottom:14px;overflow:hidden}
-details.adv summary{cursor:pointer;padding:13px 16px;font-size:12px;font-weight:600;color:#8fa0c4;text-transform:uppercase;letter-spacing:.06em;user-select:none;list-style:none}
-details.adv summary::-webkit-details-marker{display:none}
-details.adv summary::before{content:"▸ ";color:#5b8cff}
-details.adv[open] summary::before{content:"▾ "}
-details.adv .advBody{padding:0 16px 16px}
 .outdirRow{display:flex;gap:8px;align-items:stretch}
 .outdirRow input{flex:1}
 @media (max-width:980px){
@@ -74,7 +71,7 @@ details.adv .advBody{padding:0 16px 16px}
 }
 </style></head>
 <body><div class="wrap">
-<h1>dngscan · AgX RAW → JPEG</h1>
+<h1>dngscan · RAW 证据驱动渲染</h1>
 
 <div class="card">
   <label>DNG / RAW 文件</label>
@@ -92,51 +89,78 @@ details.adv .advBody{padding:0 16px 16px}
   <div class="secTitle">曝光</div>
   <div class="row">
     <div class="evMain">
-      <div class="labelRow"><label>曝光补偿 EV（手动或 auto 对齐 18% 灰）</label><span class="val" id="evval">+0.00</span></div>
+      <div class="labelRow"><label>曝光补偿 EV（默认 0 保留拍摄锚点）</label><span class="val" id="evval">+0.00</span></div>
       <input type="range" id="ev" min="-3" max="3" step="0.05" value="0">
       <div class="modes">
         <button type="button" data-ev="-0.50"><span class="m">-0.50</span></button>
         <button type="button" data-ev="0"><span class="m">0.00</span></button>
         <button type="button" data-ev="0.50"><span class="m">+0.50</span></button>
         <button type="button" data-ev="1.00"><span class="m">+1.00</span></button>
-        <button type="button" id="evAutoBtn" title="对齐 18% 灰，带高光保护"><span class="m">auto</span><span class="d">18%灰·高光保护</span></button>
+        <button type="button" id="evReferenceBtn" title="以全图中位亮度计算 18% 灰参考值，并受高光安全上限约束；点击会应用建议 EV。"><span class="m">参考</span><span class="d">全图亮度</span></button>
       </div>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div class="secTitle">色彩与风格</div>
+  <div class="secTitle">渲染策略</div>
   <div class="row">
-    <div style="flex:1;min-width:160px">
-      <label>Tone 核</label>
-      <select id="toneCore" title="gated=RAW 门控 DRT（默认）；agx=全图 AgX；lum=亮度核；neutral=直出对比">
-        <option value="gated" selected>Gated · RAW 门控</option>
-        <option value="agx">AgX · 全图</option>
-        <option value="lum">Lum · 亮度核</option>
-        <option value="neutral">Neutral · 直出</option>
+    <div style="flex:2;min-width:210px">
+      <label>压缩策略</label>
+      <select id="toneCore" title="选择亮度压缩和高光色彩路径；默认策略会只在 RAW 证据表明需要时改变色度。">
+        <option value="gated" selected>保真 · RAW 证据驱动</option>
+        <option value="agx">AgX · 全图色彩路径</option>
+        <option value="lum">亮度优先 · 保持通道比例</option>
+        <option value="neutral">线性参考 · 不做 tone 压缩</option>
       </select>
     </div>
     <div id="lumNormBlock" style="flex:1;min-width:140px;display:none">
-      <label>lum norm</label>
+      <label>亮度度量</label>
       <select id="lumNorm">
-        <option value="y">Y · 亮度</option>
-        <option value="power">power · 折中</option>
-        <option value="max">max RGB</option>
+        <option value="y">Y · 场景亮度</option>
+        <option value="power">折中 · 亮度与峰值</option>
+        <option value="max">最大通道</option>
       </select>
     </div>
     <div id="agxPrimariesBlock" style="flex:1;min-width:150px">
-      <label>AgX 基调</label>
-      <select id="agxPrimaries" title="AgX 基调：base/punchy/muted 用 Blender inset；smooth 为 darktable sigmoid 预设（另一套 inset/outset）">
-        <option value="base">base · 原版</option>
-        <option value="punchy">punchy · 浓郁</option>
-        <option value="muted">muted · 柔和</option>
-        <option value="smooth">smooth · sigmoid</option>
+      <label>AgX 高光路径</label>
+      <select id="agxPrimaries" title="控制 AgX 在高亮饱和色上的 path-to-white 方式。">
+        <option value="base">标准 · 平衡退白</option>
+        <option value="punchy">鲜明 · 保留更多纯度</option>
+        <option value="muted">柔和 · 更早退白</option>
+        <option value="smooth">平滑 · darktable 几何</option>
       </select>
     </div>
+  </div>
+  <div class="coreFacts" id="coreFacts" aria-live="polite"></div>
+</div>
+
+<div class="card">
+  <div class="secTitle">相机颜色</div>
+  <div class="row">
+    <div style="flex:2;min-width:210px">
+      <label>相机响应校正</label>
+      <select id="sceneTransform" title="在 scene-linear 域，以色度窗口做受限的相机响应校正。">
+SCENE_TRANSFORM_OPTIONS
+      </select>
+    </div>
+    <div id="sceneTransformStrengthBlock" class="sliderField" style="display:none">
+      <div class="labelRow"><label>校正强度</label><span class="val" id="sceneTransformStrengthVal">1.00</span></div>
+      <input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1=推荐强度；大于 1 用于诊断或强化 A/B。">
+    </div>
+    <div id="punchBlock" class="sliderField">
+      <div class="labelRow"><label>中间调纯度</label><span class="val" id="punchVal">1.00</span></div>
+      <input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="1=由场景分析决定的默认量；0=关闭；夜景的自动值为 0。">
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="secTitle">成片风格</div>
+  <div class="row">
     <div style="flex:2;min-width:210px">
       <label>成片风格</label>
-      <select id="grade" title="色度 Look（Fujifilm/ARRI）与输出滤镜（Kodak/RED/Sony）互斥，一次只能选一种">
+      <select id="grade" title="相机色彩渲染和输出 LUT 互斥，一次只能选一种。">
 GRADE_OPTIONS
       </select>
     </div>
@@ -145,36 +169,53 @@ GRADE_OPTIONS
       <input type="range" id="gradeStrength" min="0" max="1.5" step="0.05" value="1">
     </div>
   </div>
-  <div class="row" style="margin-top:12px">
-    <div style="flex:2;min-width:210px">
-      <label>AgX 前馈</label>
-      <select id="sceneTransform" title="相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 前馈">
-SCENE_TRANSFORM_OPTIONS
+</div>
+
+<div class="card">
+  <div class="secTitle">RAW 还原</div>
+  <div class="row">
+    <div style="flex:1;min-width:160px">
+      <label>剪切高光</label>
+      <select id="highlight">
+        <option value="clip">保持剪切 · 不估算缺失颜色</option>
+        <option value="blend">高光混合 · 利用幸存通道</option>
+        <option value="reconstruct">高光重建 · 估算邻域颜色</option>
       </select>
     </div>
-    <div id="sceneTransformStrengthBlock" class="sliderField" style="display:none">
-      <div class="labelRow"><label>前馈强度</label><span class="val" id="sceneTransformStrengthVal">1.00</span></div>
-      <input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1=推荐强度；>1 用于诊断/强化 A/B">
+    <div style="flex:1;min-width:150px">
+      <label>拍摄白平衡</label>
+      <select id="wb" title="相机记录：使用 AsShot；固定日光：以日光配平作为整卷一致的基准。">
+        <option value="camera">相机记录（As Shot）</option>
+        <option value="daylight">固定日光配平</option>
+      </select>
     </div>
-    <div class="sliderField">
-      <div class="labelRow"><label>纯度补偿 punch</label><span class="val" id="punchVal">1.00</span></div>
-      <input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="AgX 纯度补偿倍率：1=场景自动值，0=关闭（纯 Base）；夜景自动为 0">
+    <div style="flex:1;min-width:170px">
+      <label>细节插值</label>
+      <select id="demosaic" title="仅影响全分辨率导出的去马赛克算法；不包含降噪。">
+        <option value="auto">自动 · DHT 优先</option>
+        <option value="dht">DHT</option>
+        <option value="dcb">DCB</option>
+        <option value="ahd">AHD</option>
+        <option value="aahd">AAHD</option>
+        <option value="vng">VNG</option>
+        <option value="ppg">PPG</option>
+      </select>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div class="secTitle">输出</div>
+  <div class="secTitle">交付</div>
   <div class="row">
     <div style="flex:1;min-width:170px">
-      <label>输出格式</label>
+      <label>输出形式</label>
       <select id="format">
         <option value="sdr">SDR JPEG</option>
         <option value="ultrahdr">HDR gain-map JPEG</option>
       </select>
     </div>
     <div style="flex:1;min-width:140px">
-      <label>输出色域</label>
+      <label>交付色域</label>
       <select id="gamut">
         <option value="srgb">sRGB · 兼容优先</option>
         <option value="p3">Display P3 · 宽色域</option>
@@ -185,8 +226,8 @@ SCENE_TRANSFORM_OPTIONS
       <input type="number" id="quality" min="1" max="100" value="100">
     </div>
     <div style="flex:1;min-width:140px">
-      <label>色度采样</label>
-      <select id="chroma" title="444=满色度、最高保真、体积最大；420=最小体积、投递推荐">
+      <label>色度精度</label>
+      <select id="chroma" title="4:4:4 保留完整色度；4:2:0 体积最小。">
         <option value="444">4:4:4 · 满色度</option>
         <option value="422">4:2:2</option>
         <option value="420">4:2:0 · 最小</option>
@@ -195,13 +236,13 @@ SCENE_TRANSFORM_OPTIONS
   </div>
   <div class="row" id="hdrBlock" style="margin-top:12px">
     <div style="min-width:220px">
-      <div class="labelRow"><label>HDR headroom（仅 HDR 输出）</label><span class="val" id="hdrHeadroomVal">+3.00</span></div>
+      <div class="labelRow"><label>HDR 高光余量（仅 HDR 输出）</label><span class="val" id="hdrHeadroomVal">+3.00</span></div>
       <input type="range" id="hdrHeadroom" min="1" max="5" step="0.25" value="3">
       <div class="muted" id="hdrHint">微信/QQ 想保住 HDR：走原图或文件，别走朋友圈。</div>
     </div>
   </div>
   <div style="margin-top:12px">
-    <label>输出文件夹（留空=与源文件同目录）</label>
+    <label>输出文件夹（留空=源文件所在文件夹）</label>
     <div class="outdirRow">
       <input type="text" id="outdir" placeholder="默认：源文件所在文件夹">
       <button class="ghost" id="outdirBtn">选择…</button>
@@ -209,44 +250,9 @@ SCENE_TRANSFORM_OPTIONS
     <div id="outdirBrowser" class="browserList"></div>
   </div>
   <div class="chk" style="margin-top:12px">
-    <input type="checkbox" id="png"><label for="png" style="margin:0">同时导出六面板分析 PNG</label>
+    <input type="checkbox" id="png"><label for="png" style="margin:0">同时导出 RAW 分析图</label>
   </div>
 </div>
-
-<details class="adv">
-  <summary>高级 · 高光处理 / 白平衡 / 去马赛克</summary>
-  <div class="advBody">
-  <div class="row">
-    <div style="flex:1;min-width:160px">
-      <label>高光处理</label>
-      <select id="highlight">
-        <option value="clip">clip · 硬剪切</option>
-        <option value="blend">blend · 高光混合</option>
-        <option value="reconstruct">reconstruct · 高光重建</option>
-      </select>
-    </div>
-    <div style="flex:1;min-width:150px">
-      <label>白平衡</label>
-      <select id="wb" title="camera=相机 AsShot；daylight=固定日光配平（胶片式，整卷一致）">
-        <option value="camera">相机 AsShot</option>
-        <option value="daylight">日光固定配平</option>
-      </select>
-    </div>
-    <div style="flex:1;min-width:170px">
-      <label>去马赛克（画质·非降噪）</label>
-      <select id="demosaic" title="彩色重建的插值算法，仅影响细节画质、仅全分辨率导出生效；本工具不做任何降噪">
-        <option value="auto">auto · 自动(DHT优先)</option>
-        <option value="dht">DHT</option>
-        <option value="dcb">DCB</option>
-        <option value="ahd">AHD</option>
-        <option value="aahd">AAHD</option>
-        <option value="vng">VNG</option>
-        <option value="ppg">PPG</option>
-      </select>
-    </div>
-  </div>
-  </div>
-</details>
 
 </div>
 
@@ -269,7 +275,19 @@ function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").valu
 function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v.toFixed(2);}
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
-function updateToneCoreUi(){const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";$("#lumNormBlock").style.display=lum?"block":"none";$("#agxPrimariesBlock").style.display=(lum||neutral)?"none":"block";}
+const CORE_FACTS={
+  gated:["亮度 <b>C1 固定锚点</b>","色度 <b>RAW 证据门控</b>"],
+  agx:["亮度 <b>AgX C1 曲线</b>","色度 <b>全图 path-to-white</b>"],
+  lum:["亮度 <b>C1 比例保持</b>","色度 <b>不改场景比例</b>"],
+  neutral:["亮度 <b>不做压缩</b>","色度 <b>线性参考</b>"]
+};
+function updateToneCoreUi(){
+  const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";
+  $("#lumNormBlock").style.display=lum?"block":"none";
+  $("#agxPrimariesBlock").style.display=(lum||neutral)?"none":"block";
+  $("#punchBlock").style.display=(lum||neutral)?"none":"block";
+  $("#coreFacts").innerHTML=(CORE_FACTS[core]||[]).map(v=>"<span>"+v+"</span>").join("");
+}
 function updateFormatUi(){$("#hdrBlock").style.display=$("#format").value==="ultrahdr"?"flex":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
 function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}
@@ -288,23 +306,28 @@ function metricText(j){
     " · 顶白 "+fmtPct(m.clipped_channel_pct)+
     roomText;
 }
-function evAutoStatus(j){
+function fullFrameReferenceText(j){
   if(!j.ev_auto)return "";
   const a=j.ev_auto;
-  let t=" · EV auto "+fmtEv(a.ev_boost);
-  if(a.highlight_limited)t+="（高光限制，目标 "+fmtEv(a.ev_median_target)+"）";
+  let t=" · 全图亮度参考 "+fmtEv(a.ev_boost)+" EV";
+  if(a.highlight_limited)t+="（高光限制，参考目标 "+fmtEv(a.ev_median_target)+"）";
   return t;
 }
 function sceneTransformText(j){
   if(!j.scene_transform||j.scene_transform==="无")return "";
   const s=j.scene_transform_strength!==undefined?" "+(+j.scene_transform_strength).toFixed(2):"";
-  return "，前馈 "+j.scene_transform+s;
+  return "，相机校正 "+j.scene_transform+s;
 }
 function toneCoreText(j){
   if(!j.tone_core)return "";
-  const norm=j.tone_core==="lum"&&j.lum_norm?"("+j.lum_norm+")":"";
-  return "，tone "+j.tone_core+norm;
+  const labels={gated:"保真（RAW 门控）",agx:"AgX（全图）",lum:"亮度优先",neutral:"线性参考"};
+  const norms={y:"Y",power:"折中",max:"最大通道"};
+  const norm=j.tone_core==="lum"&&j.lum_norm?"（"+(norms[j.lum_norm]||j.lum_norm)+"）":"";
+  return "，策略 "+(labels[j.tone_core]||j.tone_core)+norm;
 }
+function highlightText(v){return ({clip:"保持剪切",blend:"高光混合",reconstruct:"高光重建"})[v]||v;}
+function gamutText(v){return ({srgb:"sRGB",p3:"Display P3"})[v]||v;}
+function formatText(v){return ({sdr:"SDR JPEG",ultrahdr:"HDR gain-map JPEG"})[v]||v;}
 function applyJobEv(j){
   if(j.ev!==undefined){$("#ev").value=j.ev;setEvLabel();saveSettings();}
 }
@@ -430,7 +453,7 @@ function setPreviewImage(b64, ondone){
 function handleJobResult(j, prefix){
   if(!j.ok)return false;
   applyJobEv(j);
-  setStatus(prefix+"：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+toneCoreText(j)+sceneTransformText(j)+evAutoStatus(j)+metricText(j),"ok");
+  setStatus(prefix+"：EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+highlightText(j.highlight)+"，色域 "+gamutText(j.gamut)+toneCoreText(j)+sceneTransformText(j)+fullFrameReferenceText(j)+metricText(j),"ok");
   setPreviewImage(j.preview);
   return true;
 }
@@ -445,15 +468,15 @@ $("#previewBtn").onclick=async()=>{
   $("#previewBtn").disabled=false;
 };
 
-$("#evAutoBtn").onclick=async()=>{
+$("#evReferenceBtn").onclick=async()=>{
   const body=payload();if(!body)return;
   body.evAuto=true;
-  $("#previewBtn").disabled=true;$("#evAutoBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("计算 EV auto…","");
+  $("#previewBtn").disabled=true;$("#evReferenceBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("计算全图亮度参考…","");
   try{
     const j=await postJob("/preview",body);
-    if(!handleJobResult(j,"EV auto 预览")){endBusy();setStatus("错误："+j.error,"err");}
+    if(!handleJobResult(j,"全图亮度参考预览")){endBusy();setStatus("错误："+j.error,"err");}
   }catch(e){endBusy();setStatus("请求失败："+e,"err");}
-  $("#previewBtn").disabled=false;$("#evAutoBtn").disabled=false;
+  $("#previewBtn").disabled=false;$("#evReferenceBtn").disabled=false;
 };
 
 $("#go").onclick=async()=>{
@@ -462,7 +485,7 @@ $("#go").onclick=async()=>{
   try{
     const j=await postJob("/export",body);
     if(!j.ok){endBusy();setStatus("错误："+j.error,"err");}
-    else{applyJobEv(j);setStatus("已保存："+j.saved.join(" · ")+"（"+j.format+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+j.highlight+"，色域 "+j.gamut+toneCoreText(j)+sceneTransformText(j)+evAutoStatus(j)+metricText(j)+"）","ok");
+    else{applyJobEv(j);setStatus("已保存："+j.saved.join(" · ")+"（"+formatText(j.format)+"，EV "+fmtEv(j.ev)+"，曝光增益 "+j.gain.toFixed(3)+"，高光 "+highlightText(j.highlight)+"，色域 "+gamutText(j.gamut)+toneCoreText(j)+sceneTransformText(j)+fullFrameReferenceText(j)+metricText(j)+"）","ok");
       lastSavedPath=j.saved[0]||"";$("#revealBtn").style.display=lastSavedPath?"inline-block":"none";setPreviewImage(j.preview);}
   }catch(e){endBusy();setStatus("请求失败："+e,"err");}
   $("#go").disabled=false;$("#previewBtn").disabled=false;
@@ -495,7 +518,7 @@ def _grade_options_html() -> str:
     from ..look import LOOK_CHOICES
 
     lines = ['        <option value="none">无</option>']
-    lines.append('        <optgroup label="色度 Look（Fujifilm / ARRI）">')
+    lines.append('        <optgroup label="相机色彩渲染">')
     for name in LOOK_CHOICES:
         if name == "none":
             continue
@@ -503,7 +526,7 @@ def _grade_options_html() -> str:
         gid = grade_id_for_look(name)
         lines.append(f'          <option value="{gid}">{label}</option>')
     lines.append("        </optgroup>")
-    lines.append('        <optgroup label="输出滤镜（Kodak / RED IPP2 / Sony）">')
+    lines.append('        <optgroup label="输出 LUT">')
     for name in FILTER_CHOICES:
         if name == "none":
             continue

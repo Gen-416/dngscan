@@ -1,350 +1,232 @@
 # dngscan
 
-[中文](README.zh-CN.md)
+[中文说明](README.zh-CN.md)
 
-A physically-grounded RAW/DNG analyzer and **AgX** tone-mapping exporter. It reads a
-camera raw file, measures what the sensor actually captured (dynamic range, per-channel
-clipping, SNR, gamut pressure), and renders that scene-linear signal to an 8-bit JPEG
-through an AgX or luminance-preserving view transform — optionally with a **grade** (chromatic look or
-display filter) — from the command line or a small local web GUI.
+`dngscan` is a local, offline RAW analyser and JPEG renderer. It treats the RAW
+file as capture evidence, not merely as pixels to be pushed through a display curve:
+per-channel CFA headroom, clipping, noise confidence, reliable scene luminance, and
+output-gamut pressure are measured before a scene-linear Rec.2020 render is compiled
+into an SDR JPEG.
 
-It began as a diagnostic tool (the six-panel PNG dashboard) and grew into a way to
-produce finished JPEGs directly, without round-tripping through a raw editor.
+It is deliberately not a general-purpose RAW editor. Its job is to make a small set of
+rendering decisions explicit and repeatable: preserve the photographed exposure intent,
+reserve the shoulder for measured headroom, and only change highlight colour where the
+capture or delivery constraints justify it.
 
-## What it does
+## Core idea
 
-- **Diagnostics** — a six-panel PNG dashboard: SNR-vs-stops curves, per-channel raw
-  distributions, RGB exposure histograms, gamut-overflow risk per output space, a
-  spatial exposure-zone map, and a clipped-channel highlight map, plus per-channel
-  full-well / clip / black-level / white-balance readouts.
-- **Separated DRT** — analysis compiles an immutable `RenderPlan`: reliable scene-Y
-  statistics set only the C1 toe/shoulder endpoints, raw CFA clipping drives only
-  pre-curve chroma retreat, and output-gamut pressure drives only the final gamut fit.
-  The AgX formation keeps the calibrated EV=0 pivot while normalizing only scene-derived
-  black/white endpoints, so manual EV never reanchors the pivot or turns a night scene
-  into middle gray. Clean dark scenes may receive a bounded display-referred brightness
-  lift which preserves true black/white, rather than an exposure gain. The default
-  `--tone-core gated` runs a luminance C1 shoulder everywhere and blends in full AgX
-  colour geometry only where RAW CFA evidence, scene highlight EV, gamut pressure, and
-  hue-sector policy permit (skin midtones stay on the luma path). `--tone-core agx`
-  keeps the Rec.2020 inset → log2 → sigmoid → outset geometry on the whole frame;
-  `--tone-core lum` applies the same endpoint DRT to a luminance norm, preserving RGB
-  ratios. AgX primaries are built geometrically (`base`, `punchy`, `muted`, `smooth`);
-  aliases `agx_blender_strong`, `agx_dt_smooth`, etc. resolve to the same presets.
-  DRT working space is always scene-linear Rec.2020; delivery is explicit sRGB or P3.
-- **Pre-AgX scene transform (experimental)** — optional `--scene-transform arri_skin_d55`
-  runs in scene-linear Rec.2020 after camera colour interpretation and before AgX,
-  blending constrained 3x3 matrices inside skin/cyan chromaticity masks. Off by default.
-- **Grades (mutually exclusive)** — one optional layer on top of AgX (`--grade`):
-  - **Chromatic looks** — measured Oklab geometry from official LUTs (Fujifilm film sims,
-    ARRI Classic / Reveal). Tone stays AgX; only hue / saturation / skin shaping.
-  - **Display filters** — full log-encoded output transforms (Kodak 2383 FPE, RED IPP2)
-    sampled from `.cube` files after Cineon / Log3G10 encode.
-- **Hue-preserving gamut fit** — output fitting uses Oklab adaptive-L0 clipping (hold
-  hue, reduce chroma) instead of per-channel clipping. Works for sRGB and Display P3.
-- **High-quality demosaic on export** — full-res exports use `--demosaic auto` (DHT
-  preferred, libraw-native for non-Bayer / X-Trans sensors) or a manual algorithm;
-  preview uses a light demosaic. Interpolation quality only — **no noise reduction**.
-  **Fujifilm RAF** (X-Trans and Bayer) and **Nikon NEF/NRW** (Bayer via libraw) are
-  supported: RAF reads model / ISO from the proprietary header and embedded JPEG EXIF;
-  NEF/NRW use the standard TIFF EXIF path. CFA pattern is captured before demosaic for
-  correct analysis on X-Trans.
-- **Local web GUI** (`python -m dngscan.gui`) — pick a file, exposure, AgX primaries,
-  grade, quality, demosaic and output gamut; live preview; per-file exposure-headroom
-  estimate; sRGB or Display P3; highlight handling (clip / blend / reconstruct).
-  Controls are grouped (exposure / color & style / output); sliders show values inline;
-  output folder can be chosen with a browse picker (not only typed paths).
-- **Optional Ultra HDR JPEG** — ISO/Ultra HDR gain-map output with an SDR fallback.
-  Grades are SDR-only today. SDR JPEG remains the default.
+The default renderer is **Gated: RAW evidence driven**. Its two main decisions are
+separate:
 
-## Processing pipeline
+1. A scene-luminance C1 curve controls brightness everywhere.
+2. AgX's colour path toward white is only blended in where RAW evidence, scene
+   brightness, SNR, gamut pressure, and hue policy permit it.
 
-The fixed scene body is separated from its endpoints and colour geometry. `--grade` picks **one** post-core path — the Oklab and
-log-encode branches are mutually exclusive implementations for two different LUT families,
-not two layers you can stack.
+This separation matters. A reconstructed lamp can be visually plausible, but it is not
+recovered sensor headroom and must not set the global white endpoint. Conversely, a
+well-exposed skin tone should not lose chroma merely because another part of the frame
+contains a clipped light source.
 
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│ ① RAW restore                                               │
-│    DNG ──► demosaic ──► WB ──► color matrix ──► scene Rec.2020│
-└────────────────────────────┬────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ② Capture analysis + plan                                   │
-│    analyze() · fixed anchor + manual/auto EV · RenderPlan   │
-│    scene Y → C1 toe/shoulder; raw clip → chroma retreat     │
-└────────────────────────────┬────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ②b Pre-core scene transform (optional)                      │
-│    scene Rec.2020 ──► skin/cyan chroma mask ──► constrained M│
-└────────────────────────────┬────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ③ Tone core                                                 │
-│    agx: inset → endpoint-normalized C1 curve → outset       │
-│    lum: Y/power/max norm → same C1 curve, RGB ratio preserved│
-└────────────────────────────┬────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ③b Colour geometry + grade  `--grade` · pick exactly one    │
-│                                                             │
-│   none ──────────────► rec2020_to_output (AgX display only) │
-│                                                             │
-│   chromatic look ────► rec2020_to_output                    │
-│        (Fujifilm / ARRI)   └──► Oklab + LookField           │
-│                              hue / chroma / skin only; L fixed│
-│                              (pre-measured; no .cube at run) │
-│                                                             │
-│   display filter ────► log encode ──► sample .cube ──► decode│
-│        (Kodak / RED)     Cineon+709  or  Log3G10+RWG        │
-│                          full output transform; tone+color  │
-│                          blended with AgX display at strength│
-│                                                             │
-│   ✕ never chromatic look + display filter on the same export │
-└────────────────────────────┬────────────────────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│ ④ Display encode                                            │
-│    gamut fit · sRGB/P3 OETF + TPDF dither · JPEG / Ultra HDR│
-└─────────────────────────────────────────────────────────────┘
+RAW / DNG
+  |
+  +-- CFA evidence: per-channel black/white, clip class, headroom, SNR
+  |
+  +-- LibRaw decode: demosaic, WB, camera matrix -> scene-linear Rec.2020
+                                                    |
+                                                    +-- optional camera-response correction
+                                                    |
+reliable scene body/tail ---------------------------+-- RenderPlan
+                                                         | tone: C1 endpoints, toe, shoulder
+                                                         | colour: RAW/gamut permissions
+                                                         v
+                                                selected compression strategy
+                                                         |
+                                 optional look or output LUT (one, never both)
+                                                         |
+                                      Oklab gamut fit -> sRGB/P3 encode -> dither -> JPEG
 ```
 
-**Why two grade mechanisms?** Both choices sit on the render produced by the selected
-tone core. Fujifilm / ARRI official LUTs were **measured** into Oklab LookFields — they
-only describe chromatic geometry, so runtime work stays in Oklab with **L untouched**.
-Note this means the look never sets luminance itself: L comes from the tone core that ran
-underneath it (AgX per-channel formation, the `lum` luminance norm, or `neutral` passthrough),
-and the look only reshapes a/b on top. Kodak / RED cubes are **full** log-in → display-out
-transforms (tone and saturation together); they must be sampled after the correct log
-encode. Feeding those cubes through the LookField extractor collapses saturation, so they
-get a separate log → `.cube` path instead.
+The analyser and renderer use the same highlight mode and scene buffer. CFA-domain
+facts remain independent of demosaic or reconstruction, so the tool can distinguish
+"the renderer made this highlight look continuous" from "the sensor still clipped this
+channel".
 
-## Design notes
+## Exposure and the full-frame reference
 
-A few choices worth knowing:
+For the three tone-mapped strategies, a fixed camera-independent scalar places nominal
+scene middle gray at 18% before the curve. It is not computed from image content. At
+`EV 0`, a night scene therefore remains a night scene; the tone plan may shape its toe
+and shoulder, but it does not convert a dark capture into gray daylight.
 
-- **Exposure is a fixed constant, never content-adaptive.** AgX anchors a nominally-exposed
-  mid gray onto 0.18 with a constant scalar; `--ev` adds a manual offset or `auto` aligns
-  median to 18% gray with highlight protection. A dark scene stays dark.
-- **Scene-linear Rec.2020 throughout.** The export buffer stays in a wide working
-  space so saturated highlights are not clipped to sRGB before tone mapping. AgX's
-  inset/outset are conjugated into Rec.2020 so neutrals stay neutral.
-- **TPDF-dithered 8-bit quantization** to avoid banding in smooth gradients.
-- **Hue-preserving gamut fit.** Colors outside the output gamut are brought in with Oklab
-  adaptive-L0 clipping (hold hue, reduce chroma) rather than per-channel clipping, which
-  skews hue on saturated colors. Applied in every mode, for both sRGB and Display P3.
-- **Demosaicing is reconstruction, not denoising.** Bayer sensors can use DHT on export;
-  non-Bayer (e.g. Fujifilm X-Trans) keeps libraw's native path. No smoothing, no NR.
-- **Gain-map HDR is additive.** The SDR base image is the same rendered output, while
-  the HDR numerator keeps midtones equal to SDR and releases only highlight headroom.
-  HDR output is forced to Display P3 and defaults to +3 EV headroom.
-- **Per-channel analysis** — full-well and clip thresholds are reconstructed per
-  channel (empirical saturation pile when present, metadata white level as a
-  fallback for unclipped scenes).
-- **Sensor priors (best-effort).** When the camera is in the priors table (currently
-  Sigma fp, from published PhotonsToPhotos measurements), the analysis reports
-  electron-domain figures (e-/DN gain, measured noise floor in e-, read-noise and PDR
-  priors) and gently bounds the tone plan's DR budget with the published PDR. Unknown
-  cameras fall back to pure single-frame estimates.
-- **RAW health check.** The dual-green difference plane (scene cancels, noise remains)
-  is tested for lag-1 spatial correlation — a per-frame verdict on noise reduction baked
-  into the raw file — plus a missing-DN-code (requantization) check. Diagnostics only.
-- **Fixed white balance option.** `--wb daylight` uses libraw's calibrated daylight
-  multipliers as a film-style fixed balance (consistent across a whole shoot); the
-  as-shot balance is always reported as light-source testimony, including its deviation
-  from daylight. Default remains the camera's as-shot balance.
-- **Analysis matches the export.** Render-dependent stats (luminance/EV distribution,
-  gamut-overflow risk, and the auto tone plan's inputs) are measured on a render that uses
-  the same demosaic and highlight mode as your export, so they describe the image you
-  actually get. Raw/CFA-domain analysis (clip %, saturation pile, SNR, noise floor) stays
-  independent of demosaic and highlight — it reports what the sensor physically captured.
-- **Preview vs export.** The GUI compiles the tone plan from a half-resolution proxy of
-  the scene (full-resolution analysis), so previews are fast and essentially match. Sparse
-  highlights and clip-mask edges can differ slightly at full resolution — when comparing
-  tone cores (e.g. AgX vs neutral) pixel-for-pixel, judge from an actual export, not the
-  proxy preview.
+`EV` is a manual offset around that anchor. The GUI's **Full-frame brightness reference**
+button, and CLI `--ev auto`, are optional reference operations: they measure the
+full-frame median, calculate the EV that would place it at 18%, and cap upward
+movement using the rendered highlight safety limit. They are useful for an accidentally
+underexposed ordinary scene or as a comparison point. They are not an assertion of
+photographic intent and are never applied unless explicitly invoked.
 
-Metrics are single-frame estimates (not photon-transfer measurements); bit depth is
-not the same as usable dynamic range.
+## Compression strategies
 
-## Install
+All non-neutral strategies compile black and white endpoints from the reliable
+scene-luminance distribution. The black side is bounded by the usable DR/noise estimate;
+the white side is based on the *reliable* tail, not CFA-clipped or reconstructed samples.
+All use the same C1-continuous toe/shoulder family and the same fixed 18% pivot. What
+changes is the authority used for colour.
 
-dngscan does not bundle Python or Homebrew dependencies inside the repo. Keep the
-system environment normal, and keep project-specific assets in this project folder.
+| GUI name / CLI core | What the renderer does | Expected image | Best use |
+| --- | --- | --- | --- |
+| **Fidelity: RAW evidence driven** / `gated` | Maps Rec.2020 luminance through the C1 curve everywhere. It also computes a full AgX result, rescales it back to the same Rec.2020 Y, then blends only its chroma/path-to-white by a per-pixel permission weight. | Body and skin retain their capture colour; uncertain or very bright highlights can retreat toward white without a brightness seam at the mask boundary. | Default finished render. |
+| **AgX: global colour path** / `agx` | Applies AgX inset -> log2 C1 curve -> hue mix -> outset to every pixel, followed by the scene-driven purity operator. | The most recognisably global AgX behaviour: chromatic highlights follow a coherent AgX path, but colourful midtones are also subject to that geometry. | Direct AgX comparison or a deliberately more uniform AgX rendering. |
+| **Luminance priority** / `lum` | Reduces a scalar norm through the C1 curve and multiplies RGB by the resulting ratio. Apart from known clipped samples and final delivery guards, RGB ratios are retained. | The closest tone-mapped option to scene RGB proportions. Saturated highlights can remain more literal and less filmic; colour separation comes from the capture rather than an AgX hue path. | Inspecting whether AgX geometry is helping a scene, or preserving product/graphic colours. |
+| **Linear reference** / `neutral` | Skips the tone core. Scene-linear Rec.2020 is converted only for delivery, then gamut-fitted and encoded. | No designed shoulder or toe. Bright values reach delivery limits directly, so this is a diagnostic reference, not a finished JPEG look. | A/B analysis, checking the cost of any DRT. |
 
-Requires Python 3.10+ and:
+For `gated`, the colour permission is continuous, not a binary "clipped/not clipped"
+mask. It rises with measured per-channel headroom loss and multi-channel clipping; it
+can also open in the bright shoulder, under delivery-gamut pressure, and where colour
+SNR is trustworthy. It is reduced for trustworthy skin midtones, while bright green/cyan
+can open slightly more. The raw-loss signal always has priority over this aesthetic hue
+policy.
 
+`lum` offers three scalar norms: `y` is Rec.2020 luminance and is the normal choice;
+`power` gives strong individual channels more influence; `max` follows the brightest
+channel and is the most highlight-protective but can look flatter. These are diagnostic
+choices, not three different exposure anchors.
+
+## AgX highlight paths
+
+The **AgX highlight path** selector is available for `gated` and `agx`. It does **not**
+choose a different shoulder curve, white point, exposure, or dynamic-range plan. All
+four paths share the same scene-derived C1 curve. The selector changes the geometric
+AgX formation around that curve:
+
+```text
+Rec.2020 RGB -> inset / primary rotation -> per-channel C1 curve -> hue mix -> outset
 ```
+
+The inset deliberately mixes and contracts primaries before the curve, so a saturated
+highlight does not behave like three unrelated channel clips. The outset decides how
+much colour geometry is recovered after the curve. This is why the selector changes the
+*route to white*, not the brightness roll-off.
+
+| Path | Underlying geometry | Expected highlight behaviour |
+| --- | --- | --- |
+| **Standard: balanced retreat** / `base` | The Blender-like / darktable blender-like Rec.2020 primary construction, with Blender's 0.4 hue-mix anchor. | Balanced default. Bright saturated colours soften and move toward white without forcing a strong creative colour recovery. |
+| **Vivid: retain more purity** / `punchy` | Same inset as `base`, but its outward-primary recovery is reduced in the geometric construction (`master_outset_ratio=0.5`). This restores more apparent purity after the curve. | More coloured high lights and stronger local colour separation. It can be attractive for neon, foliage, or coloured light, but extreme sRGB/P3 values may later be reduced by gamut fitting. |
+| **Soft: earlier-looking retreat** / `muted` | Same base inset, with the outward primary rotation also restored (`master_unrotation_ratio=1`). The tone curve is unchanged; only the outward colour geometry differs. | A calmer, less assertive bright-colour recovery than `base`. It can appear to retreat to neutral sooner, even though the luminance shoulder starts at the same place. |
+| **Smooth: darktable geometry** / `smooth` | darktable's smooth-primary construction: different inset/outset distances and rotations, not a different sigmoid. | A distinct, generally calmer hue trajectory through saturated highlights. It should be compared against `base` on the actual image; it is not simply a global saturation control. |
+
+The separate **Midtone purity** control is not one of these four paths. It is a
+scene-gated post-core chroma operator used only by `gated` and `agx`; its automatic
+strength goes to zero for unsuitable dark/high-ISO scenes. It never changes exposure,
+toe, shoulder, or the white endpoint.
+
+## RAW restoration choices
+
+These settings happen before the tone core and have a larger factual effect than a
+creative look.
+
+| Setting | Meaning | Trade-off |
+| --- | --- | --- |
+| **Keep clipping** / `clip` | LibRaw leaves clipped highlights clipped. | No invented colour; the clearest reference for sensor loss. |
+| **Highlight blend** / `blend` | LibRaw blends information from surviving channels. | Can retain colour in single-channel clips; may be less literal at severe clips. |
+| **Highlight reconstruction** / `reconstruct` | LibRaw's neighbourhood-based highlight reconstruction. | Often smoother and more coloured highlights, but some result is an estimate. RAW clip evidence remains available to the gated renderer. |
+| **Camera WB** / `camera` | Uses the camera's As Shot white balance. | Closest to the capture metadata. |
+| **Fixed daylight** / `daylight` | Uses LibRaw's calibrated daylight multipliers. | A repeatable baseline across a series; not a claim that the scene was daylight. |
+| **Demosaic auto** / `auto` | Full-resolution Bayer export prefers DHT, then DCB/AHD; non-Bayer formats use LibRaw's native path. | Detail reconstruction only. dngscan does not apply denoise. |
+
+## Other colour and delivery layers
+
+**Camera response correction** is an experimental, pre-core scene-linear transform. The
+built-in ARRI-like and ALEV material presets use constrained matrices inside soft
+chromaticity windows. They preserve the neutral axis and do not act as a display LUT.
+Their spectral inputs are replaceable bootstrap/calibration data, not a claim of a
+strict ALEXA emulation. Leave this layer off for a neutral baseline.
+
+**Finished look** is optional and comes after the tone core. A chromatic LookField
+changes Oklab hue/chroma while keeping lightness unchanged. A display LUT is a complete
+log-in/display-out transform and can change tone as well as colour. The two paths are
+mutually exclusive. Vendor LUT files are intentionally not included in the repository;
+use only copies you are permitted to install locally.
+
+**Delivery gamut** is a separate constraint. Scene rendering remains Rec.2020 until the
+end. Out-of-gamut output is fitted in Oklab by reducing chroma while preserving hue as
+far as possible, rather than by independently clipping RGB channels. `sRGB` is the
+compatibility choice. `Display P3` embeds a P3 ICC profile and fails rather than silently
+writing untagged P3 data when a profile cannot be found. JPEG defaults to quality 100 and
+4:4:4 chroma sampling.
+
+The ISO gain-map HDR path is present as an **experimental** output path. It is not part
+of the recommended stable delivery workflow until cross-platform behaviour is verified.
+The normal SDR JPEG is the supported default.
+
+## Diagnostics
+
+`--scan` writes the six-panel diagnostic PNG. It is a capture report, not a beauty score.
+
+- **SNR vs stops**: use it to judge shadow recovery latitude. Around SNR 32 is visually
+  clean, around 10 is usually usable with visible cost, and near 1 signal is overwhelmed
+  by noise. It is not an instruction to raise all shadows to a fixed level.
+- **R/G/B raw distributions**: use stops from clip on the horizontal axis. Separate
+  panels avoid channel overlap; the red band marks the clip region. Statistics use
+  unsmoothed RAW data even when the plotted density is smoothed.
+- **RGB exposure distribution and gamut pressure**: show how much delivery colour work
+  is likely after the DRT. They do not move the C1 tone endpoints.
+- **Spatial exposure and clipped-channel maps**: identify whether the tail is a small
+  light source, broad clipped subject detail, or a single-channel problem.
+
+## Install and use
+
+Python 3.10+ is required.
+
+```bash
 pip install -r requirements.txt
+python -m dngscan.gui
 ```
 
-(`numpy`, `rawpy`, `matplotlib`, `pillow`.) The GUI runs in your browser and does
-**not** need Tkinter.
+The GUI is local and opens a localhost page. It caches the decode/analysis for a file,
+uses a proxy for repeat previews, and always uses the full-resolution buffer for export.
+The practical workflow is:
 
-To refit the spectral pre-AgX scene-transform matrix, install the optional calibration
-dependency:
+1. Start from `Fidelity: RAW evidence driven`, `Standard`, `EV 0`, and a chosen RAW
+   highlight mode.
+2. Use **Full-frame brightness reference** only as a deliberate comparison; return to
+   `EV 0` when the photographed low-key/high-key intent is correct.
+3. Compare `gated`, `agx`, and `lum` before adding a camera correction or finished look.
+4. Use the full-resolution export metrics, not only proxy-preview white percentages,
+   when deciding how far to raise manual EV.
+5. Export sRGB for broad delivery or P3 for colour-managed P3 viewers.
+
+CLI examples:
 
 ```bash
-pip install -r requirements-calibration.txt
+# Finished SDR JPEG: default RAW-gated strategy, quality 100, 4:4:4
+python -m dngscan photo.dng --jpeg photo.jpg
+
+# Full capture report plus JPEG
+python -m dngscan photo.dng --jpeg photo.jpg --scan --csv photo.csv
+
+# Compare the three meaningful DRT alternatives at the same EV
+python -m dngscan photo.dng --jpeg gated.jpg --tone-core gated
+python -m dngscan photo.dng --jpeg agx.jpg --tone-core agx --agx-primaries base
+python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
+
+# Use a different RAW restoration or delivery gamut
+python -m dngscan photo.dng --jpeg photo_p3.jpg --highlight-mode reconstruct --output-gamut p3
+
+# Deliberately apply the full-frame brightness reference
+python -m dngscan photo.dng --jpeg reference.jpg --ev auto
 ```
 
-Ultra HDR output uses macOS ImageIO/PyObjC when available, and falls back to Google's
-`libultrahdr` CLI if installed:
+Run `python -m dngscan --help` for the complete argument list.
 
-```bash
-brew install libultrahdr
-```
+## Calibration assets and licence
 
-Project layout:
+The project keeps the runnable code, spectral bootstrap data, and open-licence
+provenance assets in this repository. Optional proprietary vendor LUTs stay local and
+are ignored by Git. The current scene-transform calibration data and its limits are
+documented in [`dngscan_assets/spectral/README.md`](dngscan_assets/spectral/README.md).
 
-```text
-dngscan/
-  cli.py                # CLI entry point
-  agx.py                # AgX inset/outset, log curve and sigmoid core
-  look.py               # chromatic LookField layer (Oklab)
-  scene_transform.py    # scene-linear pre-AgX transforms
-  scene_transform_presets.json # demo ARRI skin prefeed preset
-  display_filter.py     # Kodak / RED display LUT filters
-  grade.py              # unified grade picker (look OR filter)
-  render.py / export.py # scene → AgX → JPEG / Ultra HDR
-  gui/                  # local web GUI
-dngscan_assets/
-  look_fields.json      # user-measured looks (gitignored)
-  vendor_luts/          # downloaded .cube files (gitignored)
-  spectral/             # pre-AgX calibration CSVs: SSF/QE/IR-cut/reflectance
-  darktable_agx.*       # local AgX reference copies
-tools/
-  calibrate_skin_matrix.py # spectral CSV → matrix/mask JSON
-```
-
-## Usage
-
-Command line:
-
-```bash
-# Diagnostic PNG only
-python -m dngscan photo.dng
-
-# AgX JPEG, +0.5 EV, Display P3
-python -m dngscan photo.dng --jpeg out.jpg --ev 0.5 --output-gamut p3
-
-# Fujifilm RAF (X-Trans) or Nikon NEF — same CLI/GUI as DNG
-python -m dngscan photo.raf --jpeg out.jpg
-python -m dngscan photo.nef --jpeg out.jpg
-
-# Fujifilm Velvia look (chromatic geometry on AgX)
-python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_velvia --grade-strength 1.0
-
-# Punchier AgX outset (more purity restoration)
-python -m dngscan photo.dng --jpeg out.jpg --agx-primaries punchy
-
-# Faded-film blacks via Classic Neg look (hue_keep + target_black baked in)
-python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_classic_neg
-
-# Optical warm/cyan look: cyan-biased environment, warm skin/highlights
-python -m dngscan photo.dng --jpeg out.jpg --grade optic_warm_cyan --grade-strength 1.0
-
-# Kodak 2383 display filter (log-encoded .cube)
-python -m dngscan photo.dng --jpeg out.jpg --grade kodak_2383_d65
-
-# Pre-AgX ARRI-style skin prefeed (experimental; compare separately from grade)
-python -m dngscan photo.dng --jpeg out.jpg --scene-transform arri_skin_d55 \
-  --scene-transform-strength 1.0
-
-# Force demosaic (default auto → DHT on Bayer; export only)
-python -m dngscan photo.dng --jpeg out.jpg --demosaic dht
-
-# Ultra HDR gain-map JPEG (no grade; SDR base forced to Display P3)
-python -m dngscan photo.dng --jpeg out_hdr.jpg --highlight-mode reconstruct \
-  --output-format ultrahdr --hdr-headroom 3
-
-# Diagnostics + metrics CSV alongside JPEG
-python -m dngscan photo.dng --jpeg out.jpg --scan --csv metrics.csv
-```
-
-Local GUI:
-
-```bash
-python -m dngscan.gui   # starts a localhost server and opens the browser
-```
-
-For WeChat/QQ delivery, use original-file or file transfer if you want the HDR gain
-map to survive. Moments/feed-style uploads usually recompress to SDR and strip the
-gain map.
-
-## Grades
-
-`--grade NAME` picks **one** optional style (`--grade-strength 0–1.5`). Use prefixed
-IDs in CLI/GUI: `look:classic`, `filter:kodak_2383_d65`, etc. Bare names still work
-when unambiguous. Chromatic looks and display filters are mutually exclusive.
-
-**Chromatic looks** (`look:classic`, `look:reveal`, `look:fuji_*`, …) apply a measured
-Oklab field on the AgX render. Built-in ARRI fields come from official display LUT
-geometry; Fujifilm fields are measured from F-Log2 film-sim `.cube` files. **No LUT is
-sampled at export time** for looks — only pre-measured hue/chroma parameters in
-`dngscan_assets/look_fields.json`.
-
-Each look may also carry **AgX-core overrides** applied before the Oklab pass:
-`hue_keep` (how much per-channel hue skew survives the curve; Velvia keeps more than
-base) and `target_black` (lifted blacks for Eterna / Classic Neg–style fades).
-`--grade-strength` blends these toward the default AgX (0.4 hue keep, zero lift).
-
-`optic_warm_cyan` is different: it is a hand-authored creative look, not an official
-vendor LUT measurement. It keeps AgX tone mapping, then biases low-chroma environment
-tones toward cyan/blue-green, protects warm skin reds/yellows, and damps non-skin magenta
-spill. It is intended for ARRI-like skin/environment separation without shipping or
-sampling proprietary LUTs.
-
-**Display filters** (`kodak_2383_d65`, `red_ipp2_rec709_medium`) are full output transforms:
-AgX → log encode → vendor `.cube` → display decode → blend. These cannot be reduced to a
-chromatic look (measuring them as LookFields collapses saturation).
-
-Add a chromatic look from any official Log→display `.cube` you download:
-
-```bash
-# example: Fujifilm ETERNA (F-Log2 → ETERNA .cube from Fujifilm's site)
-python tools/extract_arri_look.py --lut path/to/eterna.cube --source flog2 \
-  --name fuji_eterna --validate --append-json
-```
-
-Supported `--source` encodings: `logc3, logc4, slog3, vlog, flog, flog2, cineon, log3g10`.
-The tool warns when `mid_chroma_ratio < 0.25` (full output transform — use a display
-filter instead). Measurement compares the LUT against AgX in Oklab with L-normalized
-saturation so the field captures chromatic character without the LUT's tone curve.
-
-Place display-filter `.cube` files under `dngscan_assets/vendor_luts/` (see
-`display_filter.py` for expected paths).
-
-## Pre-AgX Scene Transforms
-
-`--scene-transform` is a scene-linear input transform, not a display filter. The built-in
-`arri_skin_d55` preset is generated by `tools/calibrate_skin_matrix.py` from the replaceable
-CSV inputs in `dngscan_assets/spectral/`: ALEV3 SSF, IMX410 QE, Sigma fp hot-mirror
-transmission, and skin/cyan reflectance spectra. Runtime export only reads
-`dngscan/scene_transform_presets.json`; it does not need `colour-science` or `scipy`.
-
-Regenerate the demo preset:
-
-```bash
-python tools/calibrate_skin_matrix.py --out dngscan/scene_transform_presets.json
-```
-
-Write or refresh the bootstrap CSV bundle:
-
-```bash
-python tools/calibrate_skin_matrix.py --write-bootstrap-csv dngscan_assets/spectral
-```
-
-For serious calibration, replace the bootstrap CSVs with digitized ALEV3 SSF, ZWO
-ASI2400MC / IMX410 QE, measured Sigma fp hot-mirror transmission, and a licensed real skin
-reflectance library. The script also accepts `--skin-dir` / `--cyan-dir` directories and can
-use `colour-science` for D55/A illuminants and CIE 1931 CMFs. The current CSVs are still
-bootstrap approximations; their purpose is to make the chain data-driven:
-IMX410-to-ALEV skin-subspace difference → constrained matrix → pre-AgX scene input.
-
-## License & attribution
-
-Licensed under **GPL-3.0-or-later** (see [LICENSE](LICENSE)). The AgX implementation
-ports portions of [darktable](https://github.com/darktable-org/darktable)'s GPL-3.0-or-later
-AgX code. See [NOTICE.md](NOTICE.md) for third-party assets.
+dngscan is licensed under [GPL-3.0-or-later](LICENSE). Its AgX implementation derives
+from darktable's GPL-3.0-or-later AgX code; third-party notices, including the historical
+Tony McMapface LUT, are in [NOTICE.md](NOTICE.md).

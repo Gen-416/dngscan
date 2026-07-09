@@ -204,13 +204,13 @@ def print_report(
             else jpeg_mode
         )
         wb_label = "日光固定配平" if bundle.wb_mode == "daylight" else "相机白平衡"
-        ev_label = "EV auto" if auto_ev is not None else "EV 补偿"
+        ev_label = "全图亮度参考" if auto_ev is not None else "EV 补偿"
         ev_note = (
-            f"{ev_label}={jpeg_ev:+.2f}（auto 提升 {auto_ev.ev_boost:+.2f} EV）"
+            f"{ev_label}={jpeg_ev:+.2f}（参考提升 {auto_ev.ev_boost:+.2f} EV）"
             if auto_ev is not None
             else f"EV 补偿={jpeg_ev:+.2f}，固定常数非自适应"
         )
-        brighten_note = "EV auto 中灰对齐" if auto_ev is not None else "无自动曝光"
+        brighten_note = "全图亮度参考" if auto_ev is not None else "手动 EV / 固定锚点"
         print(
             f"JPEG 设置: scene-linear Rec.2020 起点；8-bit {output_gamut_label(output_gamut)}（TPDF 抖动）；"
             f"{wb_label}；{brighten_note}；"
@@ -228,12 +228,12 @@ def print_report(
         )
         if auto_ev is not None:
             limit_note = (
-                f"；高光限制，中灰目标 {auto_ev.ev_median_target:+.2f} EV"
+                f"；高光限制，参考目标 {auto_ev.ev_median_target:+.2f} EV"
                 if auto_ev.highlight_limited
                 else ""
             )
             print(
-                f"EV auto: 提升 {auto_ev.ev_boost:+.2f} EV（相对 EV 0）"
+                f"全图亮度参考：提升 {auto_ev.ev_boost:+.2f} EV（相对 EV 0）"
                 f"{limit_note}；应用 EV={auto_ev.ev:+.2f}"
             )
         print(f"JPEG 策略: {jpeg_policy_cn(reported_mode, output_gamut)}")

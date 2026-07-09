@@ -67,7 +67,7 @@ class DrtScanTest(unittest.TestCase):
         rgb = np.asarray([[0.30, 0.10, 0.22], [0.22, 0.14, 0.35]], dtype=np.float32)
         gated = apply_gated_core(
             rgb,
-            _base_plan(tone_core="gated", agx_primaries="smooth"),
+            _base_plan(tone_core="gated", agx_primaries="base"),
             color,
             masks,
         )

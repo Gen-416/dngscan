@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Content-aware EV suggestion: median → 18% gray with highlight safety."""
+"""Full-frame EV reference: median → 18% gray with highlight safety."""
 from __future__ import annotations
 
 import math
@@ -97,6 +97,7 @@ def render_sample_linear_output(
     lum_norm: str = "y",
     agx_primaries: str = "base",
     sample_masks: Any | None = None,
+    sample_raw_guidance: Any | None = None,
 ) -> Any:
     from .grade import RENDER_MODE
 
@@ -131,7 +132,7 @@ def render_sample_linear_output(
     effective_plan = plan_with_look_overrides(plan, look, look_strength) if plan is not None else None
     effective_tone = effective_plan.tone if isinstance(effective_plan, RenderPlan) else effective_plan
     eff_color = effective_plan.color if isinstance(effective_plan, RenderPlan) else color_plan
-    mapped_rec = apply_tone_core(rec, effective_tone, eff_color, sample_masks)
+    mapped_rec = apply_tone_core(rec, effective_tone, eff_color, sample_masks, sample_raw_guidance)
     if display_filter != "none" and filter_strength > 0.0:
         output_linear = filter_engine.apply_display_filter_rec2020(
             mapped_rec, gamut, display_filter, filter_strength, scene_rec2020=rec
@@ -166,9 +167,15 @@ def max_safe_ev(
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
     sample_rgb = flat[::step, :3]
     sample_masks = None
+    sample_raw_guidance = None
     if getattr(bundle, "clip_masks", None) is not None:
         masks = retreat_engine.clip_masks_for_shape(bundle, bundle.scene_rec2020_render.shape[:2]).reshape(-1, 3)
         sample_masks = masks[::step]
+        if tone_core == "gated":
+            from .guidance import flatten_raw_guidance, raw_guidance_for_shape
+
+            guidance = raw_guidance_for_shape(bundle, bundle.scene_rec2020_render.shape[:2], analysis)
+            sample_raw_guidance = flatten_raw_guidance(guidance, 0, masks.shape[0], step=step)
     baseline_stats: tuple[float, float, float, float] | None = None
 
     def margin_at(ev: float) -> float:
@@ -189,6 +196,7 @@ def max_safe_ev(
             lum_norm=lum_norm,
             agx_primaries=agx_primaries,
             sample_masks=sample_masks,
+            sample_raw_guidance=sample_raw_guidance,
         )
         return output_highlight_margin(rgb, gamut, baseline_stats)
 
@@ -209,6 +217,7 @@ def max_safe_ev(
         lum_norm=lum_norm,
         agx_primaries=agx_primaries,
         sample_masks=sample_masks,
+        sample_raw_guidance=sample_raw_guidance,
     )
     baseline_stats = output_highlight_stats(baseline_rgb, gamut)
     if output_highlight_margin(baseline_rgb, gamut, baseline_stats) <= 0.0:
@@ -323,13 +332,13 @@ def resolve_export_ev(
 
 
 def auto_ev_overlay_lines(result: AutoEvResult) -> list[str]:
-    lines = [f"EV auto {result.ev_boost:+.2f}"]
+    lines = [f"全图亮度参考 {result.ev_boost:+.2f} EV"]
     if result.ev_median_target < -1e-6 and result.ev_boost < 1e-6:
-        lines.append("中灰已高于锚定 · 保持 EV 0")
+        lines.append("全图中灰已高于锚定 · 保持 EV 0")
     elif result.highlight_limited:
         lines.append(
-            f"中灰目标 {result.ev_median_target:+.2f} · 高光限制至 {result.ev:+.2f}"
+            f"参考目标 {result.ev_median_target:+.2f} · 高光限制至 {result.ev:+.2f}"
         )
     else:
-        lines.append(f"中灰对齐 18% ({result.anchored_median_ev:+.2f} EV)")
+        lines.append(f"全图中灰参考 18% ({result.anchored_median_ev:+.2f} EV)")
     return lines

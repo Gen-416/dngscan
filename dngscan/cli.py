@@ -93,7 +93,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--ev",
         default="0",
-        help="手动曝光补偿（档），或 auto=画面中位对齐 18%% 灰（高光保护，不过曝）",
+        help="手动曝光补偿（档），或 auto=按全图中位亮度计算 18%% 灰参考值（高光保护；仅显式指定时应用）",
     )
     parser.add_argument(
         "--highlight-mode",

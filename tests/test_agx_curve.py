@@ -315,12 +315,14 @@ class TonePlanPivotTest(unittest.TestCase):
             tail_extremity=0.0,
             sparse_emitter_tail=False,
             raw_clip_union_pct=0.0,
+            reliable_tail_ev_p9999=3.0,
         )
         plan = build_tone_compression_plan(
             bundle, analysis, "Rec2020", scene_metrics=bright_metrics,
         )
         # Bright body near mid gray: contrast pivot stays at calibrated 0 EV.
         self.assertEqual(plan.pivot_ev_offset, 0.0)
+        self.assertAlmostEqual(plan.white_ev, 3.3, places=5)
 
 
 class DarkSceneTonePlanTest(unittest.TestCase):
@@ -390,7 +392,10 @@ class DarkSceneTonePlanTest(unittest.TestCase):
             exposure_gain=compute_exposure_gain("agx", 0.0),
         )
         plan = build_tone_compression_plan(bundle, self._dark_analysis(), "Rec2020", ev_from_agx_inset=True)
-        self.assertLess(plan.pivot_ev_offset, -0.5)
+        self.assertEqual(plan.pivot_ev_offset, 0.0)
+        from dngscan.drt import apply_c1_endpoints
+
+        self.assertAlmostEqual(float(apply_c1_endpoints(np.asarray([0.0]), plan)[0]), 0.18, places=5)
         self.assertLess(plan.view_brightness, 1.08)
         self.assertLess(plan.black_ev, -2.0)
         self.assertEqual(plan.target_black_linear, 0.0)

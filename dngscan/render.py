@@ -11,6 +11,7 @@ from . import display_filter as filter_engine
 from . import lum as lum_engine
 from . import look as look_engine
 from . import gated_drt as gated_drt_engine
+from . import guidance as guidance_engine
 from . import punch as punch_engine
 from . import retreat as retreat_engine
 from . import scene_transform as scene_transform_engine
@@ -140,6 +141,7 @@ def apply_tone_core(
     plan: ToneCompressionPlan,
     color_plan: ColorGeometryPlan | None = None,
     clip_masks_rgb: Any | None = None,
+    raw_guidance: Any | None = None,
 ) -> Any:
     core = str(getattr(plan, "tone_core", "agx"))
     if core == "neutral":
@@ -147,7 +149,9 @@ def apply_tone_core(
     if core == "lum":
         return lum_engine.apply_lum_core(rgb_rec2020, plan)
     if core == "gated":
-        return gated_drt_engine.apply_gated_core(rgb_rec2020, plan, color_plan, clip_masks_rgb)
+        return gated_drt_engine.apply_gated_core(
+            rgb_rec2020, plan, color_plan, clip_masks_rgb, raw_guidance
+        )
     return apply_agx_core(rgb_rec2020, plan)
 
 
@@ -174,8 +178,11 @@ def scene_render_to_display_linear(
     out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
     clip_masks = None
+    raw_guidance = None
     if color_plan is not None and getattr(bundle, "clip_masks", None) is not None:
         clip_masks = retreat_engine.clip_masks_for_shape(bundle, (h, w)).reshape(-1, 3)
+        if str(getattr(tone_plan, "tone_core", "agx")) == "gated":
+            raw_guidance = guidance_engine.raw_guidance_for_shape(bundle, (h, w))
 
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
         bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
@@ -197,6 +204,7 @@ def scene_render_to_display_linear(
             tone_plan,
             color_plan,
             clip_masks[start:end] if clip_masks is not None else None,
+            guidance_engine.flatten_raw_guidance(raw_guidance, start, end) if raw_guidance is not None else None,
         )
         if display_filter != "none" and filter_strength > 0.0:
             output_linear = filter_engine.apply_display_filter_rec2020(

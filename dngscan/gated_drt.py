@@ -9,6 +9,7 @@ from . import agx as agx_engine
 from . import guidance as guidance_engine
 from . import lum as lum_engine
 from . import punch as punch_engine
+from .color import luminance_from_rec2020
 from .models import ColorGeometryPlan, ToneCompressionPlan
 
 
@@ -17,12 +18,13 @@ def apply_gated_core(
     plan: ToneCompressionPlan,
     color_plan: ColorGeometryPlan | None = None,
     clip_masks_rgb: Any | None = None,
+    raw_guidance: Any | None = None,
 ) -> Any:
-    """Luma-first C1 shoulder blended with full AgX only where RAW/scene permits.
+    """Luma-first C1 shoulder with RAW-gated AgX colour geometry.
 
-    Luminance mapping always runs (preserves midtone hue/chroma). AgX inset/outset
-    geometry is mixed in proportion to `color_path_weight` derived from CFA clip class,
-    scene highlight EV, and output-gamut pressure.
+    The C1 luminance result is the sole brightness authority. AgX supplies a chromatic
+    path-to-white which is re-normalized to the same Rec.2020 Y before blending, so a
+    CFA confidence boundary cannot create a brightness seam.
     """
     rgb = np.asarray(rgb_rec2020, dtype=np.float32)
     lum_mapped = lum_engine.apply_lum_core(rgb, plan)
@@ -30,6 +32,13 @@ def apply_gated_core(
     inset, outset = agx_engine.formation_matrices(plan)
     agx_mapped = agx_engine.apply_core(rgb, plan, inset, outset)
     agx_mapped = punch_engine.apply_punch_rec2020(agx_mapped, float(getattr(plan, "punch_strength", 0.0)))
+    target_y = luminance_from_rec2020(lum_mapped)
+    agx_y = luminance_from_rec2020(agx_mapped)
+    ratio = np.zeros_like(target_y, dtype=np.float32)
+    valid = (target_y > np.float32(1e-7)) & (agx_y > np.float32(1e-7))
+    ratio[valid] = target_y[valid] / agx_y[valid]
+    agx_chroma = agx_mapped * ratio[:, None]
+    agx_chroma[~valid] = lum_mapped[~valid]
 
     scene_ev = guidance_engine.scene_ev_from_rec2020(rgb)
     pressure = float(color_plan.output_gamut_pressure_pct) if color_plan is not None else 0.0
@@ -45,9 +54,12 @@ def apply_gated_core(
         pressure,
         scene_rgb_rec2020=rgb,
         noise_ev_floor=noise_floor,
+        raw_headroom_rgb=getattr(raw_guidance, "headroom", None),
+        raw_clip_class=getattr(raw_guidance, "clip_class", None),
+        raw_snr_confidence=getattr(raw_guidance, "snr_confidence", None),
         midtone_protect=midtone_protect,
         highlight_ev_lo=ev_lo,
         highlight_ev_hi=ev_hi,
     )
     w = np.clip(w * np.float32(master), 0.0, 1.0)[:, None]
-    return (lum_mapped * (np.float32(1.0) - w) + agx_mapped * w).astype(np.float32, copy=False)
+    return (lum_mapped * (np.float32(1.0) - w) + agx_chroma * w).astype(np.float32, copy=False)

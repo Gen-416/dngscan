@@ -41,6 +41,10 @@ class RawBundle:
     _clip_masks_resized: Any | None = None
     # Optional RAW-gated guidance maps (headroom, clip class, SNR confidence).
     raw_guidance: Any | None = None
+    # Lazily resized RAW guidance for the current render geometry.
+    _raw_guidance_cache_shape: tuple[int, int] | None = None
+    _raw_guidance_resized: Any | None = None
+    _raw_guidance_has_sensor_snr: bool = False
 
 
 @dataclass
@@ -129,9 +133,8 @@ class ToneCompressionPlan:
     tone_core: str = "agx"
     # Norm for the luminance core: "y", "power", or "max".
     lum_norm: str = "y"
-    # Scene-adaptive pivot: EV offset (relative to mid gray) of the point of maximum
-    # contrast. Dark scenes pull it toward the median so the subject gets the steep part
-    # of the curve; output brightness at the pivot is preserved by the curve builder.
+    # Optional manual pivot offset. The automatic compiler keeps this at zero until a
+    # constrained C1 solver can move local contrast without moving the EV=0 anchor.
     pivot_ev_offset: float = 0.0
     # Fraction of per-channel AgX hue skew kept after the curve. Default 0.4 follows Blender
     # (darktable defaults to 0.6); see AGX_HUE_KEEP in agx.py.
@@ -176,6 +179,9 @@ class SceneToneMetrics:
     tail_extremity: float
     sparse_emitter_tail: bool
     raw_clip_union_pct: float
+    # Same percentile as tail_ev_p9999, excluding RAW sites with exhausted CFA headroom.
+    # This is the only tail statistic allowed to set a global white endpoint.
+    reliable_tail_ev_p9999: float = float("nan")
 
 
 @dataclass(frozen=True)

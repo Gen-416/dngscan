@@ -37,14 +37,30 @@ def clip_class_from_masks(masks_rgb: Any, threshold: float = 0.35) -> Any:
 
 
 def headroom_from_masks(masks_rgb: Any) -> Any:
-    """Continuous per-channel headroom remainder (1 = full, 0 = saturated)."""
+    """Legacy clip-mask proxy retained for callers without RAW headroom maps."""
     m = np.clip(np.asarray(masks_rgb, dtype=np.float32), 0.0, 1.0)
     return np.clip(np.float32(1.0) - m, 0.0, 1.0)
 
 
-def raw_color_permission(masks_rgb: Any) -> Any:
-    """How much RAW evidence permits chroma/path-to-white work (0 = trust scene color)."""
-    m = np.clip(np.asarray(masks_rgb, dtype=np.float32), 0.0, 1.0)
+def saturation_proximity_from_headroom(headroom_rgb: Any) -> Any:
+    """Map measured remaining headroom to the same 95–99% soft clip interval."""
+    headroom = np.clip(np.asarray(headroom_rgb, dtype=np.float32), 0.0, 1.0)
+    return np.float32(1.0) - smoothstep(np.float32(0.01), np.float32(0.05), headroom)
+
+
+def raw_color_permission(
+    masks_rgb: Any | None = None,
+    *,
+    headroom_rgb: Any | None = None,
+    clip_class: Any | None = None,
+) -> Any:
+    """RAW loss permission for path-to-white (0 = measured colour remains trusted)."""
+    if headroom_rgb is not None:
+        m = saturation_proximity_from_headroom(headroom_rgb)
+    elif masks_rgb is not None:
+        m = np.clip(np.asarray(masks_rgb, dtype=np.float32), 0.0, 1.0)
+    else:
+        raise ValueError("raw_color_permission requires masks_rgb or headroom_rgb")
     mr, mg, mb = m[:, 0], m[:, 1], m[:, 2]
     # Continuous combination (G-only weakest, multi-channel strongest).
     strength = np.float32(1.0) - (
@@ -52,8 +68,10 @@ def raw_color_permission(masks_rgb: Any) -> Any:
         * (np.float32(1.0) - np.float32(0.55) * mr)
         * (np.float32(1.0) - np.float32(0.55) * mb)
     )
-    classes = clip_class_from_masks(m)
-    multi = (classes >= CLIP_CLASS_RG).astype(np.float32)
+    classes = np.asarray(clip_class, dtype=np.int32) if clip_class is not None else clip_class_from_masks(m)
+    # Bit flags are not ordinal: B-only is 4, while RG is 3. Count set bits instead of
+    # comparing numeric class values so every single-channel clip is treated consistently.
+    multi = ((classes & (classes - 1)) != 0).astype(np.float32)
     return np.clip(strength + np.float32(0.12) * multi, 0.0, 1.0)
 
 
@@ -85,6 +103,9 @@ def color_path_weight(
     *,
     scene_rgb_rec2020: Any | None = None,
     noise_ev_floor: float | None = None,
+    raw_headroom_rgb: Any | None = None,
+    raw_clip_class: Any | None = None,
+    raw_snr_confidence: Any | None = None,
     midtone_protect: float = 0.92,
     highlight_ev_lo: float = 0.25,
     highlight_ev_hi: float = 2.75,
@@ -92,7 +113,9 @@ def color_path_weight(
 ) -> Any:
     """Blend weight for AgX color geometry over luma-first DRT (per pixel, 0–1)."""
     ev = np.asarray(scene_ev, dtype=np.float32)
-    if masks_rgb is not None and masks_rgb.shape[0] == ev.shape[0]:
+    if raw_headroom_rgb is not None and raw_headroom_rgb.shape[0] == ev.shape[0]:
+        raw_perm = raw_color_permission(headroom_rgb=raw_headroom_rgb, clip_class=raw_clip_class)
+    elif masks_rgb is not None and masks_rgb.shape[0] == ev.shape[0]:
         raw_perm = raw_color_permission(masks_rgb)
     else:
         raw_perm = np.zeros_like(ev, dtype=np.float32)
@@ -100,13 +123,18 @@ def color_path_weight(
     gamut_perm = np.float32(gamut_pressure_scale) * np.float32(
         min(1.0, max(0.0, float(gamut_pressure_pct) / 8.0))
     )
-    w = np.maximum(raw_perm, scene_perm * np.float32(0.45)) + gamut_perm
-    if noise_ev_floor is not None:
-        w = w * snr_confidence_from_ev(ev, float(noise_ev_floor))
+    nonraw_perm = np.clip(scene_perm * np.float32(0.45) + gamut_perm, 0.0, 1.0)
+    if raw_snr_confidence is not None and raw_snr_confidence.shape[0] == ev.shape[0]:
+        nonraw_perm *= np.clip(np.asarray(raw_snr_confidence, dtype=np.float32), 0.0, 1.0)
+    elif noise_ev_floor is not None:
+        nonraw_perm *= snr_confidence_from_ev(ev, float(noise_ev_floor))
+    if scene_rgb_rec2020 is not None and scene_rgb_rec2020.shape[0] == ev.shape[0]:
+        # Hue policy is an aesthetic display choice. It may attenuate scene/gamut-driven
+        # geometry, but must not override a measured loss of RAW channel information.
+        nonraw_perm *= sector_hue_multiplier(scene_rgb_rec2020, ev)
+    w = raw_perm + (np.float32(1.0) - raw_perm) * nonraw_perm
     protect = midtone_protection(ev, raw_perm, midtone_protect)
     w = np.clip(w * (np.float32(1.0) - protect), 0.0, 1.0)
-    if scene_rgb_rec2020 is not None and scene_rgb_rec2020.shape[0] == ev.shape[0]:
-        w = w * sector_hue_multiplier(scene_rgb_rec2020, ev)
     return w.astype(np.float32, copy=False)
 
 
@@ -149,42 +177,170 @@ def sector_hue_multiplier(scene_rgb_rec2020: Any, scene_ev: Any) -> Any:
     ).astype(np.float32, copy=False)
 
 
+def _bin_2x2_min(arr: Any) -> Any:
+    h, w = arr.shape[:2]
+    h2 = max(1, h // 2)
+    w2 = max(1, w // 2)
+    cropped = arr[: h2 * 2, : w2 * 2]
+    return cropped.reshape(h2, 2, w2, 2, arr.shape[2]).min(axis=(1, 3))
+
+
+def _align_cfa_rgb_map(bundle: RawBundle, values: Any, target_shape: tuple[int, int]) -> Any:
+    """Reduce raw-CFA RGB evidence to scene geometry without changing its values."""
+    from . import raw_io
+
+    binned = _bin_2x2_min(np.asarray(values, dtype=np.float32))
+    oriented = raw_io._orient_like_libraw(binned, bundle.orientation_flip)
+    return raw_io._resize_mask_to_shape(oriented, target_shape).astype(np.float32, copy=False)
+
+
+def _raw_headroom_rgb(bundle: RawBundle, target_shape: tuple[int, int]) -> Any:
+    """Actual pre-WB remaining well capacity for R/G/B CFA samples."""
+    from . import raw_io
+
+    raw = np.asarray(bundle.raw_image, dtype=np.float32)
+    colors = np.asarray(bundle.raw_colors)
+    headroom = np.ones(raw.shape + (3,), dtype=np.float32)
+    for cid in np.unique(colors):
+        cid_i = int(cid)
+        label = raw_io.channel_label(bundle.color_desc, cid_i)
+        out_idx = 0 if label.startswith("R") else 1 if label.startswith("G") else 2 if label.startswith("B") else None
+        if out_idx is None:
+            continue
+        black = raw_io.channel_black_level(bundle.black_levels, cid_i)
+        fullwell = raw_io.channel_fullwell(bundle.white_level, bundle.camera_white_levels, cid_i)
+        channel_headroom = np.clip((np.float32(fullwell) - raw) / np.float32(max(fullwell - black, 1.0)), 0.0, 1.0)
+        plane = np.where(colors == cid_i, channel_headroom, np.float32(1.0))
+        headroom[:, :, out_idx] = np.minimum(headroom[:, :, out_idx], plane)
+    return _align_cfa_rgb_map(bundle, headroom, target_shape)
+
+
+def _has_sensor_snr_prior(analysis: Analysis | None) -> bool:
+    gain = getattr(analysis, "gain_e_per_dn", None)
+    read_noise = getattr(analysis, "prior_read_noise_e", None)
+    return bool(
+        gain is not None and read_noise is not None
+        and math.isfinite(gain) and math.isfinite(read_noise)
+        and gain > 0.0 and read_noise >= 0.0
+    )
+
+
+def _raw_snr_confidence(bundle: RawBundle, analysis: Analysis | None, target_shape: tuple[int, int]) -> Any | None:
+    """Conservative per-cell colour SNR confidence from RAW DN plus sensor priors."""
+    if not _has_sensor_snr_prior(analysis):
+        # Keep the established scene-EV fallback for cameras without calibrated electron
+        # priors instead of pretending a unity confidence is a measured RAW SNR.
+        return None
+    gain = float(analysis.gain_e_per_dn)
+    read_noise = float(analysis.prior_read_noise_e)
+
+    from . import raw_io
+
+    raw = np.asarray(bundle.raw_image, dtype=np.float32)
+    colors = np.asarray(bundle.raw_colors)
+    confidence = np.ones(raw.shape + (3,), dtype=np.float32)
+    rn2 = np.float32(read_noise * read_noise)
+    for cid in np.unique(colors):
+        cid_i = int(cid)
+        label = raw_io.channel_label(bundle.color_desc, cid_i)
+        out_idx = 0 if label.startswith("R") else 1 if label.startswith("G") else 2 if label.startswith("B") else None
+        if out_idx is None:
+            continue
+        black = raw_io.channel_black_level(bundle.black_levels, cid_i)
+        electrons = np.maximum(raw - np.float32(black), 0.0) * np.float32(gain)
+        snr = electrons / np.sqrt(np.maximum(electrons + rn2, np.float32(EPS)))
+        plane = np.where(colors == cid_i, smoothstep(np.float32(1.0), np.float32(10.0), snr), np.float32(1.0))
+        confidence[:, :, out_idx] = np.minimum(confidence[:, :, out_idx], plane)
+    rgb_confidence = _align_cfa_rgb_map(bundle, confidence, target_shape)
+    return np.min(rgb_confidence, axis=2).astype(np.float32, copy=False)
+
+
 def build_raw_guidance_maps(
     bundle: RawBundle,
     analysis: Analysis | None = None,
 ) -> RawGuidanceMaps | None:
-    """Build half-resolution RAW permission rasters from CFA clip masks."""
+    """Build RAW-domain headroom, clip class and SNR maps aligned to clip masks."""
     masks = getattr(bundle, "clip_masks", None)
     if masks is None:
         return None
-    m = np.asarray(masks, dtype=np.float32)
-    h, w = m.shape[:2]
-    flat = m.reshape(-1, 3)
-    headroom = headroom_from_masks(flat).reshape(h, w, 3).astype(np.float16, copy=False)
-    clip_class = clip_class_from_masks(flat).reshape(h, w).astype(np.uint8, copy=False)
-    from .tone import scene_rec2020_to_float
-
-    scene_f = scene_rec2020_to_float(
-        bundle.scene_rec2020_render.reshape(-1, 3)[: h * w, :3],
-        bundle.scene_scale,
-        bundle.exposure_gain,
+    target_shape = np.asarray(masks).shape[:2]
+    headroom = _raw_headroom_rgb(bundle, target_shape)
+    clip_class = clip_class_from_masks(saturation_proximity_from_headroom(headroom).reshape(-1, 3)).reshape(target_shape)
+    snr = _raw_snr_confidence(bundle, analysis, target_shape)
+    return RawGuidanceMaps(
+        headroom=headroom.astype(np.float16, copy=False),
+        clip_class=clip_class.astype(np.uint8, copy=False),
+        snr_confidence=snr.astype(np.float16, copy=False) if snr is not None else None,
     )
-    ev = scene_ev_from_rec2020(scene_f).reshape(h, w)
-    noise_floor = -12.0
-    if analysis is not None and math.isfinite(analysis.usable_dr_eff_ev):
-        noise_floor = -float(analysis.usable_dr_eff_ev) - 1.0
-    snr = snr_confidence_from_ev(ev.reshape(-1), noise_floor).reshape(h, w).astype(
-        np.float16, copy=False
-    )
-    return RawGuidanceMaps(headroom=headroom, clip_class=clip_class, snr_confidence=snr)
 
 
 def ensure_raw_guidance(bundle: RawBundle, analysis: Analysis | None = None) -> RawGuidanceMaps | None:
-    if getattr(bundle, "raw_guidance", None) is not None:
+    wants_sensor_snr = _has_sensor_snr_prior(analysis)
+    if getattr(bundle, "raw_guidance", None) is not None and (
+        not wants_sensor_snr or getattr(bundle, "_raw_guidance_has_sensor_snr", False)
+    ):
         return bundle.raw_guidance
     maps = build_raw_guidance_maps(bundle, analysis)
     bundle.raw_guidance = maps
+    bundle._raw_guidance_has_sensor_snr = wants_sensor_snr
+    bundle._raw_guidance_cache_shape = None
+    bundle._raw_guidance_resized = None
     return maps
+
+
+def _resize_nearest_scalar(values: Any, shape: tuple[int, int]) -> Any:
+    from PIL import Image
+
+    arr = np.asarray(values, dtype=np.uint8)
+    if arr.shape[:2] == shape:
+        return arr
+    return np.asarray(
+        Image.fromarray(arr, mode="L").resize((shape[1], shape[0]), Image.Resampling.NEAREST),
+        dtype=np.uint8,
+    )
+
+
+def raw_guidance_for_shape(
+    bundle: RawBundle, shape: tuple[int, int], analysis: Analysis | None = None
+) -> RawGuidanceMaps | None:
+    """Resize immutable RAW evidence once per output geometry."""
+    maps = ensure_raw_guidance(bundle, analysis)
+    if maps is None:
+        return None
+    if maps.headroom.shape[:2] == shape:
+        return maps
+    if getattr(bundle, "_raw_guidance_cache_shape", None) == shape:
+        cached = getattr(bundle, "_raw_guidance_resized", None)
+        if cached is not None:
+            return cached
+    from .retreat import resize_clip_masks
+
+    resized = RawGuidanceMaps(
+        headroom=resize_clip_masks(maps.headroom, shape).astype(np.float16, copy=False),
+        clip_class=_resize_nearest_scalar(maps.clip_class, shape),
+        snr_confidence=(
+            resize_clip_masks(maps.snr_confidence[:, :, None], shape)[:, :, 0].astype(np.float16, copy=False)
+            if maps.snr_confidence is not None else None
+        ),
+    )
+    bundle._raw_guidance_cache_shape = shape
+    bundle._raw_guidance_resized = resized
+    return resized
+
+
+def flatten_raw_guidance(
+    maps: RawGuidanceMaps | None, start: int, end: int, step: int = 1
+) -> RawGuidanceMaps | None:
+    if maps is None:
+        return None
+    return RawGuidanceMaps(
+        headroom=np.asarray(maps.headroom).reshape(-1, 3)[start:end:step],
+        clip_class=np.asarray(maps.clip_class).reshape(-1)[start:end:step],
+        snr_confidence=(
+            np.asarray(maps.snr_confidence).reshape(-1)[start:end:step]
+            if maps.snr_confidence is not None else None
+        ),
+    )
 
 
 def scene_ev_from_rec2020(rgb_rec2020: Any) -> Any:

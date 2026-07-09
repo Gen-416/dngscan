@@ -134,6 +134,7 @@ def scene_tone_metrics(
         float(v) for v in np.percentile(reliable_ev, [1.0, 5.0, 50.0, 95.0, 99.0, 99.9])
     ]
     tail_p9999 = float(np.percentile(ev, 99.99))
+    reliable_tail_p9999 = float(np.percentile(reliable_ev, 99.99))
     tail0 = float(np.mean(ev > 0.0) * 100.0)
     tail2 = float(np.mean(ev > 2.0) * 100.0)
     extremity = tail2 / max(tail0, 1e-4)
@@ -152,6 +153,7 @@ def scene_tone_metrics(
         tail_extremity=extremity,
         sparse_emitter_tail=sparse_emitter,
         raw_clip_union_pct=float(analysis.cell_union_pct),
+        reliable_tail_ev_p9999=reliable_tail_p9999,
     )
 
 
@@ -213,8 +215,6 @@ def build_tone_compression_plan(
     scene_metrics: SceneToneMetrics | None = None,
 ) -> ToneCompressionPlan:
     agx_primaries = agx_engine.resolve_agx_primaries(agx_primaries)
-    if tone_core == "gated" and agx_primaries == "base":
-        agx_primaries = "smooth"
     if tone_core == "neutral":
         return neutral_tone_plan(target_gamut)
 
@@ -253,12 +253,15 @@ def build_tone_compression_plan(
     toe_start_ev = -latitude_lo_ev
     shoulder_start_ev = latitude_hi_ev
 
-    # The body distribution defines the usable image; the complete tail defines how
-    # long the shoulder must be. p99.99 is intentionally used only to reserve roll-off
-    # room for sparse lamps and speculars, not to re-anchor the scene's exposure.
+    # The complete tail describes topology (for example, sparse emitters), but has no
+    # authority over the global white endpoint: reconstructed/RAW-clipped values are not
+    # measured scene radiometry. Only the reliable tail may set the shoulder endpoint.
     white_margin = 0.50 if metrics.sparse_emitter_tail else 0.30
     min_white_ev = 3.50 if metrics.sparse_emitter_tail else 3.00
-    white_ev = max(metrics.tail_ev_p9999 + white_margin, min_white_ev)
+    reliable_white_tail = metrics.reliable_tail_ev_p9999
+    if not math.isfinite(reliable_white_tail):
+        reliable_white_tail = metrics.tail_ev_p9999
+    white_ev = max(reliable_white_tail + white_margin, min_white_ev)
     white_ev = clamp_float(white_ev, min_white_ev, 8.5)
 
     # These are strictly tone decisions. Colour clipping and output gamut live in
@@ -268,14 +271,14 @@ def build_tone_compression_plan(
     dark_body = clamp_float((-metrics.body_ev_p50 - 1.5) / 3.0, 0.0, 1.0)
     toe_power = 1.50 - 0.35 * dark_body
     shoulder_power = 2.55 if metrics.sparse_emitter_tail else 2.90
-    pivot_ev_offset = agx_engine.compute_pivot_ev_offset(metrics.body_ev_p50, black_ev, white_ev)
+    # darktable exposes pivot position and pivot target output separately. Our automatic
+    # path has no independent pivot target, so moving its pivot would silently move the
+    # calibrated EV=0 -> 18% anchor. Keep the anchor fixed until a constrained solver
+    # can satisfy both conditions.
+    pivot_ev_offset = 0.0
     target_black_linear = 0.0
     shadow_quality = _smoothstep_f(5.5, 8.5, plan_dr) if math.isfinite(plan_dr) else 0.5
-    if pivot_ev_offset < -0.5:
-        # Contrast pivot handles dark-scene readability; avoid stacking a strong brightness lift.
-        view_brightness = 1.0 + 0.06 * dark_body * shadow_quality
-    else:
-        view_brightness = 1.0 + 0.30 * dark_body * shadow_quality
+    view_brightness = 1.0 + 0.30 * dark_body * shadow_quality
     # Punch is a post-core chroma operator, not a tone decision: it is calculated after
     # endpoint selection and cannot feed back into pivot, toe, shoulder or exposure.
     # The luminance core deliberately stays at zero because it already retains the

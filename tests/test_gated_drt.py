@@ -5,12 +5,12 @@ import unittest
 
 import numpy as np
 
-from dngscan.color import rgb_to_oklab
+from dngscan.color import luminance_from_rec2020, rgb_to_oklab
 from dngscan.gated_drt import apply_gated_core
-from dngscan.models import ColorGeometryPlan, ToneCompressionPlan
+from dngscan.models import ColorGeometryPlan, RawGuidanceMaps, ToneCompressionPlan
 
 
-def _plan(tone_core: str = "gated", primaries: str = "smooth") -> ToneCompressionPlan:
+def _plan(tone_core: str = "gated", primaries: str = "base") -> ToneCompressionPlan:
     return ToneCompressionPlan(
         target_gamut="Rec2020",
         luma_p1=0.01,
@@ -64,6 +64,31 @@ class GatedDrtTest(unittest.TestCase):
         clean = apply_gated_core(rgb, plan, color, np.zeros((1, 3), dtype=np.float32))
         clipped = apply_gated_core(rgb, plan, color, np.asarray([[0.95, 0.1, 0.1]], dtype=np.float32))
         self.assertGreater(float(np.abs(clipped - clean).max()), 1e-3)
+
+    def test_raw_gate_never_changes_luminance_curve(self) -> None:
+        rgb = np.asarray([[0.85, 0.75, 0.20]], dtype=np.float32)
+        plan = _plan()
+        color = ColorGeometryPlan("srgb", 0.0, 0.0)
+        clean = apply_gated_core(rgb, plan, color, np.zeros((1, 3), dtype=np.float32))
+        clipped = apply_gated_core(rgb, plan, color, np.asarray([[0.95, 0.1, 0.1]], dtype=np.float32))
+        self.assertAlmostEqual(
+            float(luminance_from_rec2020(clean)[0]),
+            float(luminance_from_rec2020(clipped)[0]),
+            places=6,
+        )
+
+    def test_raw_evidence_overrides_low_snr_fallback_for_real_clip(self) -> None:
+        rgb = np.asarray([[0.85, 0.75, 0.20]], dtype=np.float32)
+        plan = _plan()
+        color = ColorGeometryPlan("srgb", 0.0, 0.0)
+        guidance = RawGuidanceMaps(
+            headroom=np.asarray([[0.005, 0.95, 0.95]], dtype=np.float32),
+            clip_class=np.asarray([1], dtype=np.uint8),
+            snr_confidence=np.asarray([0.0], dtype=np.float32),
+        )
+        clean = apply_gated_core(rgb, plan, color, np.zeros((1, 3), dtype=np.float32))
+        guided = apply_gated_core(rgb, plan, color, np.zeros((1, 3), dtype=np.float32), guidance)
+        self.assertGreater(float(np.abs(guided - clean).max()), 1e-3)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
   "transforms": {
     "arri_skin_d55": {
       "name": "arri_skin_d55",
-      "label": "ARRI skin prefeed (D55)",
+      "label": "ARRI-like 肤色校正（D55，原型）",
       "illuminant": "D55",
       "working_space": "Rec2020",
       "note": "Rec.2020-domain demo spectral fit from rough ALEV3/IMX410 curves and a sigmoid Sigma fp hot-mirror model; look_gain amplifies the fitted residual while preserving neutral axis. Replace curves with measured CSV data for production calibration.",
@@ -120,7 +120,7 @@
     },
     "alev_material_d55": {
       "name": "alev_material_d55",
-      "label": "ALEV material prefeed (D55 windows)",
+      "label": "ALEV 材质校正（D55，实验）",
       "illuminant": "D55",
       "working_space": "Rec2020",
       "note": "Material-aware Sigma->ALEV simulation: per-material constrained fits on D55+A samples, windows in the D55 calibration frame (runtime von Kries transport applies), look_gain=1. Confidence folds fit quality into the effective weight. Data quality per dngscan_assets/spectral/README.md; regenerate after replacing CSVs. [skin window refit from real DNG samples 2026-07-07] [foliage window refit from real DNG samples 2026-07-07] [skin window refit from real DNG samples 2026-07-07]",
