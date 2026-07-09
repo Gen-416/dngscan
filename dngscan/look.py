@@ -68,9 +68,11 @@ class LookField:
     # Optional AgX-core overrides carried by the look (applied to the tone plan before
     # the curve runs, unlike the Oklab field above which is post-AgX):
     #   agx_hue_keep — fraction of per-channel hue skew kept (None = plan default 0.4);
-    #   agx_target_black — linear output floor, >0 lifts blacks for faded film looks.
+    #   agx_target_black — linear output floor, >0 lifts blacks for faded film looks;
+    #   agx_target_white — linear output ceiling, <1 fades whites (milky/print top).
     agx_hue_keep: float | None = None
     agx_target_black: float | None = None
+    agx_target_white: float | None = None
 
 
 # Populated by tools/extract_arri_look.py --emit; re-run that script to refresh from local LUTs.
@@ -194,11 +196,11 @@ AGX_LOOK_DEFAULTS: dict[str, dict[str, float]] = {
     "fuji_provia": {"agx_hue_keep": 0.45},
     "fuji_astia": {"agx_hue_keep": 0.42},
     "fuji_reala_ace": {"agx_hue_keep": 0.42},
-    "fuji_classic_chrome": {"agx_hue_keep": 0.38, "agx_target_black": 0.008},
-    "fuji_classic_neg": {"agx_target_black": 0.022},
-    "fuji_pro_neg_std": {"agx_target_black": 0.018},
-    "fuji_eterna": {"agx_hue_keep": 0.35, "agx_target_black": 0.012},
-    "fuji_eterna_bb": {"agx_hue_keep": 0.38, "agx_target_black": 0.016},
+    "fuji_classic_chrome": {"agx_hue_keep": 0.38, "agx_target_black": 0.008, "agx_target_white": 0.92},
+    "fuji_classic_neg": {"agx_target_black": 0.022, "agx_target_white": 0.90},
+    "fuji_pro_neg_std": {"agx_target_black": 0.018, "agx_target_white": 0.93},
+    "fuji_eterna": {"agx_hue_keep": 0.35, "agx_target_black": 0.012, "agx_target_white": 0.88},
+    "fuji_eterna_bb": {"agx_hue_keep": 0.38, "agx_target_black": 0.016, "agx_target_white": 0.85},
     "reveal": {"agx_hue_keep": 0.38},
     "optic_warm_cyan": {"agx_hue_keep": 0.52},
 }
@@ -234,6 +236,10 @@ def agx_plan_overrides(look: str, strength: float = 1.0) -> dict[str, float]:
     black = _look_agx_scalar(look, "agx_target_black")
     if black is not None:
         out["target_black_linear"] = s * float(min(0.15, max(0.0, black)))
+    white = _look_agx_scalar(look, "agx_target_white")
+    if white is not None:
+        target = float(min(1.0, max(0.2, white)))
+        out["target_white_linear"] = 1.0 - s * (1.0 - target)
     return out
 
 

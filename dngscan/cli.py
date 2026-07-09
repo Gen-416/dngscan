@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from ._deps import IMPORT_ERRORS
-from .agx import AGX_PRIMARIES_CHOICES
+from .agx import AGX_PRIMARIES_CLI_CHOICES, resolve_agx_primaries
 from .analysis import analyze
 from .auto_ev import AutoEvResult, compute_auto_ev, is_ev_auto, parse_ev_value, resolve_export_ev
 from .constants import (
@@ -133,15 +133,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument(
         "--agx-primaries",
-        choices=AGX_PRIMARIES_CHOICES,
+        choices=AGX_PRIMARIES_CLI_CHOICES,
         default="base",
-        help="AgX 基调（outset 预设）: base=Blender 原版；punchy=更高纯度恢复（浓郁）；smooth=反转 inset 旋转（柔和、近 sigmoid smooth）",
+        help="AgX 基调（几何原色构造，同 darktable）: base/punchy/muted/smooth；别名 agx_blender_strong、agx_dt_smooth 等",
     )
     parser.add_argument(
         "--tone-core",
         choices=TONE_CORE_CHOICES,
-        default="agx",
-        help="tone 核: agx=现行 AgX inset/outset；lum=亮度域收肩 + clip 驱动褪白；neutral=场景线性直出（无 tone map，对比用）",
+        default="gated",
+        help="tone 核: gated=RAW 门控 luma C1 + AgX 色度路径（默认）；agx=全图 AgX；lum=亮度域收肩；neutral=直出对比",
     )
     parser.add_argument(
         "--lum-norm",
@@ -168,6 +168,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="JPEG 输出色彩空间: srgb=兼容优先；p3=Display P3 并嵌入 ICC",
     )
     args = parser.parse_args(argv)
+    args.agx_primaries = resolve_agx_primaries(args.agx_primaries)
     if args.margin < 0:
         parser.error("--margin must be >= 0")
     if not 1 <= args.jpeg_quality <= 100:

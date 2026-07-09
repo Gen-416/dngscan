@@ -18,10 +18,11 @@ EPS = 1e-6
 def curve_params_from_plan(plan: Any) -> dict[str, float | bool]:
     """Compile the darktable-style C1 curve for one scene plan.
 
-    Pivot EV remains exactly zero. Unlike the former fixed-base Hermite splice, changing
-    white exposure merely changes log-axis normalization and never changes the pivot's
-    18% display output.
+    Endpoints stay scene-derived and EV=0 remains the calibrated mid-gray anchor for
+    exposure. When pivot_ev_offset is non-zero the contrast pivot moves toward the
+    scene body (brightness-preserving shifted pivot + adaptive gamma).
     """
+    pivot = round(float(getattr(plan, "pivot_ev_offset", 0.0)), 3)
     return agx.curve_params(
         round(float(getattr(plan, "black_ev", -10.0)), 3),
         round(float(getattr(plan, "white_ev", 6.5)), 3),
@@ -30,9 +31,10 @@ def curve_params_from_plan(plan: Any) -> dict[str, float | bool]:
         round(float(getattr(plan, "shoulder_power", 3.3)), 3),
         round(float(getattr(plan, "latitude_lo_ev", 0.0)), 3),
         round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
-        pivot_ev_offset=0.0,
+        pivot_ev_offset=pivot,
         target_black_linear=float(getattr(plan, "target_black_linear", 0.0)),
-        keep_pivot_diagonal=False,
+        target_white_linear=float(getattr(plan, "target_white_linear", 1.0)),
+        keep_pivot_diagonal=abs(pivot) > 1e-6,
     )
 
 

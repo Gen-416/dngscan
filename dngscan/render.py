@@ -10,14 +10,14 @@ from . import agx as agx_engine
 from . import display_filter as filter_engine
 from . import lum as lum_engine
 from . import look as look_engine
+from . import gated_drt as gated_drt_engine
 from . import punch as punch_engine
 from . import retreat as retreat_engine
 from . import scene_transform as scene_transform_engine
 from .color import (
-    fit_to_output_gamut, luminance_from_rgb_space, oklab_to_output_rgb, rec2020_to_output,
-    rgb_to_oklab, smoothstep, srgb_encode,
+    encode_display_linear, fit_to_output_gamut, luminance_from_rgb_space, oklab_to_output_rgb,
+    rec2020_to_output, rgb_to_oklab, smoothstep,
 )
-from .constants import AGX_INSET, AGX_OUTSET
 from .models import Analysis, ColorGeometryPlan, RawBundle, RenderPlan, ToneCompressionPlan
 from .tone import build_render_plan, scene_rec2020_to_float
 
@@ -36,12 +36,13 @@ def output_linear_to_u8(
     color_plan: ColorGeometryPlan | None = None,
 ) -> Any:
     return quantize_final_output_linear_to_u8(
-        finalize_output_linear(rgb_linear, output_gamut, look, look_strength, color_plan)
+        finalize_output_linear(rgb_linear, output_gamut, look, look_strength, color_plan),
+        output_gamut,
     )
 
 
-def quantize_final_output_linear_to_u8(rgb_linear: Any) -> Any:
-    """Encode already-finalized display-linear RGB to 8-bit JPEG code values."""
+def quantize_final_output_linear_to_u8(rgb_linear: Any, output_gamut: str = "srgb") -> Any:
+    """Encode finalized display-linear RGB to 8-bit JPEG code values."""
     flat = rgb_linear.reshape(-1, 3)
     out = np.empty((flat.shape[0], 3), dtype=np.uint8)
     rng = np.random.default_rng(0)
@@ -49,7 +50,7 @@ def quantize_final_output_linear_to_u8(rgb_linear: Any) -> Any:
     for start in range(0, flat.shape[0], chunk):
         end = min(start + chunk, flat.shape[0])
         fitted = np.nan_to_num(flat[start:end].astype(np.float32, copy=False), nan=0.0, posinf=1.0, neginf=0.0)
-        encoded = srgb_encode(fitted)
+        encoded = encode_display_linear(fitted, output_gamut)
         out[start:end] = dither_quantize_u8(encoded, rng)
     return out.reshape(rgb_linear.shape[:2] + (3,))
 
@@ -125,7 +126,8 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     filmic curve; the darktable-derived sigmoid supplies the curve shape, while the plan's
     black/white EV keep the log2 window anchored on the exposure we set.
     """
-    mapped = agx_engine.apply_core(rgb_rec2020, plan, AGX_INSET, AGX_OUTSET)
+    inset, outset = agx_engine.formation_matrices(plan)
+    mapped = agx_engine.apply_core(rgb_rec2020, plan, inset, outset)
     # Scene-driven purity compensation (dngscan/punch.py). This wrapper is the single
     # convergence point for the main render AND the auto-EV probe path, so both see the
     # same transform; the look-field extractor calls agx_engine.apply_core directly and
@@ -133,12 +135,19 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     return punch_engine.apply_punch_rec2020(mapped, float(getattr(plan, "punch_strength", 0.0)))
 
 
-def apply_tone_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
+def apply_tone_core(
+    rgb_rec2020: Any,
+    plan: ToneCompressionPlan,
+    color_plan: ColorGeometryPlan | None = None,
+    clip_masks_rgb: Any | None = None,
+) -> Any:
     core = str(getattr(plan, "tone_core", "agx"))
     if core == "neutral":
         return rgb_rec2020.astype(np.float32, copy=False)
     if core == "lum":
         return lum_engine.apply_lum_core(rgb_rec2020, plan)
+    if core == "gated":
+        return gated_drt_engine.apply_gated_core(rgb_rec2020, plan, color_plan, clip_masks_rgb)
     return apply_agx_core(rgb_rec2020, plan)
 
 
@@ -166,7 +175,7 @@ def scene_render_to_display_linear(
     chunk = 1_000_000
     clip_masks = None
     if color_plan is not None and getattr(bundle, "clip_masks", None) is not None:
-        clip_masks = retreat_engine.resize_clip_masks(bundle.clip_masks, (h, w)).reshape(-1, 3)
+        clip_masks = retreat_engine.clip_masks_for_shape(bundle, (h, w)).reshape(-1, 3)
 
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
         bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
@@ -177,13 +186,18 @@ def scene_render_to_display_linear(
         rec = scene_transform_engine.apply_scene_transform_rec2020(
             rec, scene_transform, scene_transform_strength, wb_adapt
         )
-        if clip_masks is not None:
+        if clip_masks is not None and float(color_plan.raw_clip_retreat_strength) > 0.0:
             rec = retreat_engine.apply_clip_retreat_rec2020(
                 rec,
                 clip_masks[start:end],
                 float(color_plan.raw_clip_retreat_strength),
             )
-        mapped_rec = apply_tone_core(rec, tone_plan)
+        mapped_rec = apply_tone_core(
+            rec,
+            tone_plan,
+            color_plan,
+            clip_masks[start:end] if clip_masks is not None else None,
+        )
         if display_filter != "none" and filter_strength > 0.0:
             output_linear = filter_engine.apply_display_filter_rec2020(
                 mapped_rec, output_gamut, display_filter, filter_strength, scene_rec2020=rec
@@ -309,6 +323,7 @@ def render_output_u8(
             lum_norm,
             agx_primaries,
         ),
+        output_gamut,
     )
 
 

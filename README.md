@@ -23,10 +23,15 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
   The AgX formation keeps the calibrated EV=0 pivot while normalizing only scene-derived
   black/white endpoints, so manual EV never reanchors the pivot or turns a night scene
   into middle gray. Clean dark scenes may receive a bounded display-referred brightness
-  lift which preserves true black/white, rather than an exposure gain. `--tone-core agx` keeps the Rec.2020 inset → log2 → sigmoid → outset
-  geometry; `--tone-core lum` applies the same endpoint
-  DRT to a luminance norm, preserving RGB ratios and using a restrained display-white
-  chroma fade. Optional `--agx-primaries {base,punchy,smooth}` reshapes only AgX outset.
+  lift which preserves true black/white, rather than an exposure gain. The default
+  `--tone-core gated` runs a luminance C1 shoulder everywhere and blends in full AgX
+  colour geometry only where RAW CFA evidence, scene highlight EV, gamut pressure, and
+  hue-sector policy permit (skin midtones stay on the luma path). `--tone-core agx`
+  keeps the Rec.2020 inset → log2 → sigmoid → outset geometry on the whole frame;
+  `--tone-core lum` applies the same endpoint DRT to a luminance norm, preserving RGB
+  ratios. AgX primaries are built geometrically (`base`, `punchy`, `muted`, `smooth`);
+  aliases `agx_blender_strong`, `agx_dt_smooth`, etc. resolve to the same presets.
+  DRT working space is always scene-linear Rec.2020; delivery is explicit sRGB or P3.
 - **Pre-AgX scene transform (experimental)** — optional `--scene-transform arri_skin_d55`
   runs in scene-linear Rec.2020 after camera colour interpretation and before AgX,
   blending constrained 3x3 matrices inside skin/cyan chromaticity masks. Off by default.

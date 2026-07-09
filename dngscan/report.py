@@ -198,7 +198,11 @@ def print_report(
         print(f"CSV 指标: {csv_path}")
     if jpeg_path is not None:
         print(f"JPEG 图像: {jpeg_path}")
-        reported_mode = str(getattr(tone_plan, "tone_core", jpeg_mode)) if jpeg_mode == "agx" else jpeg_mode
+        reported_mode = (
+            str(getattr(tone_plan, "tone_core", jpeg_mode))
+            if jpeg_mode in ("agx", "gated")
+            else jpeg_mode
+        )
         wb_label = "日光固定配平" if bundle.wb_mode == "daylight" else "相机白平衡"
         ev_label = "EV auto" if auto_ev is not None else "EV 补偿"
         ev_note = (
@@ -268,7 +272,9 @@ def jpeg_tone_plan_cn(
         plan = tone_plan if tone_plan is not None else plan_for_mode(
             bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=mode
         )
-        label = "AgX" if mode == "agx" else f"lum({plan.lum_norm})"
+        label = {"agx": "AgX", "gated": "Gated", "lum": f"lum({plan.lum_norm})", "neutral": "neutral"}.get(
+            mode, mode
+        )
         extras = []
         if abs(plan.pivot_ev_offset) > 1e-3:
             extras.append(f"pivot={plan.pivot_ev_offset:+.2f}EV")
@@ -276,10 +282,10 @@ def jpeg_tone_plan_cn(
             extras.append(f"hue_keep={plan.hue_keep:.2f}")
         if plan.target_black_linear > 1e-4:
             extras.append(f"lift黑={plan.target_black_linear:.3f}")
-        if plan.outset_purity != 1.0 or plan.outset_rotation_reversal != 0.0:
-            extras.append(
-                f"outset purity={plan.outset_purity:.2f} rot={plan.outset_rotation_reversal:.2f}"
-            )
+        if plan.target_white_linear < 1.0 - 1e-4:
+            extras.append(f"褪白={plan.target_white_linear:.3f}")
+        if getattr(plan, "agx_primaries", "base") != "base":
+            extras.append(f"primaries={plan.agx_primaries}")
         extra_text = ("；" + "，".join(extras)) if extras else ""
         return (
             f"{label} endpoint black={plan.black_ev:.2f}EV / toe接回={plan.toe_start_ev:.2f}EV / "
@@ -310,7 +316,11 @@ def csv_row(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
 ) -> dict[str, Any]:
-    reported_mode = str(getattr(tone_plan, "tone_core", jpeg_mode)) if jpeg_mode == "agx" else jpeg_mode
+    reported_mode = (
+        str(getattr(tone_plan, "tone_core", jpeg_mode))
+        if jpeg_mode in ("agx", "gated")
+        else jpeg_mode
+    )
     row: dict[str, Any] = {
         "file": str(bundle.path),
         "filename": bundle.path.name,

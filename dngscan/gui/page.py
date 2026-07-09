@@ -110,8 +110,9 @@ details.adv .advBody{padding:0 16px 16px}
   <div class="row">
     <div style="flex:1;min-width:160px">
       <label>Tone 核</label>
-      <select id="toneCore" title="agx=现行 inset/outset AgX；lum=亮度域收肩；neutral=场景线性直出（无 tone map，对比 AgX 用）">
-        <option value="agx">AgX · 现行</option>
+      <select id="toneCore" title="gated=RAW 门控 DRT（默认）；agx=全图 AgX；lum=亮度核；neutral=直出对比">
+        <option value="gated" selected>Gated · RAW 门控</option>
+        <option value="agx">AgX · 全图</option>
         <option value="lum">Lum · 亮度核</option>
         <option value="neutral">Neutral · 直出</option>
       </select>
@@ -126,10 +127,11 @@ details.adv .advBody{padding:0 16px 16px}
     </div>
     <div id="agxPrimariesBlock" style="flex:1;min-width:150px">
       <label>AgX 基调</label>
-      <select id="agxPrimaries" title="outset 预设：base=Blender 原版；punchy=更高纯度恢复（浓郁）；smooth=反转 inset 旋转（柔和）">
+      <select id="agxPrimaries" title="AgX 基调：base/punchy/muted 用 Blender inset；smooth 为 darktable sigmoid 预设（另一套 inset/outset）">
         <option value="base">base · 原版</option>
         <option value="punchy">punchy · 浓郁</option>
-        <option value="smooth">smooth · 柔和</option>
+        <option value="muted">muted · 柔和</option>
+        <option value="smooth">smooth · sigmoid</option>
       </select>
     </div>
     <div style="flex:2;min-width:210px">

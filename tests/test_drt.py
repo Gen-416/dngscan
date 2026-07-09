@@ -94,6 +94,23 @@ class LookOverrideC1InteractionTest(unittest.TestCase):
         self.assertLess(float(base[0]), 1e-4)
         self.assertGreater(float(lifted[0]), float(base[0]) + 1e-3)
 
+    def test_pivot_offset_flows_through_c1(self) -> None:
+        plan = _plan()
+        shifted = ToneCompressionPlan(**{**plan.__dict__, "pivot_ev_offset": -2.0})
+        p0 = curve_params_from_plan(plan)
+        p1 = curve_params_from_plan(shifted)
+        self.assertEqual(float(p0["black_ev"]), float(p1["black_ev"]))
+        self.assertNotAlmostEqual(float(p0["slope"]), float(p1["slope"]), places=4)
+
+    def test_target_white_fades_shoulder_in_c1(self) -> None:
+        plan = _plan()
+        faded = ToneCompressionPlan(**{**plan.__dict__, "target_white_linear": 0.85})
+        hi_ev = np.asarray([plan.white_ev - 0.5, plan.white_ev], dtype=np.float32)
+        full = apply_c1_endpoints(hi_ev, plan)
+        milky = apply_c1_endpoints(hi_ev, faded)
+        self.assertGreater(float(full[-1]), float(milky[-1]))
+        self.assertLess(float(milky[-1]), 0.92)
+
     def test_hue_keep_override_changes_agx_core_output(self) -> None:
         from dngscan.agx import AGX_INSET_REC2020, AGX_OUTSET_REC2020, apply_core
 

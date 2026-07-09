@@ -323,7 +323,7 @@ def parse_scene_transform(params: dict) -> tuple[str, float]:
 
 
 def parse_tone_core(params: dict) -> tuple[str, str]:
-    core = str(params.get("toneCore", params.get("tone_core", "agx")))
+    core = str(params.get("toneCore", params.get("tone_core", "gated")))
     norm = str(params.get("lumNorm", params.get("lum_norm", "y")))
     if core not in dg.TONE_CORE_CHOICES:
         raise ValueError(f"未知 tone 核：{core}")
@@ -334,9 +334,10 @@ def parse_tone_core(params: dict) -> tuple[str, str]:
 
 def parse_agx_primaries(params: dict) -> str:
     value = str(params.get("agxPrimaries", params.get("agx_primaries", "base")))
-    if value not in dg.agx_engine.AGX_PRIMARIES_PRESETS:
+    resolved = dg.agx_engine.resolve_agx_primaries(value)
+    if resolved not in dg.agx_engine.AGX_PRIMARIES_PRESETS:
         raise ValueError(f"未知 AgX 基调：{value}")
-    return value
+    return resolved
 
 
 def export_preview_jpeg(

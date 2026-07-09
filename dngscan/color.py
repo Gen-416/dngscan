@@ -68,6 +68,16 @@ def srgb_encode(linear: Any) -> Any:
     return np.where(linear <= 0.0031308, linear * 12.92, 1.055 * np.power(linear, 1.0 / 2.4) - 0.055)
 
 
+def encode_display_linear(linear: Any, output_gamut: str) -> Any:
+    """Display-referred OETF for JPEG delivery (explicit per output gamut).
+
+    Display P3 SDR JPEG uses P3 primaries with the same piecewise transfer as sRGB;
+    the ICC profile tags the container. Both paths stay explicit for testability.
+    """
+    _ = output_gamut_space(output_gamut)
+    return srgb_encode(linear)
+
+
 def srgb_decode(encoded: Any) -> Any:
     v = np.clip(encoded, 0.0, 1.0)
     return np.where(v <= 0.04045, v / 12.92, np.power((v + 0.055) / 1.055, 2.4))

@@ -28,6 +28,21 @@ def resize_clip_masks(clip_masks: Any, shape: tuple[int, int]) -> Any:
     return np.clip(np.stack(channels, axis=2), 0.0, 1.0)
 
 
+def clip_masks_for_shape(bundle: Any, shape: tuple[int, int]) -> Any:
+    """Resize bundle clip masks once per render shape (cached on the bundle)."""
+    masks = getattr(bundle, "clip_masks", None)
+    if masks is None:
+        return None
+    cache_shape = getattr(bundle, "_clip_masks_cache_shape", None)
+    cached = getattr(bundle, "_clip_masks_resized", None)
+    if cache_shape == shape and cached is not None:
+        return cached
+    resized = resize_clip_masks(masks, shape)
+    bundle._clip_masks_cache_shape = shape
+    bundle._clip_masks_resized = resized
+    return resized
+
+
 def retreat_strength_from_masks(masks_rgb: Any) -> Any:
     """Continuous R/G/B clip classing: G-only < single R/B < multi-channel clip."""
     masks = np.clip(np.asarray(masks_rgb, dtype=np.float32), 0.0, 1.0)

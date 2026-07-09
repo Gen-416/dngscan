@@ -48,6 +48,19 @@ def wb_postprocess_kwargs(wb_mode: str, daylight_wb: list[float] | None) -> dict
     return {"use_camera_wb": True}
 
 
+def scene_rec2020_to_xyz_render(scene_rec2020: Any, scene_scale: float) -> Any:
+    """Derive XYZ render buffer from a single Rec.2020 demosaic (same geometry as scene)."""
+    from .color import rec2020_to_xyz
+
+    scene = np.asarray(scene_rec2020)
+    if np.issubdtype(scene.dtype, np.integer):
+        linear = scene.astype(np.float64).reshape(-1, 3) / float(scene_scale)
+        xyz = rec2020_to_xyz(linear).reshape(scene.shape)
+        return (np.clip(xyz, 0.0, 1.0) * float(scene_scale)).astype(np.uint16)
+    xyz = rec2020_to_xyz(scene.reshape(-1, 3)).reshape(scene.shape)
+    return xyz.astype(scene.dtype, copy=False)
+
+
 def render_to_xyz(
     raw: Any,
     highlight_mode_name: str = "clip",
@@ -302,24 +315,18 @@ def load_raw(
                 raw_pattern = np.asarray(raw_pattern_arr).astype(int).tolist()
 
             demosaic_alg = resolve_demosaic_algorithm(raw, demosaic)
-            xyz_render = render_to_xyz(raw, scene_highlight_mode, demosaic_alg, scene_half_size, wb_kwargs)
-            if xyz_render.ndim != 3 or xyz_render.shape[2] < 3:
-                raise RuntimeError("XYZ render did not produce a 3-channel image")
-
             scene_rec2020_render = render_to_scene_rec2020(
                 raw, scene_highlight_mode, scene_half_size, demosaic_alg, wb_kwargs
             )
             if scene_rec2020_render.ndim != 3 or scene_rec2020_render.shape[2] < 3:
                 raise RuntimeError("scene Rec.2020 render did not produce a 3-channel image")
 
-            if np.issubdtype(xyz_render.dtype, np.integer):
-                render_scale = float(np.iinfo(xyz_render.dtype).max)
-            else:
-                render_scale = 1.0
             if np.issubdtype(scene_rec2020_render.dtype, np.integer):
                 scene_scale = float(np.iinfo(scene_rec2020_render.dtype).max)
             else:
                 scene_scale = 1.0
+            xyz_render = scene_rec2020_to_xyz_render(scene_rec2020_render, scene_scale)
+            render_scale = scene_scale
 
             black_attr = getattr(raw, "black_level_per_channel", None)
             wb_attr = getattr(raw, "camera_whitebalance", None)

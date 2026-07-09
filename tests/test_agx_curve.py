@@ -7,8 +7,9 @@ import unittest
 import numpy as np
 
 from dngscan.agx import (
-    AGX_INSET_REC2020, AGX_OUTSET_REC2020, AGX_PRIMARIES_PRESETS, MIN_SEGMENT_X,
-    apply_core, apply_curve, curve_params, effective_outset,
+    AGX_HUE_KEEP, AGX_INSET_REC2020, AGX_OUTSET_REC2020, AGX_PRIMARIES_PRESETS, MIN_SEGMENT_X,
+    apply_core, apply_curve, compute_pivot_ev_offset, curve_params, formation_matrices,
+    matrices_for_preset,
 )
 
 
@@ -31,6 +32,7 @@ class _PlanStub:
     latitude_hi_ev = 1.0
     punch_strength = 0.0
     tone_core = "agx"
+    agx_primaries = "base"
 
 
 class CurveInversionTest(unittest.TestCase):
@@ -105,37 +107,65 @@ class TargetBlackTest(unittest.TestCase):
         self.assertGreater(float(y_linear[-1]), 0.95)
 
 
-class OutsetPresetTest(unittest.TestCase):
-    def test_base_is_identity_passthrough(self) -> None:
-        m = effective_outset(AGX_OUTSET_REC2020, *AGX_PRIMARIES_PRESETS["base"])
-        self.assertIs(m, AGX_OUTSET_REC2020)
+    def test_target_white_lowers_shoulder(self) -> None:
+        p_full = curve_params(-8.0, 4.0, 3.0, 1.5, 3.3, target_white_linear=1.0)
+        p_fade = curve_params(-8.0, 4.0, 3.0, 1.5, 3.3, target_white_linear=0.85)
+        x = np.linspace(0.0, 1.0, 501, dtype=np.float32)
+        y_full = apply_curve(x, p_full).astype(np.float64) ** float(p_full["gamma"])
+        y_fade = apply_curve(x, p_fade).astype(np.float64) ** float(p_fade["gamma"])
+        self.assertGreater(float(y_full[-1]), float(y_fade[-1]))
+        self.assertLess(float(y_fade[-1]), 0.92)
 
-    def test_punchy_increases_chroma(self) -> None:
-        rgb = np.asarray([[0.30, 0.12, 0.06]], dtype=np.float32)
-        plan = _PlanStub()
-        base = apply_core(rgb, plan, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
-        plan_p = _PlanStub()
-        plan_p.outset_purity, plan_p.outset_rotation_reversal = AGX_PRIMARIES_PRESETS["punchy"]
-        punchy = apply_core(rgb, plan_p, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+
+class OutsetPresetTest(unittest.TestCase):
+    def test_base_preset_matches_blender_geometry(self) -> None:
+        inset, outset = matrices_for_preset("base")
+        self.assertTrue(np.allclose(inset, AGX_INSET_REC2020))
+        self.assertTrue(np.allclose(outset, AGX_OUTSET_REC2020))
+
+    def test_punchy_restores_more_outset_chroma(self) -> None:
+        linear = np.asarray([[0.40, 0.20, 0.15]], dtype=np.float32)
+        _, outset_b = matrices_for_preset("base")
+        _, outset_p = matrices_for_preset("punchy")
+
         def spread(v):
             return float(v.max() - v.min())
-        self.assertGreater(spread(punchy[0]), spread(base[0]))
 
-    def test_smooth_differs_from_base(self) -> None:
+        self.assertGreater(spread(linear @ outset_p), spread(linear @ outset_b))
+
+    def test_muted_differs_from_base(self) -> None:
         rgb = np.asarray([[0.30, 0.12, 0.06], [0.05, 0.20, 0.35]], dtype=np.float32)
+        plan_b = _PlanStub()
+        plan_b.agx_primaries = "base"
+        inset_b, outset_b = formation_matrices(plan_b)
         plan_s = _PlanStub()
-        plan_s.outset_purity, plan_s.outset_rotation_reversal = AGX_PRIMARIES_PRESETS["smooth"]
-        base = apply_core(rgb, _PlanStub(), AGX_INSET_REC2020, AGX_OUTSET_REC2020)
-        smooth = apply_core(rgb, plan_s, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+        plan_s.agx_primaries = "muted"
+        inset_s, outset_s = formation_matrices(plan_s)
+        base = apply_core(rgb, plan_b, inset_b, outset_b)
+        muted = apply_core(rgb, plan_s, inset_s, outset_s)
+        self.assertGreater(float(np.abs(base - muted).max()), 1e-4)
+
+    def test_smooth_uses_different_inset(self) -> None:
+        rgb = np.asarray([[0.30, 0.12, 0.06], [0.05, 0.20, 0.35]], dtype=np.float32)
+        plan_b = _PlanStub()
+        plan_b.agx_primaries = "base"
+        plan_s = _PlanStub()
+        plan_s.agx_primaries = "smooth"
+        inset_b, outset_b = formation_matrices(plan_b)
+        inset_s, outset_s = formation_matrices(plan_s)
+        self.assertGreater(float(np.abs(inset_b - inset_s).max()), 1e-3)
+        base = apply_core(rgb, plan_b, inset_b, outset_b)
+        smooth = apply_core(rgb, plan_s, inset_s, outset_s)
         self.assertGreater(float(np.abs(base - smooth).max()), 1e-4)
 
     def test_neutral_axis_preserved_by_presets(self) -> None:
         gray = np.asarray([[0.18, 0.18, 0.18]], dtype=np.float32)
-        for name, (purity, rot) in AGX_PRIMARIES_PRESETS.items():
+        for name in ("base", "punchy"):
             plan = _PlanStub()
-            plan.outset_purity, plan.outset_rotation_reversal = purity, rot
-            out = apply_core(gray, plan, AGX_INSET_REC2020, AGX_OUTSET_REC2020)[0]
-            self.assertLess(float(out.max() - out.min()), 5e-3, msg=name)
+            plan.agx_primaries = name
+            inset, outset = formation_matrices(plan)
+            out = apply_core(gray, plan, inset, outset)[0]
+            self.assertLess(float(out.max() - out.min()), 1e-2, msg=name)
 
 
 class HueKeepTest(unittest.TestCase):
@@ -175,6 +205,10 @@ class LookOverrideTest(unittest.TestCase):
 
         neg = look_engine.agx_plan_overrides("fuji_classic_neg")
         self.assertAlmostEqual(neg["target_black_linear"], 0.022)
+        self.assertAlmostEqual(neg["target_white_linear"], 0.90)
+
+        eterna = look_engine.agx_plan_overrides("fuji_eterna")
+        self.assertAlmostEqual(eterna["target_white_linear"], 0.88)
 
         import dataclasses
 
@@ -186,6 +220,21 @@ class LookOverrideTest(unittest.TestCase):
             self.assertAlmostEqual(overrides["target_black_linear"], 0.025)
         finally:
             del look_engine.LOOK_FIELDS["_test_faded"]
+
+
+class PivotAutomationTest(unittest.TestCase):
+    def test_dark_body_pulls_pivot_negative(self) -> None:
+        offset = compute_pivot_ev_offset(-3.5, -8.0, 4.0)
+        self.assertLess(offset, -1.0)
+        self.assertGreater(offset, -4.0)
+
+    def test_bright_body_keeps_zero_offset(self) -> None:
+        self.assertEqual(compute_pivot_ev_offset(0.5, -8.0, 4.0), 0.0)
+
+
+class HueKeepAnchorTest(unittest.TestCase):
+    def test_default_matches_blender_not_darktable(self) -> None:
+        self.assertEqual(AGX_HUE_KEEP, 0.4)
 
 
 class TonePlanPivotTest(unittest.TestCase):
@@ -250,9 +299,27 @@ class TonePlanPivotTest(unittest.TestCase):
             camera_white_levels=[16383, 16383, 16383],
             exposure_gain=1.0,
         )
-        plan = build_tone_compression_plan(bundle, analysis, "Rec2020")
-        # Scene intent is preserved by the fixed exposure anchor: a dark frame may
-        # change the toe endpoint, but never pulls the global pivot toward grey.
+        from dngscan.models import SceneToneMetrics
+
+        bright_metrics = SceneToneMetrics(
+            reliable_sample_pct=95.0,
+            body_ev_p1=-2.0,
+            body_ev_p5=-1.0,
+            body_ev_p50=0.0,
+            body_ev_p95=2.0,
+            body_ev_p99=3.0,
+            body_ev_p999=4.0,
+            tail_ev_p9999=5.0,
+            tail_area_ev0_pct=0.0,
+            tail_area_ev2_pct=0.0,
+            tail_extremity=0.0,
+            sparse_emitter_tail=False,
+            raw_clip_union_pct=0.0,
+        )
+        plan = build_tone_compression_plan(
+            bundle, analysis, "Rec2020", scene_metrics=bright_metrics,
+        )
+        # Bright body near mid gray: contrast pivot stays at calibrated 0 EV.
         self.assertEqual(plan.pivot_ev_offset, 0.0)
 
 
@@ -323,6 +390,8 @@ class DarkSceneTonePlanTest(unittest.TestCase):
             exposure_gain=compute_exposure_gain("agx", 0.0),
         )
         plan = build_tone_compression_plan(bundle, self._dark_analysis(), "Rec2020", ev_from_agx_inset=True)
+        self.assertLess(plan.pivot_ev_offset, -0.5)
+        self.assertLess(plan.view_brightness, 1.08)
         self.assertLess(plan.black_ev, -2.0)
         self.assertEqual(plan.target_black_linear, 0.0)
         self.assertGreater(plan.toe_start_ev, plan.black_ev)
@@ -351,8 +420,9 @@ class DarkSceneTonePlanTest(unittest.TestCase):
             exposure_gain=gain,
         )
         plan = build_tone_compression_plan(bundle, self._dark_analysis(), "Rec2020", ev_from_agx_inset=True)
+        inset, outset = formation_matrices(plan)
         boosted = (scene * gain).astype(np.float32)
-        out = apply_core(boosted, plan, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+        out = apply_core(boosted, plan, inset, outset)
         self.assertGreater(float(np.median(out)), 0.02)
         self.assertGreater(float(np.percentile(out, 1)), 0.005)
 

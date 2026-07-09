@@ -36,6 +36,20 @@ class RawBundle:
     # Shape is (H, W, 3), aligned to scene_rec2020_render when scene_half_size=True.
     # Full-resolution renders resize this mask to the render buffer on demand.
     clip_masks: Any | None = None
+    # Lazily filled by retreat.clip_masks_for_shape when a render resizes masks.
+    _clip_masks_cache_shape: tuple[int, int] | None = None
+    _clip_masks_resized: Any | None = None
+    # Optional RAW-gated guidance maps (headroom, clip class, SNR confidence).
+    raw_guidance: Any | None = None
+
+
+@dataclass
+class RawGuidanceMaps:
+    """Per-pixel RAW permission rasters aligned to clip_masks resolution."""
+
+    headroom: Any
+    clip_class: Any
+    snr_confidence: Any
 
 
 @dataclass
@@ -119,15 +133,16 @@ class ToneCompressionPlan:
     # contrast. Dark scenes pull it toward the median so the subject gets the steep part
     # of the curve; output brightness at the pivot is preserved by the curve builder.
     pivot_ev_offset: float = 0.0
-    # Fraction of the per-channel AgX hue skew kept after the curve (Blender default 0.4).
-    # Chromatic looks may override (e.g. sunsets benefit from keeping more skew).
+    # Fraction of per-channel AgX hue skew kept after the curve. Default 0.4 follows Blender
+    # (darktable defaults to 0.6); see AGX_HUE_KEEP in agx.py.
     hue_keep: float = 0.4
     # Linear output floor of the curve; >0 lifts blacks for faded film looks.
     target_black_linear: float = 0.0
-    # AgX primaries scalars deriving the effective outset (see agx.AGX_PRIMARIES_PRESETS):
-    # purity 1 + reversal 0 reproduces Blender's outset exactly.
-    outset_purity: float = 1.0
-    outset_rotation_reversal: float = 0.0
+    # Linear output ceiling of the curve (darktable target_white); <1 converges the
+    # shoulder to a faded, sub-display-white top for milky/print-style looks.
+    target_white_linear: float = 1.0
+    # AgX primaries preset (base/punchy/muted/smooth); matrices built geometrically in agx.py.
+    agx_primaries: str = "base"
     # The endpoint-normalized C1 DRT keeps the calibrated scene EV=0 pivot fixed while
     # re-scaling only its black/white bounds. These values share that scene-relative EV
     # domain; `shoulder_start_ev` is the requested linear latitude above the pivot.
@@ -178,6 +193,13 @@ class ColorGeometryPlan:
     # A restrained display-side safety valve for the luminance core. AgX already has
     # its own inset/outset path toward white, so this is zero for the AgX core.
     display_highlight_chroma_retreat: float = 0.0
+    # RAW-gated DRT (tone_core=gated): master scale on color-path blend weight.
+    color_path_master: float = 1.0
+    gated_midtone_protect: float = 0.92
+    color_path_highlight_ev_lo: float = 0.25
+    color_path_highlight_ev_hi: float = 2.75
+    # Scene EV below which SNR is too low to open the color path on scene evidence alone.
+    gated_noise_ev_floor: float = -12.0
 
 
 @dataclass(frozen=True)

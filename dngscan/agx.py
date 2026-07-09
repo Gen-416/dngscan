@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
+import math
 from functools import lru_cache
-from typing import Any
+from typing import Any, NamedTuple
 
 try:
     import numpy as np
@@ -13,33 +14,19 @@ except Exception:  # pragma: no cover - handled by dngscan.core import checks
 
 EPS = 1e-12
 
-# Blender AgX (EaryChow) Rec.2020-native inset/outset, computed at float64 precision by
-# running the reference generation expressions from EaryChow/AgX_LUT_Gen
-# (AgXBaseRec2020.py + working_space.py via colour-science):
-#   inset:  primaries_rotate=[2.13976149, -1.22827335, -3.05174246] degrees,
-#           primaries_scale=[0.32965205, 0.28051336, 0.12475368]
-#   outset: no rotation, primaries_scale=[0.32317438, 0.28325605, 0.0374326]
-# Cross-checked against the matrix printed in the EaryChow/AgX README. The rotation baked
-# into the inset is AgX's "flourish" (e.g. red drifts toward orange, countering Abney);
-# the outset deliberately does NOT invert it, so AGX_OUTSET_REC2020 != inv(AGX_INSET_REC2020).
-AGX_INSET_REC2020 = (
-    np.array(  # type: ignore[union-attr]
-        [
-            [0.8566271562887795, 0.0951212454025350, 0.0482515983086858],
-            [0.1373189722835516, 0.7612419870090806, 0.1014390407073675],
-            [0.1118982080451796, 0.0767994145625176, 0.8113023773923032],
-        ],
-        dtype=np.float64,
-    )
-    if np is not None
-    else None
+# Rec.2020 work-profile chromaticities (dngscan's pipe working space = darktable work profile).
+_WORK_PRIMARIES_XY = (
+    (0.708, 0.292),
+    (0.170, 0.797),
+    (0.131, 0.046),
 )
-AGX_OUTSET_REC2020 = (
-    np.array(  # type: ignore[union-attr]
+_WORK_WHITE_XY = (0.3127, 0.3290)
+_XYZ_TO_REC2020 = (
+    np.array(
         [
-            [1.1271005696301188, -0.1106066385782607, -0.0164939310518590],
-            [-0.1413297544213532, 1.1578236854732127, -0.0164939310518590],
-            [-0.1413297544213531, -0.1106066385782606, 1.2519363929996135],
+            [1.7167, -0.3557, -0.2534],
+            [-0.6667, 1.6165, 0.0158],
+            [0.0176, -0.0428, 0.9421],
         ],
         dtype=np.float64,
     )
@@ -47,10 +34,9 @@ AGX_OUTSET_REC2020 = (
     else None
 )
 
-# Fraction of the per-channel hue shift kept after the curve (Blender AgX mix_percent=40:
-# lerp 60% of the hue back toward the pre-formation angle so the deliberate primaries
-# rotation is not amplified by per-channel "notorious six" skew). Default; per-plan/look
-# overridable via ToneCompressionPlan.hue_keep.
+# Fraction of the per-channel hue shift kept after the curve (Blender AgX mix_percent=40).
+# darktable defaults preserve_hue=0.6; we follow Blender (0.4) so more notorious-six skew
+# is allowed — a deliberate taste anchor, not an oversight.
 AGX_HUE_KEEP = 0.4
 
 # Internal y-axis encoding the curve was originally parameterized with. Kept as the
@@ -58,23 +44,187 @@ AGX_HUE_KEEP = 0.4
 # the pivot toward the diagonal (darktable's "keep the pivot on the diagonal").
 DEFAULT_CURVE_GAMMA = 2.2
 
-# Minimum x-run reserved for the toe and shoulder segments. Latitude may never push a
-# transition closer than this to the log window edge; previously the shoulder could
-# collapse to ~zero length (transition_x clamped to 1-EPS while transition_y was
-# computed from the unclamped latitude), leaving whites unreachable except through a
-# near-discontinuous fallback.
+# Minimum x-run reserved for toe/shoulder segments. darktable allows latitude to collapse
+# toward ε and warns in the GUI; our headless pipeline forbids that mathematically.
 MIN_SEGMENT_X = 0.06
 
-# AgX primaries presets (darktable-inspired): scalars deriving the effective outset.
-#   purity  — mix between identity and the purity-restoring outset (>1 extrapolates);
-#   rotation_reversal — mix of the outset toward inv(inset), undoing the inset's
-#   deliberate hue rotation (darktable's "master rotation reversal").
-AGX_PRIMARIES_PRESETS: dict[str, tuple[float, float]] = {
-    "base": (1.0, 0.0),
-    "punchy": (1.25, 0.0),
-    "smooth": (0.85, 1.0),
+
+class PrimariesGeometry(NamedTuple):
+    """darktable-style per-channel inset/outset geometry on the work profile."""
+
+    inset: tuple[float, float, float]
+    rotation: tuple[float, float, float]
+    outset: tuple[float, float, float]
+    unrotation: tuple[float, float, float]
+    master_outset_ratio: float
+    master_unrotation_ratio: float
+
+
+# darktable _set_blenderlike_primaries on Rec.2020 (agx.c).
+_BLENDER_GEOMETRY = PrimariesGeometry(
+    inset=(0.29462451, 0.25861925, 0.14641371),
+    rotation=(0.03540329, -0.02108586, -0.06305724),
+    outset=(0.290776401758, 0.263155400753, 0.045810721815),
+    unrotation=(0.03540329, -0.02108586, -0.06305724),
+    master_outset_ratio=1.0,
+    master_unrotation_ratio=0.0,
+)
+
+# punchy: lower master_outset_ratio restores more purity on the outward path (geometric
+# analogue of a >1 purity scalar; stays on spectral locus rays, unlike matrix lerp).
+_PUNCHY_GEOMETRY = PrimariesGeometry(
+    inset=_BLENDER_GEOMETRY.inset,
+    rotation=_BLENDER_GEOMETRY.rotation,
+    outset=_BLENDER_GEOMETRY.outset,
+    unrotation=_BLENDER_GEOMETRY.unrotation,
+    master_outset_ratio=0.5,
+    master_unrotation_ratio=0.0,
+)
+
+_MUTED_GEOMETRY = PrimariesGeometry(
+    inset=_BLENDER_GEOMETRY.inset,
+    rotation=_BLENDER_GEOMETRY.rotation,
+    outset=_BLENDER_GEOMETRY.outset,
+    unrotation=_BLENDER_GEOMETRY.unrotation,
+    master_outset_ratio=1.0,
+    master_unrotation_ratio=1.0,
+)
+
+# darktable sigmoid smooth on the pipe work profile (_set_smooth_primaries).
+_SMOOTH_GEOMETRY = PrimariesGeometry(
+    inset=(0.1, 0.1, 0.15),
+    rotation=(math.radians(2.0), math.radians(-1.0), math.radians(-3.0)),
+    outset=(0.1, 0.1, 0.15),
+    unrotation=(math.radians(2.0), math.radians(-1.0), math.radians(-3.0)),
+    master_outset_ratio=0.0,
+    master_unrotation_ratio=1.0,
+)
+
+AGX_PRIMARIES_PRESETS: dict[str, PrimariesGeometry] = {
+    "base": _BLENDER_GEOMETRY,
+    "punchy": _PUNCHY_GEOMETRY,
+    "muted": _MUTED_GEOMETRY,
+    "smooth": _SMOOTH_GEOMETRY,
 }
 AGX_PRIMARIES_CHOICES = tuple(AGX_PRIMARIES_PRESETS.keys())
+# Human-readable aliases (CLI/GUI accept these; they resolve to canonical preset keys).
+AGX_PRIMARIES_ALIASES = {
+    "agx_blender_strong": "base",
+    "agx_blender_punchy": "punchy",
+    "agx_blender_soft_outset": "muted",
+    "agx_dt_smooth": "smooth",
+}
+AGX_PRIMARIES_CLI_CHOICES = tuple(AGX_PRIMARIES_PRESETS.keys()) + tuple(AGX_PRIMARIES_ALIASES.keys())
+
+
+def resolve_agx_primaries(name: str) -> str:
+    """Map CLI/GUI preset name (including aliases) to a canonical AgX primaries key."""
+    key = (name or "base").strip().lower()
+    resolved = AGX_PRIMARIES_ALIASES.get(key, key)
+    if resolved not in AGX_PRIMARIES_PRESETS:
+        return "base"
+    return resolved
+
+
+def _det2(a: float, b: float, c: float, d: float) -> float:
+    return a * d - b * c
+
+
+def _intersect_line_segments(
+    x1: float, y1: float, x2: float, y2: float, x3: float, y3: float, x4: float, y4: float,
+) -> float:
+    den = _det2(x1 - x2, x3 - x4, y1 - y2, y3 - y4)
+    if abs(den) < 1e-10:
+        return float("inf")
+    t = _det2(x1 - x3, x3 - x4, y1 - y3, y3 - y4) / den
+    return t if t >= 0.0 else float("inf")
+
+
+def _find_distance_to_edge(cos_angle: float, sin_angle: float) -> float:
+    wx, wy = _WORK_WHITE_XY
+    x2, y2 = wx + cos_angle, wy + sin_angle
+    best = float("inf")
+    for i in range(3):
+        j = (i + 1) % 3
+        x3, y3 = _WORK_PRIMARIES_XY[i]
+        x4, y4 = _WORK_PRIMARIES_XY[j]
+        best = min(best, _intersect_line_segments(wx, wy, x2, y2, x3, y3, x4, y4))
+    return best
+
+
+def _xy_to_xyz(xy: tuple[float, float]) -> Any:
+    x, y = xy
+    yy = 1.0
+    return np.array([x * yy / y, yy, (1.0 - x - y) * yy / y], dtype=np.float64)
+
+
+def _rotate_and_scale_primary(index: int, scaling: float, rotation_rad: float) -> tuple[float, float]:
+    px, py = _WORK_PRIMARIES_XY[index]
+    wx, wy = _WORK_WHITE_XY
+    angle = math.atan2(py - wy, px - wx) + rotation_rad
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    dist = _find_distance_to_edge(cos_a, sin_a)
+    return (wx + scaling * dist * cos_a, wy + scaling * dist * sin_a)
+
+
+def _rgb_to_xyz_from_primaries_xy(primaries_xy: tuple[tuple[float, float], ...]) -> Any:
+    columns = [_xy_to_xyz(xy) for xy in primaries_xy]
+    prim = np.column_stack(columns)
+    white = _xy_to_xyz(_WORK_WHITE_XY)
+    scale = np.linalg.solve(prim, white)
+    return prim @ np.diag(scale)
+
+
+@lru_cache(maxsize=16)
+def _formation_matrices_cached(spec: PrimariesGeometry) -> tuple[Any, Any]:
+    """Port of darktable _create_matrices (custom_primaries.c + agx.c)."""
+    inset_xy = tuple(
+        _rotate_and_scale_primary(i, 1.0 - spec.inset[i], spec.rotation[i]) for i in range(3)
+    )
+    inset = _rgb_to_xyz_from_primaries_xy(inset_xy) @ _XYZ_TO_REC2020
+    outset_xy = tuple(
+        _rotate_and_scale_primary(
+            i,
+            1.0 - spec.master_outset_ratio * spec.outset[i],
+            spec.master_unrotation_ratio * spec.unrotation[i],
+        )
+        for i in range(3)
+    )
+    tmp = _rgb_to_xyz_from_primaries_xy(outset_xy) @ _XYZ_TO_REC2020
+    return inset, np.linalg.inv(tmp)
+
+
+def matrices_for_preset(preset_name: str) -> tuple[Any, Any]:
+    spec = AGX_PRIMARIES_PRESETS.get(preset_name, _BLENDER_GEOMETRY)
+    return _formation_matrices_cached(spec)
+
+
+# Blender-base matrices (geometric source of truth; ~0.04 from legacy EaryChow constants under D65).
+AGX_INSET_REC2020, AGX_OUTSET_REC2020 = (
+    matrices_for_preset("base") if np is not None else (None, None)
+)
+
+
+def formation_matrices(plan: Any) -> tuple[Any, Any]:
+    """Inset/outset for one tone plan's primaries preset."""
+    return matrices_for_preset(str(getattr(plan, "agx_primaries", "base")))
+
+
+def compute_pivot_ev_offset(body_ev_p50: float, black_ev: float, white_ev: float) -> float:
+    """Move max-contrast pivot toward the scene body (darktable picker workflow).
+
+    Negative body_ev_p50 pulls the steep part of the curve onto the subject without
+  changing exposure gain; brightness at the pivot is preserved by curve_params.
+    """
+    if body_ev_p50 >= -0.25:
+        return 0.0
+    weight = min(1.0, max(0.0, (-0.25 - body_ev_p50) / 3.75))
+    offset = body_ev_p50 * weight
+    range_ev = max(1.0, white_ev - black_ev)
+    margin = MIN_SEGMENT_X * range_ev
+    lo = black_ev + margin
+    hi = min(0.0, white_ev - margin)
+    return max(lo, min(hi, offset))
 
 
 def _clamp_float(value: float, low: float, high: float) -> float:
@@ -101,6 +251,7 @@ def _build_curve_params(
     pivot_y_linear: float,
     gamma: float,
     target_black_linear: float,
+    target_white_linear: float = 1.0,
 ) -> dict[str, float | bool]:
     # Derived from darktable's GPLv3 AgX implementation:
     # https://github.com/darktable-org/darktable/blob/master/src/iop/agx.c
@@ -110,7 +261,9 @@ def _build_curve_params(
     pivot_x = _clamp_float(pivot_x, EPS, 1.0 - EPS)
     pivot_y = max(EPS, pivot_y_linear) ** (1.0 / gamma)
     target_black = _clamp_float(target_black_linear, 0.0, 0.15) ** (1.0 / gamma) if target_black_linear > 0.0 else 0.0
-    target_white = 1.0
+    # darktable's curve_target_display_white_ratio: <1 makes the shoulder converge to a
+    # faded (sub-display-white) top instead of pure white. Encoded via 1/gamma like black.
+    target_white = _clamp_float(target_white_linear, 0.2, 1.0) ** (1.0 / gamma)
     range_adjusted_slope = contrast * (range_ev / 16.5)
     # Contrast compensation (darktable): keep the pivot's slope in LINEAR output terms
     # constant when gamma / pivot_y move, so "contrast" means the same thing whether the
@@ -131,7 +284,7 @@ def _build_curve_params(
     lat_hi_x = _clamp_float(max(0.0, latitude_hi_ev) / range_ev, 0.0, max(0.0, 1.0 - pivot_x - MIN_SEGMENT_X))
     if slope > EPS:
         lat_lo_x = min(lat_lo_x, max(0.0, (pivot_y - target_black - 0.02) / slope))
-        lat_hi_x = min(lat_hi_x, max(0.0, (0.95 - pivot_y) / slope))
+        lat_hi_x = min(lat_hi_x, max(0.0, (min(0.95, target_white) - 0.02 - pivot_y) / slope))
 
     toe_transition_x = max(EPS, pivot_x - lat_lo_x)
     toe_transition_y = max(EPS, pivot_y - slope * lat_lo_x)
@@ -155,7 +308,7 @@ def _build_curve_params(
     toe_fallback_coefficient = toe_dy / max(EPS, toe_length_x) ** toe_fallback_power
 
     shoulder_transition_x = min(1.0 - MIN_SEGMENT_X, pivot_x + lat_hi_x)
-    shoulder_transition_y = min(1.0 - EPS, pivot_y + slope * (shoulder_transition_x - pivot_x))
+    shoulder_transition_y = min(target_white - EPS, pivot_y + slope * (shoulder_transition_x - pivot_x))
     shoulder_scale = scale(1.0, target_white, shoulder_transition_x, shoulder_transition_y, slope, shoulder_power)
     shoulder_length_x = 1.0 - shoulder_transition_x
     shoulder_dy = max(EPS, target_white - shoulder_transition_y)
@@ -199,6 +352,7 @@ def curve_params(
     latitude_hi_ev: float = 0.0,
     pivot_ev_offset: float = 0.0,
     target_black_linear: float = 0.0,
+    target_white_linear: float = 1.0,
     keep_pivot_diagonal: bool = True,
     curve_gamma: float = DEFAULT_CURVE_GAMMA,
 ) -> dict[str, float | bool]:
@@ -226,7 +380,7 @@ def curve_params(
         reference = _build_curve_params(
             black_ev, white_ev, contrast, toe_power, shoulder_power,
             latitude_lo_ev, latitude_hi_ev,
-            pivot_x0, 0.18, DEFAULT_CURVE_GAMMA, target_black_linear,
+            pivot_x0, 0.18, DEFAULT_CURVE_GAMMA, target_black_linear, target_white_linear,
         )
         y_encoded = float(apply_curve(np.asarray([pivot_x], dtype=np.float32), reference)[0])
         pivot_y_linear = _clamp_float(y_encoded ** DEFAULT_CURVE_GAMMA, 0.02, 0.50)
@@ -246,7 +400,7 @@ def curve_params(
     return _build_curve_params(
         black_ev, white_ev, contrast, toe_power, shoulder_power,
         latitude_lo_ev, latitude_hi_ev,
-        pivot_x, pivot_y_linear, gamma, target_black_linear,
+        pivot_x, pivot_y_linear, gamma, target_black_linear, target_white_linear,
     )
 
 
@@ -383,29 +537,6 @@ def _mix_hue(rgb_linear: Any, pre_hue: Any, keep: float) -> Any:
     return _hsv_to_rgb(hsv)
 
 
-@lru_cache(maxsize=16)
-def _effective_outset_key(purity: float, rotation_reversal: float) -> Any:
-    """Effective outset from two scalars (darktable-inspired primaries controls).
-
-    rotation_reversal blends the Blender outset toward inv(inset), undoing the inset's
-    deliberate hue rotation; purity blends the result between identity (no purity
-    restoration, muted) and full strength (>1 extrapolates, punchier)."""
-    base = np.asarray(AGX_OUTSET_REC2020, dtype=np.float64)
-    if rotation_reversal != 0.0:
-        inv_inset = np.linalg.inv(np.asarray(AGX_INSET_REC2020, dtype=np.float64))
-        base = base + float(rotation_reversal) * (inv_inset - base)
-    if purity != 1.0:
-        identity = np.eye(3, dtype=np.float64)
-        base = identity + float(purity) * (base - identity)
-    return base
-
-
-def effective_outset(outset_matrix: Any, purity: float = 1.0, rotation_reversal: float = 0.0) -> Any:
-    if purity == 1.0 and rotation_reversal == 0.0:
-        return outset_matrix
-    return _effective_outset_key(round(float(purity), 4), round(float(rotation_reversal), 4))
-
-
 def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: Any) -> Any:
     """AgX per Blender/EaryChow reference order, in Rec.2020 working space:
 
@@ -415,15 +546,11 @@ def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: An
     Deviations from the reference, all deliberate: the endpoint-normalized log2 window
     and C1 sigmoid parameters come from the scene plan while EV=0 remains the calibrated
     mid-gray pivot; the scene DRT uses darktable's default fixed internal gamma, whereas
-    the legacy branch retains optional diagonal-pivot gamma; and the outset can be
-    reshaped by the plan's purity / rotation-reversal scalars (base matches Blender).
+    the legacy branch retains optional diagonal-pivot gamma. Call formation_matrices(plan)
+    for preset-specific inset/outset before invoking this function.
     """
     hue_keep = _clamp_float(float(getattr(plan, "hue_keep", AGX_HUE_KEEP)), 0.0, 1.0)
-    outset = effective_outset(
-        outset_matrix,
-        float(getattr(plan, "outset_purity", 1.0)),
-        float(getattr(plan, "outset_rotation_reversal", 0.0)),
-    )
+    outset = outset_matrix
     rgb = compress_into_gamut(rgb_rec2020.astype(np.float32, copy=False))
     inset = _apply_matrix3(rgb, inset_matrix)
     pre_hue = _rgb_to_hsv(np.maximum(inset, 0.0))[:, 0] if hue_keep < 0.999 else None
@@ -445,6 +572,7 @@ def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: An
             round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
             round(float(getattr(plan, "pivot_ev_offset", 0.0)), 3),
             round(float(getattr(plan, "target_black_linear", 0.0)), 4),
+            round(float(getattr(plan, "target_white_linear", 1.0)), 4),
         )
         log_encoded = (np.log2(np.maximum(inset / 0.18, EPS)) - float(params["black_ev"])) / float(params["range_ev"])
         log_encoded = np.clip(log_encoded, 0.0, 1.0)

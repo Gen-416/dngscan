@@ -19,7 +19,7 @@ from .models import (
     ToneCompressionPlan,
 )
 
-TONE_CORE_CHOICES = ("agx", "lum", "neutral")
+TONE_CORE_CHOICES = ("gated", "agx", "lum", "neutral")
 LUM_NORM_CHOICES = ("y", "power", "max")
 
 
@@ -71,6 +71,10 @@ def scene_rec2020_to_float(values: Any, scene_scale: float, gain: float = 1.0) -
     return np.nan_to_num(rgb, nan=0.0, posinf=1e6, neginf=0.0)
 
 
+def subsample_step(pixel_count: int, max_samples: int = 800_000) -> int:
+    return max(1, int(math.ceil(pixel_count / max_samples)))
+
+
 def tone_plan_sample_scene_rec2020(
     bundle: RawBundle,
     max_samples: int = 800_000,
@@ -79,7 +83,7 @@ def tone_plan_sample_scene_rec2020(
     exposure_gain: float | None = None,
 ) -> Any:
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
-    step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
+    step = subsample_step(flat.shape[0], max_samples)
     gain = bundle.exposure_gain if exposure_gain is None else exposure_gain
     rec2020 = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, gain)
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
@@ -105,7 +109,7 @@ def scene_tone_metrics(
     while retaining the complete rendered tail for topology classification.
     """
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
-    step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
+    step = subsample_step(flat.shape[0], max_samples)
     gain = bundle.exposure_gain if plan_exposure_gain is None else plan_exposure_gain
     rec = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, gain)
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
@@ -119,7 +123,7 @@ def scene_tone_metrics(
 
     reliable = np.ones((ev.shape[0],), dtype=bool)
     if getattr(bundle, "clip_masks", None) is not None:
-        masks = retreat_engine.resize_clip_masks(bundle.clip_masks, bundle.scene_rec2020_render.shape[:2])
+        masks = retreat_engine.clip_masks_for_shape(bundle, bundle.scene_rec2020_render.shape[:2])
         reliable = np.max(masks.reshape(-1, 3)[::step], axis=1) < np.float32(0.10)
     reliable_ev = ev[reliable]
     if reliable_ev.size < max(256, ev.size // 20):
@@ -161,6 +165,22 @@ def build_color_geometry_plan(
     # colour-only decision: no tone endpoint or contrast parameter reads this value.
     base_alpha = 0.045 if output_gamut == "p3" else 0.060
     alpha = base_alpha + 0.015 * clamp_float(pressure / 5.0, 0.0, 1.0)
+    if tone_core == "gated":
+        noise_floor = -12.0
+        if math.isfinite(analysis.usable_dr_eff_ev):
+            noise_floor = -float(analysis.usable_dr_eff_ev) - 1.0
+        return ColorGeometryPlan(
+            target_gamut=output_gamut,
+            raw_clip_retreat_strength=0.0,
+            output_gamut_pressure_pct=pressure,
+            gamut_fit_alpha=alpha,
+            display_highlight_chroma_retreat=0.28,
+            color_path_master=1.0,
+            gated_midtone_protect=0.92,
+            color_path_highlight_ev_lo=0.25,
+            color_path_highlight_ev_hi=2.75,
+            gated_noise_ev_floor=noise_floor,
+        )
     return ColorGeometryPlan(
         target_gamut=output_gamut,
         # Neutral is a diagnostic scene-linear reference, so it must not hide clipped
@@ -192,9 +212,9 @@ def build_tone_compression_plan(
     plan_exposure_gain: float | None = None,
     scene_metrics: SceneToneMetrics | None = None,
 ) -> ToneCompressionPlan:
-    outset_purity, outset_rotation_reversal = agx_engine.AGX_PRIMARIES_PRESETS.get(
-        agx_primaries, agx_engine.AGX_PRIMARIES_PRESETS["base"]
-    )
+    agx_primaries = agx_engine.resolve_agx_primaries(agx_primaries)
+    if tone_core == "gated" and agx_primaries == "base":
+        agx_primaries = "smooth"
     if tone_core == "neutral":
         return neutral_tone_plan(target_gamut)
 
@@ -248,19 +268,19 @@ def build_tone_compression_plan(
     dark_body = clamp_float((-metrics.body_ev_p50 - 1.5) / 3.0, 0.0, 1.0)
     toe_power = 1.50 - 0.35 * dark_body
     shoulder_power = 2.55 if metrics.sparse_emitter_tail else 2.90
-    pivot_ev_offset = 0.0
+    pivot_ev_offset = agx_engine.compute_pivot_ev_offset(metrics.body_ev_p50, black_ev, white_ev)
     target_black_linear = 0.0
-    # This is the darktable look-brightness equivalent, applied after the curve without
-    # changing exposure gain or the black/white endpoints. It is limited to sufficiently
-    # clean dark scenes so night intent remains black while readable shadow detail is not
-    # discarded by the view transform.
     shadow_quality = _smoothstep_f(5.5, 8.5, plan_dr) if math.isfinite(plan_dr) else 0.5
-    view_brightness = 1.0 + 0.30 * dark_body * shadow_quality
+    if pivot_ev_offset < -0.5:
+        # Contrast pivot handles dark-scene readability; avoid stacking a strong brightness lift.
+        view_brightness = 1.0 + 0.06 * dark_body * shadow_quality
+    else:
+        view_brightness = 1.0 + 0.30 * dark_body * shadow_quality
     # Punch is a post-core chroma operator, not a tone decision: it is calculated after
     # endpoint selection and cannot feed back into pivot, toe, shoulder or exposure.
     # The luminance core deliberately stays at zero because it already retains the
     # original RGB ratio through the body; neutral is a diagnostic reference.
-    if tone_core == "agx":
+    if tone_core in ("agx", "gated"):
         w_bright = _smoothstep_f(-3.0, -1.2, metrics.body_ev_p50)
         w_quality = _smoothstep_f(7.5, 9.5, plan_dr) if math.isfinite(plan_dr) else 0.5
         w_dr = _smoothstep_f(6.5, 8.0, dynamic_range_ev)
@@ -307,8 +327,8 @@ def build_tone_compression_plan(
         lum_norm=lum_norm,
         pivot_ev_offset=pivot_ev_offset,
         target_black_linear=target_black_linear,
-        outset_purity=outset_purity,
-        outset_rotation_reversal=outset_rotation_reversal,
+        target_white_linear=1.0,
+        agx_primaries=agx_primaries,
         toe_start_ev=toe_start_ev,
         shoulder_start_ev=shoulder_start_ev,
         use_c1_endpoints=True,
@@ -331,9 +351,14 @@ def build_render_plan(
     """Compile independent scene, tone and colour plans from an immutable capture."""
     tone_core = tone_core if tone_core in TONE_CORE_CHOICES else "agx"
     lum_norm = lum_norm if lum_norm in LUM_NORM_CHOICES else "y"
+    agx_primaries = agx_engine.resolve_agx_primaries(agx_primaries)
+    if tone_core == "gated":
+        from .guidance import ensure_raw_guidance
+
+        ensure_raw_guidance(bundle, analysis)
     # agx / lum / neutral all curve (or pass through) in the Rec.2020 working space; the
     # `else` stays a defensive fallback for any future output-space-native core.
-    if mode == "agx" or tone_core in ("lum", "neutral"):
+    if mode == "agx" or tone_core in ("lum", "neutral", "gated"):
         target_gamut = "Rec2020"
     else:
         target_gamut = output_gamut_space(output_gamut)
@@ -352,7 +377,7 @@ def build_render_plan(
         punch_scale=punch_scale if mode == "agx" else 0.0,
         tone_core=tone_core,
         lum_norm=lum_norm,
-        agx_primaries=agx_primaries if mode == "agx" and tone_core == "agx" else "base",
+        agx_primaries=agx_primaries if mode == "agx" and tone_core in ("agx", "gated") else "base",
         plan_exposure_gain=plan_gain,
         scene_metrics=scene,
     )

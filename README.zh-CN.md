@@ -9,7 +9,7 @@
 ## 功能概览
 
 - **诊断** — 六面板 PNG：SNR–档数曲线、逐通道 RAW 分布、RGB 曝光直方图、各输出色域的溢出风险、空间曝光分区图、剪切通道高光图；以及逐通道满阱 / 剪切 / 黑电平 / 白平衡读数。
-- **拆分式 DRT** — 分析生成不可变 `RenderPlan`：可靠 scene-Y 分布只决定 C1 曲线的黑白端点；RAW CFA 剪切只决定曲线前色度退让；输出色域压力只决定末端色域适配。AgX formation 保持校准的 EV=0 pivot，仅按端点重新归一化，因此手动 EV 不会重设 pivot，也不会把夜景拉向中灰。干净的暗场可获得有限的显示侧 brightness lift，它保持真黑/真白，不是曝光增益。`--tone-core agx` 保留 Rec.2020 的 inset → log2 → sigmoid → outset 几何；`--tone-core lum` 把同一端点 DRT 施于亮度 norm，保持 RGB 比例，并只在显示白附近温和褪色。`--agx-primaries {base,punchy,smooth}` 只改变 AgX 的 outset。
+- **拆分式 DRT** — 分析生成不可变 `RenderPlan`：可靠 scene-Y 分布只决定 C1 曲线的黑白端点；RAW CFA 剪切驱动门控色度路径的许可权重；输出色域压力只决定末端色域适配。默认 `--tone-core gated` 在全图走亮度 C1 收肩，仅在 RAW 证据、场景高光 EV、色域压力与肤色/青绿 sector 策略允许处混入 AgX 色度几何（人像中调保留在 luma 路径）。`--tone-core agx` 全图 Rec.2020 inset → log2 → sigmoid → outset；`--tone-core lum` 把同一端点 DRT 施于亮度 norm。AgX 原色几何预设 `base`/`punchy`/`muted`/`smooth`，别名 `agx_blender_strong`、`agx_dt_smooth` 等与之等价。DRT 工作空间固定为 scene-linear Rec.2020，交付显式 sRGB 或 P3。
 - **AgX 前馈（实验）** — 可选 `--scene-transform arri_skin_d55`，在相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 域，对肤色/青色区域施加受限 3×3 色度矩阵；默认关闭。
 - **成片风格（互斥）** — AgX 之上可选一层（`--grade`）：
   - **色度 Look** — 由官方 LUT 实测的 Oklab 几何（富士胶片模拟、ARRI Classic / Reveal）。色调仍由 AgX 负责；只改色相 / 饱和度 / 肤色塑形。

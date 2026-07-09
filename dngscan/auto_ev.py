@@ -124,13 +124,14 @@ def render_sample_linear_output(
         rec, scene_transform, scene_transform_strength, wb_adapt
     )
     color_plan = plan.color if isinstance(plan, RenderPlan) else None
-    if color_plan is not None and sample_masks is not None:
+    if color_plan is not None and sample_masks is not None and float(color_plan.raw_clip_retreat_strength) > 0.0:
         rec = retreat_engine.apply_clip_retreat_rec2020(
             rec, sample_masks, float(color_plan.raw_clip_retreat_strength)
         )
     effective_plan = plan_with_look_overrides(plan, look, look_strength) if plan is not None else None
     effective_tone = effective_plan.tone if isinstance(effective_plan, RenderPlan) else effective_plan
-    mapped_rec = apply_tone_core(rec, effective_tone)
+    eff_color = effective_plan.color if isinstance(effective_plan, RenderPlan) else color_plan
+    mapped_rec = apply_tone_core(rec, effective_tone, eff_color, sample_masks)
     if display_filter != "none" and filter_strength > 0.0:
         output_linear = filter_engine.apply_display_filter_rec2020(
             mapped_rec, gamut, display_filter, filter_strength, scene_rec2020=rec
@@ -166,7 +167,7 @@ def max_safe_ev(
     sample_rgb = flat[::step, :3]
     sample_masks = None
     if getattr(bundle, "clip_masks", None) is not None:
-        masks = retreat_engine.resize_clip_masks(bundle.clip_masks, bundle.scene_rec2020_render.shape[:2]).reshape(-1, 3)
+        masks = retreat_engine.clip_masks_for_shape(bundle, bundle.scene_rec2020_render.shape[:2]).reshape(-1, 3)
         sample_masks = masks[::step]
     baseline_stats: tuple[float, float, float, float] | None = None
 
