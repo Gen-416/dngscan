@@ -210,7 +210,7 @@ def build_tone_compression_plan(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
     plan_exposure_gain: float | None = None,
     scene_metrics: SceneToneMetrics | None = None,
 ) -> ToneCompressionPlan:
@@ -307,6 +307,10 @@ def build_tone_compression_plan(
 
     negative_rgb_pct = float(np.mean(np.min(rgb, axis=1) < -GAMUT_EPS) * 100.0)
     over_rgb_pct = float(np.mean(np.max(rgb, axis=1) > 1.0 + GAMUT_EPS) * 100.0)
+    # The public default follows darktable smooth geometry and preserve_hue=0.6.
+    # The three Blender-reference geometries retain Blender's 0.4 hue mix so their
+    # comparison remains a coherent alternate reference rather than a hybrid preset.
+    hue_keep = 0.4 if agx_primaries in ("base", "punchy", "muted") else 0.6
 
     return ToneCompressionPlan(
         target_gamut=target_gamut,
@@ -332,6 +336,7 @@ def build_tone_compression_plan(
         target_black_linear=target_black_linear,
         target_white_linear=1.0,
         agx_primaries=agx_primaries,
+        hue_keep=hue_keep,
         toe_start_ev=toe_start_ev,
         shoulder_start_ev=shoulder_start_ev,
         use_c1_endpoints=True,
@@ -349,7 +354,7 @@ def build_render_plan(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> RenderPlan:
     """Compile independent scene, tone and colour plans from an immutable capture."""
     tone_core = tone_core if tone_core in TONE_CORE_CHOICES else "agx"
@@ -380,7 +385,10 @@ def build_render_plan(
         punch_scale=punch_scale if mode == "agx" else 0.0,
         tone_core=tone_core,
         lum_norm=lum_norm,
-        agx_primaries=agx_primaries if mode == "agx" and tone_core in ("agx", "gated") else "base",
+        # RAW-gated rendering is deliberately tied to darktable's smooth geometry.
+        # Blender-family primaries are explicit reference variants for the full-frame
+        # AgX core only; they must not silently define the RAW evidence path.
+        agx_primaries=agx_primaries if mode == "agx" and tone_core == "agx" else "smooth",
         plan_exposure_gain=plan_gain,
         scene_metrics=scene,
     )
@@ -401,7 +409,7 @@ def plan_for_mode(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> ToneCompressionPlan:
     """Compatibility accessor for callers that only need the tone sub-plan."""
     return build_render_plan(

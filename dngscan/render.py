@@ -113,7 +113,7 @@ def plan_with_look_overrides(
     """Apply a chromatic look's AgX-core overrides (hue keep, faded target black) to the
     tone plan. Identity when the look carries none, so renders stay byte-identical."""
     tone = plan.tone if isinstance(plan, RenderPlan) else plan
-    overrides = look_engine.agx_plan_overrides(look, look_strength)
+    overrides = look_engine.agx_plan_overrides(look, look_strength, float(tone.hue_keep))
     if not overrides:
         return plan
     adjusted = replace(tone, **overrides)
@@ -265,7 +265,7 @@ def render_output_linear(
     scene_transform_strength: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> Any:
     if look != "none" and display_filter != "none":
         raise ValueError("色度 look 与输出滤镜不能同时启用")
@@ -309,7 +309,7 @@ def render_output_u8(
     scene_transform_strength: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> Any:
     if look != "none" and display_filter != "none":
         raise ValueError("色度 look 与输出滤镜不能同时启用")

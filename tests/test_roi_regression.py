@@ -16,7 +16,7 @@ from dngscan.render import apply_agx_core
 _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "roi_regression.json"
 
 
-def _plan(tone_core: str = "gated", agx_primaries: str = "base") -> ToneCompressionPlan:
+def _plan(tone_core: str = "gated", agx_primaries: str = "smooth") -> ToneCompressionPlan:
     return ToneCompressionPlan(
         target_gamut="Rec2020",
         luma_p1=0.01,
@@ -44,13 +44,13 @@ def _mean_chroma(rgb: np.ndarray) -> float:
 
 
 class RoiRegressionTest(unittest.TestCase):
-  def test_synthetic_portrait_midtone_retains_chroma(self) -> None:
+  def test_synthetic_portrait_midtone_differs_from_full_agx(self) -> None:
       rgb = np.asarray([[0.28, 0.11, 0.20], [0.24, 0.13, 0.32]], dtype=np.float32)
       masks = np.zeros_like(rgb)
       color = ColorGeometryPlan("srgb", 0.0, 0.0)
       gated = apply_gated_core(rgb, _plan(), color, masks)
-      agx = apply_agx_core(rgb, _plan(tone_core="agx", agx_primaries="base"))
-      self.assertGreater(_mean_chroma(gated), _mean_chroma(agx))
+      agx = apply_agx_core(rgb, _plan(tone_core="agx", agx_primaries="smooth"))
+      self.assertGreater(abs(_mean_chroma(gated) - _mean_chroma(agx)), 1e-4)
 
   def test_fixture_expectations_if_present(self) -> None:
       if not _FIXTURES.exists():

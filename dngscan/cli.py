@@ -129,19 +129,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--punch",
         type=float,
         default=1.0,
-        help="AgX 纯度补偿倍率 0-1.5（默认 1.0=场景自动值；0=关闭，等价纯 AgX Base；夜景自动为 0）",
+        help="AgX 纯度补偿倍率 0-1.5（默认 1.0=场景自动值；0=关闭；夜景自动为 0）",
     )
     parser.add_argument(
         "--agx-primaries",
         choices=AGX_PRIMARIES_CLI_CHOICES,
-        default="base",
-        help="AgX 基调（几何原色构造，同 darktable）: base/punchy/muted/smooth；别名 agx_blender_strong、agx_dt_smooth 等",
+        default="smooth",
+        help="仅 tone-core=agx 的 AgX 高光原色几何：smooth=darktable 默认；base/punchy/muted=Blender 参考组。gated 固定使用 darktable smooth；别名 agx_blender_strong、agx_dt_smooth 等",
     )
     parser.add_argument(
         "--tone-core",
         choices=TONE_CORE_CHOICES,
-        default="gated",
-        help="tone 核: gated=RAW 门控 luma C1 + AgX 色度路径（默认）；agx=全图 AgX；lum=亮度域收肩；neutral=直出对比",
+        default="agx",
+        help="tone 核: agx=darktable 风格全图 AgX（默认）；gated=RAW 门控色度路径；lum=亮度域收肩；neutral=直出对比",
     )
     parser.add_argument(
         "--lum-norm",

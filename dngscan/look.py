@@ -67,7 +67,7 @@ class LookField:
     magenta_chroma_scale: float = 1.0
     # Optional AgX-core overrides carried by the look (applied to the tone plan before
     # the curve runs, unlike the Oklab field above which is post-AgX):
-    #   agx_hue_keep — fraction of per-channel hue skew kept (None = plan default 0.4);
+    #   agx_hue_keep — fraction of per-channel hue skew kept (None = plan default);
     #   agx_target_black — linear output floor, >0 lifts blacks for faded film looks;
     #   agx_target_white — linear output ceiling, <1 fades whites (milky/print top).
     agx_hue_keep: float | None = None
@@ -189,7 +189,7 @@ _load_json_fields()
 LOOK_CHOICES = ("none",) + tuple(LOOK_FIELDS)
 
 # Per-look AgX-core defaults when LookField leaves agx_* unset (JSON-measured fields
-# win when explicitly set). hue_keep > 0.4 keeps more per-channel skew (sunset/orange);
+# win when explicitly set). hue_keep preserves more per-channel skew (sunset/orange);
 # target_black lifts the curve floor for faded film sims.
 AGX_LOOK_DEFAULTS: dict[str, dict[str, float]] = {
     "fuji_velvia": {"agx_hue_keep": 0.55},
@@ -218,19 +218,21 @@ def _look_agx_scalar(look: str, key: str) -> float | None:
     return None
 
 
-def agx_plan_overrides(look: str, strength: float = 1.0) -> dict[str, float]:
+def agx_plan_overrides(
+    look: str, strength: float = 1.0, base_hue_keep: float = 0.6
+) -> dict[str, float]:
     """AgX-core overrides carried by a look (hue keep, faded target black).
 
     Returned keys match ToneCompressionPlan field names so callers can apply them with
-    dataclasses.replace. Strength scales the delta from the plan default (hue_keep 0.4,
-    target_black 0) so gradeStrength < 1 eases back toward base AgX."""
+    dataclasses.replace. Strength scales hue-keep from the caller's compiled primary
+    preset, so gradeStrength < 1 eases back toward that base AgX."""
     if look == "none":
         return {}
     s = max(0.0, min(1.5, float(strength)))
     out: dict[str, float] = {}
     hue = _look_agx_scalar(look, "agx_hue_keep")
     if hue is not None:
-        base = 0.4
+        base = float(min(1.0, max(0.0, base_hue_keep)))
         target = float(min(1.0, max(0.0, hue)))
         out["hue_keep"] = base + s * (target - base)
     black = _look_agx_scalar(look, "agx_target_black")

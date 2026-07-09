@@ -95,7 +95,7 @@ def render_sample_linear_output(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
     sample_masks: Any | None = None,
     sample_raw_guidance: Any | None = None,
 ) -> Any:
@@ -158,7 +158,7 @@ def max_safe_ev(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> float:
     """Largest EV (>= from_ev) whose preview-scale output stays below highlight thresholds."""
     if np is None:
@@ -255,7 +255,7 @@ def compute_auto_ev(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> AutoEvResult:
     """Boost toward 18% gray median when scene is dark; never darken high-key captures.
 
@@ -308,7 +308,7 @@ def resolve_export_ev(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> tuple[float, AutoEvResult | None]:
     if not is_ev_auto(ev):
         return float(ev), None

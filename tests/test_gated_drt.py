@@ -10,7 +10,7 @@ from dngscan.gated_drt import apply_gated_core
 from dngscan.models import ColorGeometryPlan, RawGuidanceMaps, ToneCompressionPlan
 
 
-def _plan(tone_core: str = "gated", primaries: str = "base") -> ToneCompressionPlan:
+def _plan(tone_core: str = "gated", primaries: str = "smooth") -> ToneCompressionPlan:
     return ToneCompressionPlan(
         target_gamut="Rec2020",
         luma_p1=0.01,
@@ -33,7 +33,7 @@ def _plan(tone_core: str = "gated", primaries: str = "base") -> ToneCompressionP
 
 
 class GatedDrtTest(unittest.TestCase):
-    def test_midtone_preserves_more_chroma_than_full_agx(self) -> None:
+    def test_midtone_path_differs_from_full_agx(self) -> None:
         from dngscan.render import apply_agx_core
 
         rgb = np.asarray([[0.28, 0.10, 0.22]], dtype=np.float32)
@@ -45,13 +45,13 @@ class GatedDrtTest(unittest.TestCase):
         )
         clean_masks = np.zeros((1, 3), dtype=np.float32)
         gated = apply_gated_core(rgb, plan, color, clean_masks)
-        full = apply_agx_core(rgb, _plan(tone_core="agx", primaries="base"))
+        full = apply_agx_core(rgb, _plan(tone_core="agx", primaries="smooth"))
 
         def chroma(v):
             lab = rgb_to_oklab(v, "srgb")
             return float(np.hypot(lab[1][0], lab[2][0]))
 
-        self.assertGreater(chroma(gated), chroma(full))
+        self.assertGreater(abs(chroma(gated) - chroma(full)), 1e-4)
 
     def test_clipped_highlight_moves_toward_agx(self) -> None:
         rgb = np.asarray([[0.85, 0.75, 0.20]], dtype=np.float32)

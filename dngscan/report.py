@@ -278,13 +278,13 @@ def jpeg_tone_plan_cn(
         extras = []
         if abs(plan.pivot_ev_offset) > 1e-3:
             extras.append(f"pivot={plan.pivot_ev_offset:+.2f}EV")
-        if abs(plan.hue_keep - 0.4) > 1e-3:
+        if abs(plan.hue_keep - 0.6) > 1e-3:
             extras.append(f"hue_keep={plan.hue_keep:.2f}")
         if plan.target_black_linear > 1e-4:
             extras.append(f"lift黑={plan.target_black_linear:.3f}")
         if plan.target_white_linear < 1.0 - 1e-4:
             extras.append(f"褪白={plan.target_white_linear:.3f}")
-        if getattr(plan, "agx_primaries", "base") != "base":
+        if getattr(plan, "agx_primaries", "smooth") != "smooth":
             extras.append(f"primaries={plan.agx_primaries}")
         extra_text = ("；" + "，".join(extras)) if extras else ""
         return (

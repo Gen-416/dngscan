@@ -34,10 +34,10 @@ _XYZ_TO_REC2020 = (
     else None
 )
 
-# Fraction of the per-channel hue shift kept after the curve (Blender AgX mix_percent=40).
-# darktable defaults preserve_hue=0.6; we follow Blender (0.4) so more notorious-six skew
-# is allowed — a deliberate taste anchor, not an oversight.
-AGX_HUE_KEEP = 0.4
+# Fraction of per-channel hue shift kept after the curve. darktable's default
+# preserve-hue setting is 0.6; Blender's 0.4 remains attached to the explicit
+# Blender-reference primary presets in the compiled render plan.
+AGX_HUE_KEEP = 0.6
 
 # Internal y-axis encoding the curve was originally parameterized with. Kept as the
 # reference for the contrast (derivative) compensation when the adaptive gamma moves
@@ -119,10 +119,10 @@ AGX_PRIMARIES_CLI_CHOICES = tuple(AGX_PRIMARIES_PRESETS.keys()) + tuple(AGX_PRIM
 
 def resolve_agx_primaries(name: str) -> str:
     """Map CLI/GUI preset name (including aliases) to a canonical AgX primaries key."""
-    key = (name or "base").strip().lower()
+    key = (name or "smooth").strip().lower()
     resolved = AGX_PRIMARIES_ALIASES.get(key, key)
     if resolved not in AGX_PRIMARIES_PRESETS:
-        return "base"
+        return "smooth"
     return resolved
 
 
@@ -195,19 +195,20 @@ def _formation_matrices_cached(spec: PrimariesGeometry) -> tuple[Any, Any]:
 
 
 def matrices_for_preset(preset_name: str) -> tuple[Any, Any]:
-    spec = AGX_PRIMARIES_PRESETS.get(preset_name, _BLENDER_GEOMETRY)
+    spec = AGX_PRIMARIES_PRESETS.get(preset_name, _SMOOTH_GEOMETRY)
     return _formation_matrices_cached(spec)
 
 
-# Blender-base matrices (geometric source of truth; ~0.04 from legacy EaryChow constants under D65).
+# darktable smooth matrices are the public default. Blender-base remains an explicit
+# reference preset, not the fallback for a missing/invalid caller choice.
 AGX_INSET_REC2020, AGX_OUTSET_REC2020 = (
-    matrices_for_preset("base") if np is not None else (None, None)
+    matrices_for_preset("smooth") if np is not None else (None, None)
 )
 
 
 def formation_matrices(plan: Any) -> tuple[Any, Any]:
     """Inset/outset for one tone plan's primaries preset."""
-    return matrices_for_preset(str(getattr(plan, "agx_primaries", "base")))
+    return matrices_for_preset(str(getattr(plan, "agx_primaries", "smooth")))
 
 
 def compute_pivot_ev_offset(body_ev_p50: float, black_ev: float, white_ev: float) -> float:
@@ -538,7 +539,7 @@ def _mix_hue(rgb_linear: Any, pre_hue: Any, keep: float) -> Any:
 
 
 def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: Any) -> Any:
-    """AgX per Blender/EaryChow reference order, in Rec.2020 working space:
+    """AgX's shared formation order in the Rec.2020 working space:
 
     guard rail -> inset (rotation+attenuation) -> log2 window -> sigmoid ->
     linearize -> hue mix (plan.hue_keep of per-channel shift) -> outset in LINEAR light.

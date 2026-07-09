@@ -71,7 +71,7 @@ button.preview:disabled{opacity:.5;cursor:default}
 }
 </style></head>
 <body><div class="wrap">
-<h1>dngscan · RAW 证据驱动渲染</h1>
+<h1>dngscan · darktable AgX + RAW 分析</h1>
 
 <div class="card">
   <label>DNG / RAW 文件</label>
@@ -107,9 +107,9 @@ button.preview:disabled{opacity:.5;cursor:default}
   <div class="row">
     <div style="flex:2;min-width:210px">
       <label>压缩策略</label>
-      <select id="toneCore" title="选择亮度压缩和高光色彩路径；默认策略会只在 RAW 证据表明需要时改变色度。">
-        <option value="gated" selected>保真 · RAW 证据驱动</option>
-        <option value="agx">AgX · 全图色彩路径</option>
+      <select id="toneCore" title="默认是 darktable 风格的全图 AgX；RAW 门控是基于同一 darktable 几何的可选色度策略。">
+        <option value="agx" selected>AgX · darktable 全图色彩路径</option>
+        <option value="gated">保真 · RAW 证据门控</option>
         <option value="lum">亮度优先 · 保持通道比例</option>
         <option value="neutral">线性参考 · 不做 tone 压缩</option>
       </select>
@@ -124,11 +124,11 @@ button.preview:disabled{opacity:.5;cursor:default}
     </div>
     <div id="agxPrimariesBlock" style="flex:1;min-width:150px">
       <label>AgX 高光路径</label>
-      <select id="agxPrimaries" title="控制 AgX 在高亮饱和色上的 path-to-white 方式。">
-        <option value="base">标准 · 平衡退白</option>
-        <option value="punchy">鲜明 · 保留更多纯度</option>
-        <option value="muted">柔和 · 更早退白</option>
-        <option value="smooth">平滑 · darktable 几何</option>
+      <select id="agxPrimaries" title="仅全图 AgX 使用：选择高亮饱和色的 path-to-white 几何。">
+        <option value="smooth" selected>darktable 平滑 · 默认</option>
+        <option value="base">Blender 参考 · 平衡退白</option>
+        <option value="punchy">Blender 参考 · 鲜明</option>
+        <option value="muted">Blender 参考 · 柔和</option>
       </select>
     </div>
   </div>
@@ -269,22 +269,23 @@ GRADE_OPTIONS
 
 <script>
 const $=s=>document.querySelector(s);
-const STORE_KEY="dngscan.settings.v4";
+const STORE_KEY="dngscan.settings.v5";
+const LEGACY_STORE_KEY="dngscan.settings.v4";
 function setGradeStrengthLabel(){const v=+$("#gradeStrength").value;$("#gradeStrengthVal").textContent=v.toFixed(2);}
 function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").value!=="none"?"block":"none";}
 function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v.toFixed(2);}
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
 const CORE_FACTS={
-  gated:["亮度 <b>C1 固定锚点</b>","色度 <b>RAW 证据门控</b>"],
-  agx:["亮度 <b>AgX C1 曲线</b>","色度 <b>全图 path-to-white</b>"],
+  gated:["亮度 <b>darktable C1 曲线</b>","色度 <b>smooth 几何 + RAW 门控</b>"],
+  agx:["亮度 <b>darktable C1 曲线</b>","色度 <b>全图 AgX path-to-white</b>"],
   lum:["亮度 <b>C1 比例保持</b>","色度 <b>不改场景比例</b>"],
   neutral:["亮度 <b>不做压缩</b>","色度 <b>线性参考</b>"]
 };
 function updateToneCoreUi(){
   const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";
   $("#lumNormBlock").style.display=lum?"block":"none";
-  $("#agxPrimariesBlock").style.display=(lum||neutral)?"none":"block";
+  $("#agxPrimariesBlock").style.display=core==="agx"?"block":"none";
   $("#punchBlock").style.display=(lum||neutral)?"none":"block";
   $("#coreFacts").innerHTML=(CORE_FACTS[core]||[]).map(v=>"<span>"+v+"</span>").join("");
 }
@@ -320,7 +321,7 @@ function sceneTransformText(j){
 }
 function toneCoreText(j){
   if(!j.tone_core)return "";
-  const labels={gated:"保真（RAW 门控）",agx:"AgX（全图）",lum:"亮度优先",neutral:"线性参考"};
+  const labels={gated:"保真（RAW 门控）",agx:"AgX（darktable 全图）",lum:"亮度优先",neutral:"线性参考"};
   const norms={y:"Y",power:"折中",max:"最大通道"};
   const norm=j.tone_core==="lum"&&j.lum_norm?"（"+(norms[j.lum_norm]||j.lum_norm)+"）":"";
   return "，策略 "+(labels[j.tone_core]||j.tone_core)+norm;
@@ -342,7 +343,16 @@ function saveSettings(){
   }));}catch(e){}
 }
 function restoreSettings(){
-  let s={};try{s=JSON.parse(localStorage.getItem(STORE_KEY)||"{}")||{};}catch(e){}
+  let s={};let migrated=false;
+  try{
+    const current=localStorage.getItem(STORE_KEY);
+    s=JSON.parse(current||localStorage.getItem(LEGACY_STORE_KEY)||"{}")||{};
+    // v4's stock pair was gated + base. Move that old default to the new
+    // darktable baseline while retaining every other stored preference.
+    if(!current&&s.toneCore==="gated"&&s.agxPrimaries==="base"){
+      s.toneCore="agx";s.agxPrimaries="smooth";migrated=true;
+    }
+  }catch(e){}
   if(s.input)$("#input").value=s.input;
   if(s.ev!==undefined)$("#ev").value=s.ev;
   if(s.quality)$("#quality").value=s.quality;
@@ -376,6 +386,7 @@ function restoreSettings(){
   if(s.outdir)$("#outdir").value=s.outdir;
   if(s.png!==undefined)$("#png").checked=!!s.png;
   setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();updateToneCoreUi();updateFormatUi();
+  if(migrated)saveSettings();
 }
 ["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
 ["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));

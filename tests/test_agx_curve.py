@@ -32,7 +32,7 @@ class _PlanStub:
     latitude_hi_ev = 1.0
     punch_strength = 0.0
     tone_core = "agx"
-    agx_primaries = "base"
+    agx_primaries = "smooth"
 
 
 class CurveInversionTest(unittest.TestCase):
@@ -118,8 +118,8 @@ class TargetBlackTest(unittest.TestCase):
 
 
 class OutsetPresetTest(unittest.TestCase):
-    def test_base_preset_matches_blender_geometry(self) -> None:
-        inset, outset = matrices_for_preset("base")
+    def test_smooth_preset_matches_default_geometry(self) -> None:
+        inset, outset = matrices_for_preset("smooth")
         self.assertTrue(np.allclose(inset, AGX_INSET_REC2020))
         self.assertTrue(np.allclose(outset, AGX_OUTSET_REC2020))
 
@@ -179,13 +179,13 @@ class HueKeepTest(unittest.TestCase):
         hi = apply_core(rgb, plan_hi, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
         self.assertGreater(float(np.abs(lo - hi).max()), 1e-4)
 
-    def test_default_matches_explicit_04(self) -> None:
+    def test_default_matches_explicit_darktable_hue_keep(self) -> None:
         rgb = np.asarray([[0.45, 0.08, 0.04]], dtype=np.float32)
         plan = _PlanStub()
-        plan_04 = _PlanStub()
-        plan_04.hue_keep = 0.4
+        plan_06 = _PlanStub()
+        plan_06.hue_keep = 0.6
         a = apply_core(rgb, plan, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
-        b = apply_core(rgb, plan_04, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+        b = apply_core(rgb, plan_06, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
         self.assertTrue(np.array_equal(a, b))
 
 
@@ -201,7 +201,9 @@ class LookOverrideTest(unittest.TestCase):
         velvia = look_engine.agx_plan_overrides("fuji_velvia")
         self.assertAlmostEqual(velvia["hue_keep"], 0.55)
         half = look_engine.agx_plan_overrides("fuji_velvia", 0.5)
-        self.assertAlmostEqual(half["hue_keep"], 0.4 + 0.5 * (0.55 - 0.4))
+        self.assertAlmostEqual(half["hue_keep"], 0.6 + 0.5 * (0.55 - 0.6))
+        blender_half = look_engine.agx_plan_overrides("fuji_velvia", 0.5, 0.4)
+        self.assertAlmostEqual(blender_half["hue_keep"], 0.4 + 0.5 * (0.55 - 0.4))
 
         neg = look_engine.agx_plan_overrides("fuji_classic_neg")
         self.assertAlmostEqual(neg["target_black_linear"], 0.022)
@@ -233,8 +235,8 @@ class PivotAutomationTest(unittest.TestCase):
 
 
 class HueKeepAnchorTest(unittest.TestCase):
-    def test_default_matches_blender_not_darktable(self) -> None:
-        self.assertEqual(AGX_HUE_KEEP, 0.4)
+    def test_default_matches_darktable(self) -> None:
+        self.assertEqual(AGX_HUE_KEEP, 0.6)
 
 
 class TonePlanPivotTest(unittest.TestCase):

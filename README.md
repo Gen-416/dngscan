@@ -15,17 +15,18 @@ capture or delivery constraints justify it.
 
 ## Core idea
 
-The default renderer is **Gated: RAW evidence driven**. Its two main decisions are
-separate:
+The default renderer is **AgX: darktable global colour path** with darktable's `smooth`
+primary geometry. RAW analysis is still structural: it compiles the C1 toe/shoulder,
+protects the white endpoint from clipped/reconstructed samples, informs output-gamut
+fitting, and reports the capture's limits. It does not turn the default into a
+Blender-oriented image pipeline.
 
-1. A scene-luminance C1 curve controls brightness everywhere.
-2. AgX's colour path toward white is only blended in where RAW evidence, scene
-   brightness, SNR, gamut pressure, and hue policy permit it.
-
-This separation matters. A reconstructed lamp can be visually plausible, but it is not
-recovered sensor headroom and must not set the global white endpoint. Conversely, a
-well-exposed skin tone should not lose chroma merely because another part of the frame
-contains a clipped light source.
+**Fidelity: RAW evidence driven** is a separate, optional strategy. It uses the same
+darktable smooth AgX geometry as the candidate colour path, but blends that path only
+where RAW evidence, scene brightness, SNR, gamut pressure, and hue policy permit it.
+This separation matters when comparing a reconstructed lamp with a well-exposed skin
+tone: the lamp cannot set the global white endpoint, and the skin need not lose chroma
+because another part of the frame clipped.
 
 ```text
 RAW / DNG
@@ -76,8 +77,8 @@ changes is the authority used for colour.
 
 | GUI name / CLI core | What the renderer does | Expected image | Best use |
 | --- | --- | --- | --- |
-| **Fidelity: RAW evidence driven** / `gated` | Maps Rec.2020 luminance through the C1 curve everywhere. It also computes a full AgX result, rescales it back to the same Rec.2020 Y, then blends only its chroma/path-to-white by a per-pixel permission weight. | Body and skin retain their capture colour; uncertain or very bright highlights can retreat toward white without a brightness seam at the mask boundary. | Default finished render. |
-| **AgX: global colour path** / `agx` | Applies AgX inset -> log2 C1 curve -> hue mix -> outset to every pixel, followed by the scene-driven purity operator. | The most recognisably global AgX behaviour: chromatic highlights follow a coherent AgX path, but colourful midtones are also subject to that geometry. | Direct AgX comparison or a deliberately more uniform AgX rendering. |
+| **AgX: darktable global colour path** / `agx` | Applies AgX inset -> log2 C1 curve -> hue mix -> outset to every pixel, followed by the scene-driven purity operator. The default path is darktable `smooth`. | The most recognisably global AgX behaviour: chromatic highlights follow a coherent AgX path, while RAW analysis still sets reliable tone endpoints. | Default finished render. |
+| **Fidelity: RAW evidence driven** / `gated` | Maps Rec.2020 luminance through the C1 curve everywhere. It computes a darktable-`smooth` AgX result, rescales it back to the same Rec.2020 Y, then blends only its chroma/path-to-white by a per-pixel permission weight. | A local, evidence-driven colour path with no RAW-mask brightness seam. It is not a promise of higher saturation than full AgX. | A RAW-aware alternative when the global AgX colour path is too broad for the scene. |
 | **Luminance priority** / `lum` | Reduces a scalar norm through the C1 curve and multiplies RGB by the resulting ratio. Apart from known clipped samples and final delivery guards, RGB ratios are retained. | The closest tone-mapped option to scene RGB proportions. Saturated highlights can remain more literal and less filmic; colour separation comes from the capture rather than an AgX hue path. | Inspecting whether AgX geometry is helping a scene, or preserving product/graphic colours. |
 | **Linear reference** / `neutral` | Skips the tone core. Scene-linear Rec.2020 is converted only for delivery, then gamut-fitted and encoded. | No designed shoulder or toe. Bright values reach delivery limits directly, so this is a diagnostic reference, not a finished JPEG look. | A/B analysis, checking the cost of any DRT. |
 
@@ -95,10 +96,11 @@ choices, not three different exposure anchors.
 
 ## AgX highlight paths
 
-The **AgX highlight path** selector is available for `gated` and `agx`. It does **not**
+The **AgX highlight path** selector applies to `agx` only. `gated` always uses
+darktable `smooth` geometry before its RAW permission blend. The selector does **not**
 choose a different shoulder curve, white point, exposure, or dynamic-range plan. All
-four paths share the same scene-derived C1 curve. The selector changes the geometric
-AgX formation around that curve:
+four paths share the same scene-derived C1 curve; they change the geometric AgX
+formation around that curve:
 
 ```text
 Rec.2020 RGB -> inset / primary rotation -> per-channel C1 curve -> hue mix -> outset
@@ -111,10 +113,10 @@ much colour geometry is recovered after the curve. This is why the selector chan
 
 | Path | Underlying geometry | Expected highlight behaviour |
 | --- | --- | --- |
-| **Standard: balanced retreat** / `base` | The Blender-like / darktable blender-like Rec.2020 primary construction, with Blender's 0.4 hue-mix anchor. | Balanced default. Bright saturated colours soften and move toward white without forcing a strong creative colour recovery. |
-| **Vivid: retain more purity** / `punchy` | Same inset as `base`, but its outward-primary recovery is reduced in the geometric construction (`master_outset_ratio=0.5`). This restores more apparent purity after the curve. | More coloured high lights and stronger local colour separation. It can be attractive for neon, foliage, or coloured light, but extreme sRGB/P3 values may later be reduced by gamut fitting. |
-| **Soft: earlier-looking retreat** / `muted` | Same base inset, with the outward primary rotation also restored (`master_unrotation_ratio=1`). The tone curve is unchanged; only the outward colour geometry differs. | A calmer, less assertive bright-colour recovery than `base`. It can appear to retreat to neutral sooner, even though the luminance shoulder starts at the same place. |
-| **Smooth: darktable geometry** / `smooth` | darktable's smooth-primary construction: different inset/outset distances and rotations, not a different sigmoid. | A distinct, generally calmer hue trajectory through saturated highlights. It should be compared against `base` on the actual image; it is not simply a global saturation control. |
+| **darktable smooth** / `smooth` | darktable's smooth-primary construction: different inset/outset distances and rotations, not a different sigmoid. | Default. A distinct, generally calmer hue trajectory through saturated highlights. It is the baseline for dngscan's full-frame AgX and RAW-gated paths. |
+| **Blender reference: balanced retreat** / `base` | Blender-like / darktable blender-like Rec.2020 primary construction, with Blender's 0.4 hue-mix anchor. | A reference alternative to smooth: bright saturated colours soften and move toward white without strong colour recovery. |
+| **Blender reference: vivid** / `punchy` | Same inset as `base`, but its outward-primary recovery is reduced in the geometric construction (`master_outset_ratio=0.5`). This restores more apparent purity after the curve. | More coloured high lights and stronger local colour separation. It can be attractive for neon, foliage, or coloured light, but extreme sRGB/P3 values may later be reduced by gamut fitting. |
+| **Blender reference: soft** / `muted` | Same base inset, with the outward primary rotation also restored (`master_unrotation_ratio=1`). The tone curve is unchanged; only the outward colour geometry differs. | A calmer, less assertive bright-colour recovery than `base`. It can appear to retreat to neutral sooner, even though the luminance shoulder starts at the same place. |
 
 The separate **Midtone purity** control is not one of these four paths. It is a
 scene-gated post-core chroma operator used only by `gated` and `agx`; its automatic
@@ -188,7 +190,7 @@ The GUI is local and opens a localhost page. It caches the decode/analysis for a
 uses a proxy for repeat previews, and always uses the full-resolution buffer for export.
 The practical workflow is:
 
-1. Start from `Fidelity: RAW evidence driven`, `Standard`, `EV 0`, and a chosen RAW
+1. Start from `AgX: darktable global colour path`, `darktable smooth`, `EV 0`, and a chosen RAW
    highlight mode.
 2. Use **Full-frame brightness reference** only as a deliberate comparison; return to
    `EV 0` when the photographed low-key/high-key intent is correct.
@@ -200,15 +202,15 @@ The practical workflow is:
 CLI examples:
 
 ```bash
-# Finished SDR JPEG: default RAW-gated strategy, quality 100, 4:4:4
+# Finished SDR JPEG: default darktable-style full-frame AgX, quality 100, 4:4:4
 python -m dngscan photo.dng --jpeg photo.jpg
 
 # Full capture report plus JPEG
 python -m dngscan photo.dng --jpeg photo.jpg --scan --csv photo.csv
 
-# Compare the three meaningful DRT alternatives at the same EV
+# Compare the default and two meaningful DRT alternatives at the same EV
+python -m dngscan photo.dng --jpeg agx.jpg --tone-core agx --agx-primaries smooth
 python -m dngscan photo.dng --jpeg gated.jpg --tone-core gated
-python -m dngscan photo.dng --jpeg agx.jpg --tone-core agx --agx-primaries base
 python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
 
 # Use a different RAW restoration or delivery gamut

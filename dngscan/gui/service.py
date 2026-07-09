@@ -224,7 +224,7 @@ def estimate_ev_headroom(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> dict[str, float | str]:
     if analysis is None:
         return {}
@@ -323,7 +323,7 @@ def parse_scene_transform(params: dict) -> tuple[str, float]:
 
 
 def parse_tone_core(params: dict) -> tuple[str, str]:
-    core = str(params.get("toneCore", params.get("tone_core", "gated")))
+    core = str(params.get("toneCore", params.get("tone_core", "agx")))
     norm = str(params.get("lumNorm", params.get("lum_norm", "y")))
     if core not in dg.TONE_CORE_CHOICES:
         raise ValueError(f"未知 tone 核：{core}")
@@ -333,7 +333,7 @@ def parse_tone_core(params: dict) -> tuple[str, str]:
 
 
 def parse_agx_primaries(params: dict) -> str:
-    value = str(params.get("agxPrimaries", params.get("agx_primaries", "base")))
+    value = str(params.get("agxPrimaries", params.get("agx_primaries", "smooth")))
     resolved = dg.agx_engine.resolve_agx_primaries(value)
     if resolved not in dg.agx_engine.AGX_PRIMARIES_PRESETS:
         raise ValueError(f"未知 AgX 基调：{value}")
@@ -358,7 +358,7 @@ def export_preview_jpeg(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> dict:
     dg.require_dependencies()
     stat = inp.stat()
@@ -499,13 +499,13 @@ def export_suffix_parts(
     scene_transform_strength: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
-    agx_primaries: str = "base",
+    agx_primaries: str = "smooth",
 ) -> str:
     """Build the filename stem suffix for GUI JPEG/PNG exports."""
     parts = [tone_core]
     if tone_core == "lum" and lum_norm != "y":
         parts.append(lum_norm)
-    if agx_primaries != "base":
+    if tone_core == "agx" and agx_primaries != "smooth":
         parts.append(agx_primaries)
     if highlight != "clip":
         parts.append(highlight)

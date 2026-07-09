@@ -12,6 +12,16 @@ class ExportSuffixTests(unittest.TestCase):
     def test_default_agx_only(self) -> None:
         self.assertEqual(export_suffix_parts("clip", "srgb", "sdr"), "agx")
 
+    def test_blender_reference_path_is_named(self) -> None:
+        self.assertEqual(
+            export_suffix_parts("clip", "srgb", "sdr", agx_primaries="base"),
+            "agx_base",
+        )
+        self.assertEqual(
+            export_suffix_parts("clip", "srgb", "sdr", tone_core="gated", agx_primaries="base"),
+            "gated",
+        )
+
     def test_includes_grade(self) -> None:
         self.assertEqual(
             export_suffix_parts("clip", "srgb", "sdr", "look:classic", 1.0),
