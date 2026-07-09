@@ -21,8 +21,9 @@ that repository's published generation parameters.
 
 ## Tony McMapface LUT (Apache-2.0 OR MIT)
 
-dngscan bundles `tony_mc_mapface.spi3d` (kept for reference/experiments; the
-current AgX-only pipeline does not sample it at runtime), an asset from:
+dngscan bundles `tony_mc_mapface.spi3d` (historical; kept for provenance only —
+the current AgX / luminance / neutral tone cores do not sample it at runtime),
+an asset from:
 
 - https://github.com/h3r2tic/tony-mc-mapface
 

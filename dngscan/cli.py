@@ -20,7 +20,10 @@ from .plot import default_png_path, plot_dashboard
 from .raw_io import load_raw
 from .report import csv_row, print_report, write_csv
 from .scene_transform import SCENE_TRANSFORM_CHOICES
-from .tone import LUM_NORM_CHOICES, TONE_CORE_CHOICES, compute_exposure_gain, plan_for_mode
+from .tone import (
+    LUM_NORM_CHOICES, TONE_CORE_CHOICES, compute_exposure_gain, exposure_mode_for_tone_core,
+    build_render_plan,
+)
 
 
 def require_dependencies() -> None:
@@ -138,7 +141,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--tone-core",
         choices=TONE_CORE_CHOICES,
         default="agx",
-        help="tone 核: agx=现行 AgX inset/outset；lum=亮度域收肩 + clip 驱动褪白",
+        help="tone 核: agx=现行 AgX inset/outset；lum=亮度域收肩 + clip 驱动褪白；neutral=场景线性直出（无 tone map，对比用）",
     )
     parser.add_argument(
         "--lum-norm",
@@ -219,18 +222,21 @@ def main(argv: list[str]) -> int:
                 args.punch,
                 args.tone_core,
                 args.lum_norm,
+                args.agx_primaries,
             )
         else:
             resolved_ev = float(ev_input)
 
-        bundle.exposure_gain = compute_exposure_gain(RENDER_MODE, resolved_ev)
+        bundle.exposure_gain = compute_exposure_gain(
+            exposure_mode_for_tone_core(args.tone_core), resolved_ev
+        )
         if out_path is not None:
             plot_dashboard(bundle, analysis, y, ev, out_path, auto_ev=auto_ev_result)
 
         jpeg_path = args.jpeg
         jpeg_icc_embedded = False
-        tone_plan = (
-            plan_for_mode(
+        render_plan = (
+            build_render_plan(
                 bundle,
                 analysis,
                 RENDER_MODE,
@@ -252,7 +258,7 @@ def main(argv: list[str]) -> int:
                 args.jpeg_quality,
                 bundle,
                 analysis,
-                tone_plan,
+                render_plan,
                 jpeg_output_gamut,
                 args.output_format,
                 args.hdr_headroom,
@@ -275,7 +281,7 @@ def main(argv: list[str]) -> int:
             RENDER_MODE if jpeg_path is not None else "",
             jpeg_icc_embedded,
             resolved_ev,
-            tone_plan,
+            render_plan.tone if render_plan is not None else None,
             jpeg_output_gamut,
             auto_ev_result,
             args.grade,
@@ -295,7 +301,7 @@ def main(argv: list[str]) -> int:
             RENDER_MODE if jpeg_path is not None else "",
             jpeg_icc_embedded,
             resolved_ev,
-            tone_plan,
+            render_plan.tone if render_plan is not None else None,
             jpeg_output_gamut,
             auto_ev_result,
             args.grade,

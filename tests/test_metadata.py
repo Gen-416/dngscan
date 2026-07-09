@@ -67,6 +67,16 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(info.model, "fp L")
         self.assertEqual(info.iso, 640)
 
+    def test_tiff_nef_path(self) -> None:
+        tiff = _tiff_with_shot_info(b"NIKON CORPORATION", b"Z 6_2", 3200)
+        with TemporaryDirectory() as td:
+            p = Path(td) / "shot.nef"
+            p.write_bytes(tiff)
+            info = metadata.read_dng_shot_info(p)
+        self.assertEqual(info.make, "NIKON CORPORATION")
+        self.assertEqual(info.model, "Z 6_2")
+        self.assertEqual(info.iso, 3200)
+
     def test_raf_path(self) -> None:
         exif_tiff = _tiff_with_shot_info(b"FUJIFILM", b"X-T5", 1250)
         raf = _raf_bytes(b"X-T5", _jpeg_with_exif(exif_tiff))

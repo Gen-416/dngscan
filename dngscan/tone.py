@@ -10,20 +10,52 @@ from . import agx as agx_engine
 from . import scene_transform as scene_transform_engine
 from .color import (
     apply_rgb_matrix3, clamp_float, luminance_from_rgb_space, output_gamut_space,
-    rec2020_to_xyz, smoothstep, XYZ_TO_RGB,
+    rec2020_to_xyz, XYZ_TO_RGB,
 )
-from .constants import AGX_INSET, EPS, EV_REPORT_FLOOR, GAMUT_EPS, GRAY_EV, MIDGRAY_HEADROOM_STOPS
-from .models import Analysis, RawBundle, ToneCompressionPlan
+from .constants import EPS, EV_REPORT_FLOOR, GAMUT_EPS, GRAY_EV, MIDGRAY_HEADROOM_STOPS
+from . import retreat as retreat_engine
+from .models import (
+    Analysis, ColorGeometryPlan, RawBundle, RenderPlan, SceneToneMetrics,
+    ToneCompressionPlan,
+)
 
-TONE_CORE_CHOICES = ("agx", "lum")
+TONE_CORE_CHOICES = ("agx", "lum", "neutral")
 LUM_NORM_CHOICES = ("y", "power", "max")
+
+
+def exposure_mode_for_tone_core(tone_core: str) -> str:
+    """Map tone-core selection to the exposure anchor used by compute_exposure_gain."""
+    if tone_core == "neutral":
+        return "neutral"
+    return "agx"
+
+
+def neutral_tone_plan(target_gamut: str) -> ToneCompressionPlan:
+    """Placeholder plan for the direct (no tone-map) path; curve fields are unused."""
+    return ToneCompressionPlan(
+        target_gamut=target_gamut,
+        luma_p1=0.0,
+        luma_p50=0.0,
+        luma_p99=0.0,
+        luma_p999=0.0,
+        black_ev=-10.0,
+        white_ev=6.5,
+        dynamic_range_ev=16.5,
+        contrast=3.0,
+        toe_power=1.5,
+        shoulder_power=3.3,
+        chroma_p95=0.0,
+        negative_rgb_pct=0.0,
+        over_rgb_pct=0.0,
+        tone_core="neutral",
+    )
 
 def compute_exposure_gain(mode: str, ev: float) -> float:
     """Constant, content-independent exposure anchor plus manual EV compensation.
 
     neutral stays at the raw-clip=1.0 reference (manual EV only). The tone-mapping
-    modes place a nominally-exposed mid gray (~clip / 2**headroom) onto 0.18 so the
-    AgX/Tony pivots land on real mid gray. This is a fixed scalar, never derived from
+    cores place a nominally-exposed mid gray (~clip / 2**headroom) onto 0.18 so the
+    curve pivot lands on real mid gray. This is a fixed scalar, never derived from
     scene content, so a dark scene stays dark.
     """
     manual = 2.0 ** float(ev)
@@ -44,10 +76,12 @@ def tone_plan_sample_scene_rec2020(
     max_samples: int = 800_000,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
+    exposure_gain: float | None = None,
 ) -> Any:
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
-    rec2020 = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, bundle.exposure_gain)
+    gain = bundle.exposure_gain if exposure_gain is None else exposure_gain
+    rec2020 = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, gain)
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
         bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
     )
@@ -56,7 +90,90 @@ def tone_plan_sample_scene_rec2020(
     )
 
 
+def scene_tone_metrics(
+    bundle: RawBundle,
+    analysis: Analysis,
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
+    plan_exposure_gain: float | None = None,
+    max_samples: int = 800_000,
+) -> SceneToneMetrics:
+    """Measure the reliable scene body separately from its highlight tail.
+
+    Reconstruction may make a clipped lamp visually plausible, but it cannot restore its
+    sensor headroom. We therefore exclude soft CFA-clipped sites from body percentiles
+    while retaining the complete rendered tail for topology classification.
+    """
+    flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
+    step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
+    gain = bundle.exposure_gain if plan_exposure_gain is None else plan_exposure_gain
+    rec = scene_rec2020_to_float(flat[::step, :3], bundle.scene_scale, gain)
+    wb_adapt = scene_transform_engine.wb_adaptation_ratios(
+        bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
+    )
+    rec = scene_transform_engine.apply_scene_transform_rec2020(
+        rec, scene_transform, scene_transform_strength, wb_adapt
+    )
+    y = np.clip(rec2020_to_xyz(rec)[:, 1], 2.0 ** EV_REPORT_FLOOR, None)
+    ev = np.log2(y) - GRAY_EV
+
+    reliable = np.ones((ev.shape[0],), dtype=bool)
+    if getattr(bundle, "clip_masks", None) is not None:
+        masks = retreat_engine.resize_clip_masks(bundle.clip_masks, bundle.scene_rec2020_render.shape[:2])
+        reliable = np.max(masks.reshape(-1, 3)[::step], axis=1) < np.float32(0.10)
+    reliable_ev = ev[reliable]
+    if reliable_ev.size < max(256, ev.size // 20):
+        reliable_ev = ev
+        reliable = np.ones((ev.shape[0],), dtype=bool)
+
+    p1, p5, p50, p95, p99, p999 = [
+        float(v) for v in np.percentile(reliable_ev, [1.0, 5.0, 50.0, 95.0, 99.0, 99.9])
+    ]
+    tail_p9999 = float(np.percentile(ev, 99.99))
+    tail0 = float(np.mean(ev > 0.0) * 100.0)
+    tail2 = float(np.mean(ev > 2.0) * 100.0)
+    extremity = tail2 / max(tail0, 1e-4)
+    sparse_emitter = bool(tail0 < 3.0 and extremity > 0.12)
+    return SceneToneMetrics(
+        reliable_sample_pct=float(np.mean(reliable) * 100.0),
+        body_ev_p1=p1,
+        body_ev_p5=p5,
+        body_ev_p50=p50,
+        body_ev_p95=p95,
+        body_ev_p99=p99,
+        body_ev_p999=p999,
+        tail_ev_p9999=tail_p9999,
+        tail_area_ev0_pct=tail0,
+        tail_area_ev2_pct=tail2,
+        tail_extremity=extremity,
+        sparse_emitter_tail=sparse_emitter,
+        raw_clip_union_pct=float(analysis.cell_union_pct),
+    )
+
+
+def build_color_geometry_plan(
+    analysis: Analysis, output_gamut: str, tone_core: str = "agx"
+) -> ColorGeometryPlan:
+    space = output_gamut_space(output_gamut)
+    pressure = float(analysis.gamut_out_pct.get(space, 0.0))
+    # The output fit reacts slightly sooner in the smaller sRGB container and grows its
+    # adaptive-L0 safety margin as measured output-gamut pressure rises. It remains a
+    # colour-only decision: no tone endpoint or contrast parameter reads this value.
+    base_alpha = 0.045 if output_gamut == "p3" else 0.060
+    alpha = base_alpha + 0.015 * clamp_float(pressure / 5.0, 0.0, 1.0)
+    return ColorGeometryPlan(
+        target_gamut=output_gamut,
+        # Neutral is a diagnostic scene-linear reference, so it must not hide clipped
+        # colour by applying the delivery transform's retreat operator.
+        raw_clip_retreat_strength=0.0 if tone_core == "neutral" else 1.0,
+        output_gamut_pressure_pct=pressure,
+        gamut_fit_alpha=alpha,
+        display_highlight_chroma_retreat=0.35 if tone_core == "lum" else 0.0,
+    )
+
+
 def _smoothstep_f(edge0: float, edge1: float, x: float) -> float:
+    """Scalar smoothstep retained for the separate AgX colour-punch gate."""
     t = clamp_float((x - edge0) / max(edge1 - edge0, 1e-9), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
 
@@ -72,37 +189,34 @@ def build_tone_compression_plan(
     tone_core: str = "agx",
     lum_norm: str = "y",
     agx_primaries: str = "base",
+    plan_exposure_gain: float | None = None,
+    scene_metrics: SceneToneMetrics | None = None,
 ) -> ToneCompressionPlan:
     outset_purity, outset_rotation_reversal = agx_engine.AGX_PRIMARIES_PRESETS.get(
         agx_primaries, agx_engine.AGX_PRIMARIES_PRESETS["base"]
     )
-    rec2020 = tone_plan_sample_scene_rec2020(
+    if tone_core == "neutral":
+        return neutral_tone_plan(target_gamut)
+
+    plan_gain = plan_exposure_gain if plan_exposure_gain is not None else bundle.exposure_gain
+    metrics = scene_metrics if scene_metrics is not None else scene_tone_metrics(
         bundle,
-        scene_transform=scene_transform,
-        scene_transform_strength=scene_transform_strength,
+        analysis,
+        scene_transform,
+        scene_transform_strength,
+        plan_gain,
+    )
+    rec2020 = tone_plan_sample_scene_rec2020(
+        bundle, scene_transform=scene_transform, scene_transform_strength=scene_transform_strength,
+        exposure_gain=plan_gain,
     )
     xyz = rec2020_to_xyz(rec2020)
     y = np.clip(xyz[:, 1], 0.0, None)
-    y_for_ev = np.clip(y, 2.0 ** EV_REPORT_FLOOR, None)
-    ev_rel = np.log2(y_for_ev) - GRAY_EV
-    ev_p1, ev_p50, ev_p99, ev_p999 = [float(v) for v in np.percentile(ev_rel, [1.0, 50.0, 99.0, 99.9])]
+    ev_p1 = metrics.body_ev_p1
+    ev_p50 = metrics.body_ev_p50
+    ev_p99 = metrics.body_ev_p99
+    ev_p999 = metrics.body_ev_p999
     luma_p1, luma_p50, luma_p99, luma_p999 = [float(v) for v in np.percentile(y, [1.0, 50.0, 99.0, 99.9])]
-
-    if ev_from_agx_inset:
-        # Derive the AgX log2 window from the exact signal the curve sees: Rec.2020
-        # working space, gamut-compressed, run through the inset. Pooling all three inset channels
-        # makes the window bracket the brightest channel, so saturated highlights reach the
-        # shoulder instead of hard-clipping at the log-encode stage. Luminance percentiles
-        # above stay Y-based (they only feed chroma/Tony gain).
-        inset = apply_rgb_matrix3(agx_engine.compress_into_gamut(rec2020.astype(np.float32, copy=False)), AGX_INSET)
-        inset_v = np.clip(inset.reshape(-1), 2.0 ** EV_REPORT_FLOOR, None)
-        ev_ch = np.log2(inset_v) - GRAY_EV
-        ev_p1, ev_p99, ev_p999 = [float(v) for v in np.percentile(ev_ch, [1.0, 99.0, 99.9])]
-
-    max_clip = max(analysis.clip_pct.values()) if analysis.clip_pct else 0.0
-    clip_term = clamp_float(max_clip / 1.0, 0.0, 1.0)
-    gamut_risk = analysis.gamut_out_pct.get(target_gamut, 0.0)
-    gamut_term = clamp_float(gamut_risk / 6.0, 0.0, 1.0)
 
     plan_dr = analysis.usable_dr_eff_ev if math.isfinite(analysis.usable_dr_eff_ev) else analysis.usable_dr_ev
     if math.isfinite(plan_dr):
@@ -110,58 +224,52 @@ def build_tone_compression_plan(
     else:
         noise_limited_black = -12.0
     black_ev = max(ev_p1 - 0.25, noise_limited_black)
-    black_ev = clamp_float(black_ev, -14.0, -2.0)
+    black_ev = clamp_float(black_ev, -14.0, -1.5)
+    # darktable's C1 curve starts toe/shoulder at the pivot by default. Do not map a
+    # dark scene's p95 directly to the shoulder: when p95 < 0 EV, that segment crosses
+    # the calibrated pivot and creates exactly the dark-frame / glaring-lamp failure.
+    latitude_lo_ev = 0.10
+    latitude_hi_ev = 0.20 if not metrics.sparse_emitter_tail else 0.0
+    toe_start_ev = -latitude_lo_ev
+    shoulder_start_ev = latitude_hi_ev
 
-    white_margin = 0.25 + 0.35 * clip_term + 0.20 * gamut_term
-    white_ev = max(ev_p999 + white_margin, ev_p99 + 0.10, 1.5)
-    white_ev = clamp_float(white_ev, 1.2, 8.5)
-    if white_ev - black_ev < 5.5:
-        black_ev = white_ev - 5.5
+    # The body distribution defines the usable image; the complete tail defines how
+    # long the shoulder must be. p99.99 is intentionally used only to reserve roll-off
+    # room for sparse lamps and speculars, not to re-anchor the scene's exposure.
+    white_margin = 0.50 if metrics.sparse_emitter_tail else 0.30
+    min_white_ev = 3.50 if metrics.sparse_emitter_tail else 3.00
+    white_ev = max(metrics.tail_ev_p9999 + white_margin, min_white_ev)
+    white_ev = clamp_float(white_ev, min_white_ev, 8.5)
 
-    # Bright-scene gate (median luminance near mid gray; exposure- and transform-aware).
-    # Drives the shadow relief and the punch strength: night scenes gate to zero.
-    w_bright = _smoothstep_f(-3.0, -1.2, ev_p50)
-
+    # These are strictly tone decisions. Colour clipping and output gamut live in
+    # ColorGeometryPlan and must not change either curve endpoint or pivot contrast.
     dynamic_range_ev = white_ev - black_ev
-    shadow_term = clamp_float((10.0 - plan_dr) / 3.0, 0.0, 1.0) if math.isfinite(plan_dr) else 0.5
-    shoulder_strength = max(clip_term, gamut_term)
-    contrast = clamp_float(3.0 - 0.25 * shoulder_strength + 0.10 * clamp_float((9.0 - dynamic_range_ev) / 4.0, 0.0, 1.0), 2.45, 3.15)
-    toe_power = clamp_float(1.5 - 0.25 * shadow_term, 1.15, 1.75)
-    # Shadow relief for bright scenes: a gentler toe lifts crushed shadows. Measured to be
-    # nearly colour-neutral, unlike widening black_ev (which flattens the window and washes
-    # subject colour ~20% — the opposite of the punch below, so it is deliberately not used).
-    toe_power = clamp_float(toe_power - 0.20 * w_bright, 1.15, 1.75)
-    shoulder_power = clamp_float(3.3 - 0.85 * shoulder_strength, 2.10, 3.60)
-    # Scene-driven latitude, shoulder side only: wider tonal windows earn a longer
-    # linear run above the pivot so daylight subject colors are not washed from mid
-    # gray up. The toe side stays at zero — a lower run makes the recomputed toe
-    # steeper and darkens deep shadows (measured), the opposite of what we want.
-    latitude_hi_ev = clamp_float(0.25 * dynamic_range_ev, 1.0, 2.0)
-    latitude_lo_ev = 0.0
-
-    # Scene-adaptive pivot (darktable "pivot relative exposure", automated): pull the
-    # point of maximum contrast toward the median luminance so a dark subject is not
-    # left on the low-contrast toe. Dead zones keep ordinary scenes (median within
-    # [-0.75, +0.5] EV of gray) byte-identical; the pull is conservative (45%) and
-    # bounded. Brightness is preserved by the curve builder (the shifted pivot keeps
-    # the output the unshifted curve produced at that input).
-    if ev_p50 < -0.75:
-        pivot_ev_offset = clamp_float(0.45 * (ev_p50 + 0.75), -1.75, 0.0)
-    elif ev_p50 > 0.5:
-        pivot_ev_offset = clamp_float(0.45 * (ev_p50 - 0.5), 0.0, 0.75)
+    contrast = 3.0
+    dark_body = clamp_float((-metrics.body_ev_p50 - 1.5) / 3.0, 0.0, 1.0)
+    toe_power = 1.50 - 0.35 * dark_body
+    shoulder_power = 2.55 if metrics.sparse_emitter_tail else 2.90
+    pivot_ev_offset = 0.0
+    target_black_linear = 0.0
+    # This is the darktable look-brightness equivalent, applied after the curve without
+    # changing exposure gain or the black/white endpoints. It is limited to sufficiently
+    # clean dark scenes so night intent remains black while readable shadow detail is not
+    # discarded by the view transform.
+    shadow_quality = _smoothstep_f(5.5, 8.5, plan_dr) if math.isfinite(plan_dr) else 0.5
+    view_brightness = 1.0 + 0.30 * dark_body * shadow_quality
+    # Punch is a post-core chroma operator, not a tone decision: it is calculated after
+    # endpoint selection and cannot feed back into pivot, toe, shoulder or exposure.
+    # The luminance core deliberately stays at zero because it already retains the
+    # original RGB ratio through the body; neutral is a diagnostic reference.
+    if tone_core == "agx":
+        w_bright = _smoothstep_f(-3.0, -1.2, metrics.body_ev_p50)
+        w_quality = _smoothstep_f(7.5, 9.5, plan_dr) if math.isfinite(plan_dr) else 0.5
+        w_dr = _smoothstep_f(6.5, 8.0, dynamic_range_ev)
+        punch_strength = clamp_float(
+            w_bright * w_quality * (0.55 + 0.45 * w_dr) * clamp_float(punch_scale, 0.0, 1.5),
+            0.0,
+            1.0,
+        )
     else:
-        pivot_ev_offset = 0.0
-
-    # Punch (post-AgX purity compensation, dngscan/punch.py): bright scenes with a
-    # quality sensor window (low ISO per priors) and a wide tonal window are the washed
-    # case; night/high-ISO gates to exactly zero, which short-circuits the operator so
-    # those renders stay byte-identical.
-    w_quality = _smoothstep_f(7.5, 9.5, plan_dr) if math.isfinite(plan_dr) else 0.5
-    w_dr = _smoothstep_f(6.5, 8.0, dynamic_range_ev)
-    punch_strength = clamp_float(
-        w_bright * w_quality * (0.55 + 0.45 * w_dr) * clamp_float(punch_scale, 0.0, 1.5), 0.0, 1.0
-    )
-    if tone_core == "lum":
         punch_strength = 0.0
 
     if target_gamut == "Rec2020":
@@ -173,14 +281,9 @@ def build_tone_compression_plan(
     chroma_ratio = np.max(np.abs(rgb - anchor[:, None]), axis=1) / np.maximum(anchor, EPS)
     finite_chroma = chroma_ratio[np.isfinite(chroma_ratio) & (anchor > 2.0 ** EV_REPORT_FLOOR)]
     chroma_p95 = float(np.percentile(finite_chroma, 95.0)) if finite_chroma.size else 0.0
-    chroma_term = clamp_float((chroma_p95 - 3.0) / 4.0, 0.0, 1.0)
-    chroma_strength = clamp_float(max(gamut_term, 0.85 * clip_term, chroma_term), 0.0, 1.0)
 
     negative_rgb_pct = float(np.mean(np.min(rgb, axis=1) < -GAMUT_EPS) * 100.0)
     over_rgb_pct = float(np.mean(np.max(rgb, axis=1) > 1.0 + GAMUT_EPS) * 100.0)
-    target_white_y = 0.18 * (2.0 ** white_ev)
-    observed_white_y = max(luma_p999, 0.18)
-    tony_hdr_gain = clamp_float(target_white_y / observed_white_y, 1.0, 2.2)
 
     return ToneCompressionPlan(
         target_gamut=target_gamut,
@@ -197,16 +300,66 @@ def build_tone_compression_plan(
         latitude_lo_ev=latitude_lo_ev,
         latitude_hi_ev=latitude_hi_ev,
         punch_strength=punch_strength,
-        chroma_strength=chroma_strength,
         chroma_p95=chroma_p95,
         negative_rgb_pct=negative_rgb_pct,
         over_rgb_pct=over_rgb_pct,
-        tony_hdr_gain=tony_hdr_gain,
         tone_core=tone_core,
         lum_norm=lum_norm,
         pivot_ev_offset=pivot_ev_offset,
+        target_black_linear=target_black_linear,
         outset_purity=outset_purity,
         outset_rotation_reversal=outset_rotation_reversal,
+        toe_start_ev=toe_start_ev,
+        shoulder_start_ev=shoulder_start_ev,
+        use_c1_endpoints=True,
+        view_brightness=view_brightness,
+    )
+
+
+def build_render_plan(
+    bundle: RawBundle,
+    analysis: Analysis,
+    mode: str,
+    output_gamut: str = "srgb",
+    scene_transform: str = "none",
+    scene_transform_strength: float = 1.0,
+    punch_scale: float = 1.0,
+    tone_core: str = "agx",
+    lum_norm: str = "y",
+    agx_primaries: str = "base",
+) -> RenderPlan:
+    """Compile independent scene, tone and colour plans from an immutable capture."""
+    tone_core = tone_core if tone_core in TONE_CORE_CHOICES else "agx"
+    lum_norm = lum_norm if lum_norm in LUM_NORM_CHOICES else "y"
+    # agx / lum / neutral all curve (or pass through) in the Rec.2020 working space; the
+    # `else` stays a defensive fallback for any future output-space-native core.
+    if mode == "agx" or tone_core in ("lum", "neutral"):
+        target_gamut = "Rec2020"
+    else:
+        target_gamut = output_gamut_space(output_gamut)
+    plan_gain = compute_exposure_gain(exposure_mode_for_tone_core(tone_core), 0.0)
+    scene = scene_tone_metrics(
+        bundle, analysis, scene_transform if mode == "agx" else "none",
+        scene_transform_strength, plan_gain,
+    )
+    tone = build_tone_compression_plan(
+        bundle,
+        analysis,
+        target_gamut,
+        ev_from_agx_inset=False,
+        scene_transform=scene_transform if mode == "agx" else "none",
+        scene_transform_strength=scene_transform_strength,
+        punch_scale=punch_scale if mode == "agx" else 0.0,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
+        agx_primaries=agx_primaries if mode == "agx" and tone_core == "agx" else "base",
+        plan_exposure_gain=plan_gain,
+        scene_metrics=scene,
+    )
+    return RenderPlan(
+        tone=tone,
+        color=build_color_geometry_plan(analysis, output_gamut, tone_core),
+        scene=scene,
     )
 
 
@@ -222,29 +375,16 @@ def plan_for_mode(
     lum_norm: str = "y",
     agx_primaries: str = "base",
 ) -> ToneCompressionPlan:
-    """Build the tone plan in the space each mode actually works in.
-
-    smart operates in the selected output space, Tony uses its authored linear-sRGB
-    LUT stimulus, and AgX stays in Rec.2020 and derives its log2 window from the
-    Rec.2020 inset signal it curves.
-    """
-    tone_core = tone_core if tone_core in TONE_CORE_CHOICES else "agx"
-    lum_norm = lum_norm if lum_norm in LUM_NORM_CHOICES else "y"
-    if mode == "agx" or tone_core == "lum":
-        target_gamut = "Rec2020"
-    elif mode == "tony":
-        target_gamut = "sRGB"
-    else:
-        target_gamut = output_gamut_space(output_gamut)
-    return build_tone_compression_plan(
+    """Compatibility accessor for callers that only need the tone sub-plan."""
+    return build_render_plan(
         bundle,
         analysis,
-        target_gamut,
-        ev_from_agx_inset=(mode == "agx" and tone_core == "agx"),
-        scene_transform=scene_transform if mode == "agx" else "none",
-        scene_transform_strength=scene_transform_strength,
-        punch_scale=punch_scale if mode == "agx" and tone_core == "agx" else 0.0,
-        tone_core=tone_core,
-        lum_norm=lum_norm,
-        agx_primaries=agx_primaries if mode == "agx" and tone_core == "agx" else "base",
-    )
+        mode,
+        output_gamut,
+        scene_transform,
+        scene_transform_strength,
+        punch_scale,
+        tone_core,
+        lum_norm,
+        agx_primaries,
+    ).tone

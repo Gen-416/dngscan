@@ -32,19 +32,27 @@ def apply_lum_core(rgb_rec2020: Any, plan: Any) -> Any:
     rgb = np.asarray(rgb_rec2020, dtype=np.float32)
     mode = str(getattr(plan, "lum_norm", "y"))
     norm = norm_rec2020(rgb, mode)
-    params = agx_engine.curve_params(
-        round(plan.black_ev, 3),
-        round(plan.white_ev, 3),
-        round(plan.contrast, 3),
-        round(plan.toe_power, 3),
-        round(plan.shoulder_power, 3),
-        round(float(getattr(plan, "latitude_lo_ev", 0.0)), 3),
-        round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
-    )
-    log_encoded = (np.log2(np.maximum(norm / np.float32(0.18), EPS)) - float(params["black_ev"])) / float(params["range_ev"])
-    log_encoded = np.clip(log_encoded, 0.0, 1.0)
-    curved = agx_engine.apply_curve(log_encoded, params)
-    mapped_norm = np.power(np.maximum(curved, 0.0), float(params["gamma"]))
+    ev = np.log2(np.maximum(norm / np.float32(0.18), EPS))
+    if bool(getattr(plan, "use_c1_endpoints", False)):
+        from .drt import apply_c1_endpoints
+
+        mapped_norm = apply_c1_endpoints(ev, plan)
+    else:
+        params = agx_engine.curve_params(
+            round(plan.black_ev, 3),
+            round(plan.white_ev, 3),
+            round(plan.contrast, 3),
+            round(plan.toe_power, 3),
+            round(plan.shoulder_power, 3),
+            round(float(getattr(plan, "latitude_lo_ev", 0.0)), 3),
+            round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
+        )
+        log_encoded = (ev - float(params["black_ev"])) / float(params["range_ev"])
+        curved = agx_engine.apply_curve(np.clip(log_encoded, 0.0, 1.0), params)
+        mapped_norm = np.power(np.maximum(curved, 0.0), float(params["gamma"]))
+    brightness = max(EPS, float(getattr(plan, "view_brightness", 1.0)))
+    if abs(brightness - 1.0) > 1e-6:
+        mapped_norm = np.power(np.maximum(mapped_norm, 0.0), 1.0 / brightness)
     ratio = np.zeros_like(mapped_norm, dtype=np.float32)
     valid = norm > np.float32(EPS)
     ratio[valid] = mapped_norm[valid] / np.maximum(norm[valid], np.float32(EPS))

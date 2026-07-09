@@ -110,9 +110,10 @@ details.adv .advBody{padding:0 16px 16px}
   <div class="row">
     <div style="flex:1;min-width:160px">
       <label>Tone 核</label>
-      <select id="toneCore" title="agx=现行 inset/outset AgX；lum=亮度域收肩 + raw clip 褪白">
+      <select id="toneCore" title="agx=现行 inset/outset AgX；lum=亮度域收肩；neutral=场景线性直出（无 tone map，对比 AgX 用）">
         <option value="agx">AgX · 现行</option>
         <option value="lum">Lum · 亮度核</option>
+        <option value="neutral">Neutral · 直出</option>
       </select>
     </div>
     <div id="lumNormBlock" style="flex:1;min-width:140px;display:none">
@@ -266,7 +267,7 @@ function updateGradeUi(){$("#gradeStrengthBlock").style.display=$("#grade").valu
 function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v.toFixed(2);}
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
-function updateToneCoreUi(){const lum=$("#toneCore").value==="lum";$("#lumNormBlock").style.display=lum?"block":"none";$("#agxPrimariesBlock").style.display=lum?"none":"block";}
+function updateToneCoreUi(){const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";$("#lumNormBlock").style.display=lum?"block":"none";$("#agxPrimariesBlock").style.display=(lum||neutral)?"none":"block";}
 function updateFormatUi(){$("#hdrBlock").style.display=$("#format").value==="ultrahdr"?"flex":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
 function setHdrLabel(){const v=+$("#hdrHeadroom").value;$("#hdrHeadroomVal").textContent="+"+v.toFixed(2);}

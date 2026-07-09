@@ -144,11 +144,9 @@ def _minimal_plan() -> ToneCompressionPlan:
         contrast=3.0,
         toe_power=1.5,
         shoulder_power=3.0,
-        chroma_strength=0.0,
         chroma_p95=0.0,
         negative_rgb_pct=0.0,
         over_rgb_pct=0.0,
-        tony_hdr_gain=1.0,
     )
 
 

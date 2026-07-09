@@ -12,9 +12,9 @@ from . import retreat as retreat_engine
 from . import scene_transform as scene_transform_engine
 from .color import RGB_TO_XYZ, output_gamut_space, rec2020_to_output
 from .constants import EPS
-from .models import Analysis, AutoEvResult, RawBundle, ToneCompressionPlan
+from .models import Analysis, AutoEvResult, RawBundle, RenderPlan, ToneCompressionPlan
 from .render import apply_tone_core, finalize_output_linear, plan_with_look_overrides
-from .tone import compute_exposure_gain, plan_for_mode, scene_rec2020_to_float
+from .tone import build_render_plan, compute_exposure_gain, exposure_mode_for_tone_core, scene_rec2020_to_float
 
 EV_AUTO_TOKEN = "auto"
 
@@ -85,7 +85,7 @@ def render_sample_linear_output(
     gamut: str,
     ev: float,
     sample_rec2020: Any,
-    tone_plan: ToneCompressionPlan | None = None,
+    tone_plan: ToneCompressionPlan | RenderPlan | None = None,
     look: str = "none",
     look_strength: float = 1.0,
     display_filter: str = "none",
@@ -100,11 +100,11 @@ def render_sample_linear_output(
 ) -> Any:
     from .grade import RENDER_MODE
 
-    exposure_gain = compute_exposure_gain(RENDER_MODE, ev)
+    exposure_gain = compute_exposure_gain(exposure_mode_for_tone_core(tone_core), ev)
     ev_bundle = replace(bundle, exposure_gain=exposure_gain)
     rec = scene_rec2020_to_float(sample_rec2020, bundle.scene_scale, exposure_gain)
     plan = tone_plan if tone_plan is not None else (
-        plan_for_mode(
+        build_render_plan(
             ev_bundle,
             analysis,
             RENDER_MODE,
@@ -123,17 +123,21 @@ def render_sample_linear_output(
     rec = scene_transform_engine.apply_scene_transform_rec2020(
         rec, scene_transform, scene_transform_strength, wb_adapt
     )
-    if plan is not None and str(getattr(plan, "tone_core", "agx")) == "lum" and sample_masks is not None:
-        rec = retreat_engine.apply_clip_retreat_rec2020(rec, sample_masks)
+    color_plan = plan.color if isinstance(plan, RenderPlan) else None
+    if color_plan is not None and sample_masks is not None:
+        rec = retreat_engine.apply_clip_retreat_rec2020(
+            rec, sample_masks, float(color_plan.raw_clip_retreat_strength)
+        )
     effective_plan = plan_with_look_overrides(plan, look, look_strength) if plan is not None else None
-    mapped_rec = apply_tone_core(rec, effective_plan)
+    effective_tone = effective_plan.tone if isinstance(effective_plan, RenderPlan) else effective_plan
+    mapped_rec = apply_tone_core(rec, effective_tone)
     if display_filter != "none" and filter_strength > 0.0:
         output_linear = filter_engine.apply_display_filter_rec2020(
             mapped_rec, gamut, display_filter, filter_strength, scene_rec2020=rec
         )
     else:
         output_linear = rec2020_to_output(mapped_rec, gamut)
-    return finalize_output_linear(output_linear, gamut, look, look_strength)
+    return finalize_output_linear(output_linear, gamut, look, look_strength, color_plan)
 
 
 def max_safe_ev(
@@ -152,17 +156,16 @@ def max_safe_ev(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> float:
     """Largest EV (>= from_ev) whose preview-scale output stays below highlight thresholds."""
-    from .grade import RENDER_MODE
-
     if np is None:
         return float(from_ev)
     flat = bundle.scene_rec2020_render.reshape(-1, bundle.scene_rec2020_render.shape[-1])
     step = max(1, int(math.ceil(flat.shape[0] / max_samples)))
     sample_rgb = flat[::step, :3]
     sample_masks = None
-    if tone_core == "lum" and getattr(bundle, "clip_masks", None) is not None:
+    if getattr(bundle, "clip_masks", None) is not None:
         masks = retreat_engine.resize_clip_masks(bundle.clip_masks, bundle.scene_rec2020_render.shape[:2]).reshape(-1, 3)
         sample_masks = masks[::step]
     baseline_stats: tuple[float, float, float, float] | None = None
@@ -183,6 +186,7 @@ def max_safe_ev(
             punch_scale=punch_scale,
             tone_core=tone_core,
             lum_norm=lum_norm,
+            agx_primaries=agx_primaries,
             sample_masks=sample_masks,
         )
         return output_highlight_margin(rgb, gamut, baseline_stats)
@@ -202,6 +206,7 @@ def max_safe_ev(
         punch_scale=punch_scale,
         tone_core=tone_core,
         lum_norm=lum_norm,
+        agx_primaries=agx_primaries,
         sample_masks=sample_masks,
     )
     baseline_stats = output_highlight_stats(baseline_rgb, gamut)
@@ -240,6 +245,7 @@ def compute_auto_ev(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> AutoEvResult:
     """Boost toward 18% gray median when scene is dark; never darken high-key captures.
 
@@ -247,10 +253,8 @@ def compute_auto_ev(
     (negative median_align target) stay at baseline_ev — auto does not gray-world
     snow/high-key into mid gray.
     """
-    from .grade import RENDER_MODE
-
-    mode = RENDER_MODE
-    target = median_align_ev(mode, analysis)
+    exposure_mode = exposure_mode_for_tone_core(tone_core)
+    target = median_align_ev(exposure_mode, analysis)
     cap = max_safe_ev(
         bundle,
         analysis,
@@ -265,6 +269,7 @@ def compute_auto_ev(
         punch_scale=punch_scale,
         tone_core=tone_core,
         lum_norm=lum_norm,
+        agx_primaries=agx_primaries,
     )
     boost_target = max(target, baseline_ev)
     ev = min(boost_target, cap)
@@ -275,7 +280,7 @@ def compute_auto_ev(
         ev_boost=float(ev - baseline_ev),
         highlight_limited=limited,
         highlight_cap_ev=float(cap),
-        anchored_median_ev=anchored_median_ev(mode, analysis, ev),
+        anchored_median_ev=anchored_median_ev(exposure_mode, analysis, ev),
     )
 
 
@@ -293,6 +298,7 @@ def resolve_export_ev(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> tuple[float, AutoEvResult | None]:
     if not is_ev_auto(ev):
         return float(ev), None
@@ -310,6 +316,7 @@ def resolve_export_ev(
         punch_scale,
         tone_core,
         lum_norm,
+        agx_primaries,
     )
     return result.ev, result
 

@@ -26,6 +26,7 @@ dngscan_assets/*
 *.cr2
 *.cr3
 *.nef
+*.nrw
 *.raf
 *.rw2
 *.orf

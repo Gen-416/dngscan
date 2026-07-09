@@ -199,6 +199,8 @@ def curve_params(
     latitude_hi_ev: float = 0.0,
     pivot_ev_offset: float = 0.0,
     target_black_linear: float = 0.0,
+    keep_pivot_diagonal: bool = True,
+    curve_gamma: float = DEFAULT_CURVE_GAMMA,
 ) -> dict[str, float | bool]:
     """AgX curve parameterization with scene-adaptive pivot and adaptive gamma.
 
@@ -231,14 +233,15 @@ def curve_params(
     else:
         pivot_y_linear = 0.18
 
-    # Keep the pivot on the diagonal: solve gamma so pivot_y_encoded == pivot_x.
-    # pivot_y_linear^(1/gamma) = pivot_x  =>  gamma = ln(pivot_y_linear)/ln(pivot_x).
-    if pivot_x < 1.0 - EPS and 0.0 < pivot_y_linear < 1.0:
+    # darktable exposes this as "keep the pivot on the diagonal". Its scene-referred
+    # default keeps the historical 2.2 curve gamma; callers selecting the automatic
+    # option retain the older dngscan behavior.
+    if keep_pivot_diagonal and pivot_x < 1.0 - EPS and 0.0 < pivot_y_linear < 1.0:
         gamma = _clamp_float(
             float(np.log(pivot_y_linear) / np.log(pivot_x)), 1.5, 5.0
         )
     else:
-        gamma = DEFAULT_CURVE_GAMMA
+        gamma = _clamp_float(curve_gamma, 0.01, 100.0)
 
     return _build_curve_params(
         black_ev, white_ev, contrast, toe_power, shoulder_power,
@@ -409,23 +412,12 @@ def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: An
     guard rail -> inset (rotation+attenuation) -> log2 window -> sigmoid ->
     linearize -> hue mix (plan.hue_keep of per-channel shift) -> outset in LINEAR light.
 
-    Deviations from the reference, all deliberate: the log2 window, sigmoid parameters,
-    pivot placement and target black come from the scene analysis plan (reference uses
-    fixed [-10,+6.5], fixed contrast, mid-gray pivot); the internal y gamma adapts to
-    keep the pivot on the curve diagonal; and the outset can be reshaped by the plan's
-    purity / rotation-reversal scalars (base preset reproduces Blender exactly).
+    Deviations from the reference, all deliberate: the endpoint-normalized log2 window
+    and C1 sigmoid parameters come from the scene plan while EV=0 remains the calibrated
+    mid-gray pivot; the scene DRT uses darktable's default fixed internal gamma, whereas
+    the legacy branch retains optional diagonal-pivot gamma; and the outset can be
+    reshaped by the plan's purity / rotation-reversal scalars (base matches Blender).
     """
-    params = curve_params(
-        round(plan.black_ev, 3),
-        round(plan.white_ev, 3),
-        round(plan.contrast, 3),
-        round(plan.toe_power, 3),
-        round(plan.shoulder_power, 3),
-        round(float(getattr(plan, "latitude_lo_ev", 0.0)), 3),
-        round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
-        round(float(getattr(plan, "pivot_ev_offset", 0.0)), 3),
-        round(float(getattr(plan, "target_black_linear", 0.0)), 4),
-    )
     hue_keep = _clamp_float(float(getattr(plan, "hue_keep", AGX_HUE_KEEP)), 0.0, 1.0)
     outset = effective_outset(
         outset_matrix,
@@ -435,10 +427,37 @@ def apply_core(rgb_rec2020: Any, plan: Any, inset_matrix: Any, outset_matrix: An
     rgb = compress_into_gamut(rgb_rec2020.astype(np.float32, copy=False))
     inset = _apply_matrix3(rgb, inset_matrix)
     pre_hue = _rgb_to_hsv(np.maximum(inset, 0.0))[:, 0] if hue_keep < 0.999 else None
-    log_encoded = (np.log2(np.maximum(inset / 0.18, EPS)) - float(params["black_ev"])) / float(params["range_ev"])
-    log_encoded = np.clip(log_encoded, 0.0, 1.0)
-    curved = apply_curve(log_encoded, params)
-    linear = np.power(np.maximum(curved, 0.0), float(params["gamma"]))
+    if bool(getattr(plan, "use_c1_endpoints", False)):
+        # The DRT derives endpoints from luminance-only scene measurements but maps each
+        # AgX-inset channel through the same endpoint-normalized C1 curve, preserving
+        # the per-channel path-to-white.
+        from .drt import apply_c1_endpoints
+
+        linear = apply_c1_endpoints(np.log2(np.maximum(inset / 0.18, EPS)), plan)
+    else:
+        params = curve_params(
+            round(plan.black_ev, 3),
+            round(plan.white_ev, 3),
+            round(plan.contrast, 3),
+            round(plan.toe_power, 3),
+            round(plan.shoulder_power, 3),
+            round(float(getattr(plan, "latitude_lo_ev", 0.0)), 3),
+            round(float(getattr(plan, "latitude_hi_ev", 0.0)), 3),
+            round(float(getattr(plan, "pivot_ev_offset", 0.0)), 3),
+            round(float(getattr(plan, "target_black_linear", 0.0)), 4),
+        )
+        log_encoded = (np.log2(np.maximum(inset / 0.18, EPS)) - float(params["black_ev"])) / float(params["range_ev"])
+        log_encoded = np.clip(log_encoded, 0.0, 1.0)
+        curved = apply_curve(log_encoded, params)
+        brightness = max(EPS, float(getattr(plan, "view_brightness", 1.0)))
+        if abs(brightness - 1.0) > 1e-6:
+            curved = np.power(np.maximum(curved, 0.0), 1.0 / brightness)
+        linear = np.power(np.maximum(curved, 0.0), float(params["gamma"]))
+    brightness = max(EPS, float(getattr(plan, "view_brightness", 1.0)))
+    if bool(getattr(plan, "use_c1_endpoints", False)) and abs(brightness - 1.0) > 1e-6:
+        # Mirrors darktable's display-referred "brightness" look control. It raises
+        # only the interior of the curve, preserving true black and target white.
+        linear = np.power(np.maximum(linear, 0.0), 1.0 / brightness)
     if pre_hue is not None:
         linear = _mix_hue(linear, pre_hue, hue_keep)
     return _apply_matrix3(linear, outset).astype(np.float32)

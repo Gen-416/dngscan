@@ -100,11 +100,9 @@ class ToneCompressionPlan:
     contrast: float
     toe_power: float
     shoulder_power: float
-    chroma_strength: float
     chroma_p95: float
     negative_rgb_pct: float
     over_rgb_pct: float
-    tony_hdr_gain: float
     # Linear latitude around the pivot (EV): shoulder starts latitude_hi_ev above mid
     # gray instead of at it, keeping bright subject colors out of the channel-converging
     # shoulder; a small lower run keeps upper shadows off the toe. Zero = pure sigmoid.
@@ -130,6 +128,65 @@ class ToneCompressionPlan:
     # purity 1 + reversal 0 reproduces Blender's outset exactly.
     outset_purity: float = 1.0
     outset_rotation_reversal: float = 0.0
+    # The endpoint-normalized C1 DRT keeps the calibrated scene EV=0 pivot fixed while
+    # re-scaling only its black/white bounds. These values share that scene-relative EV
+    # domain; `shoulder_start_ev` is the requested linear latitude above the pivot.
+    toe_start_ev: float = -4.0
+    shoulder_start_ev: float = 1.0
+    use_c1_endpoints: bool = True
+    # Display-referred dark-scene lift, implemented like darktable's look brightness:
+    # it leaves encoded black/white fixed and is never an exposure gain.
+    view_brightness: float = 1.0
+
+
+@dataclass(frozen=True)
+class SceneToneMetrics:
+    """Scene-referred luminance facts used only to compile the tone plan.
+
+    The reliable distribution excludes CFA sites with exhausted headroom. Its purpose is
+    to prevent reconstructed lamps and single-channel clipping from defining the global
+    shoulder. It deliberately contains no creative or output-gamut decisions.
+    """
+
+    reliable_sample_pct: float
+    body_ev_p1: float
+    body_ev_p5: float
+    body_ev_p50: float
+    body_ev_p95: float
+    body_ev_p99: float
+    body_ev_p999: float
+    tail_ev_p9999: float
+    tail_area_ev0_pct: float
+    tail_area_ev2_pct: float
+    tail_extremity: float
+    sparse_emitter_tail: bool
+    raw_clip_union_pct: float
+
+
+@dataclass(frozen=True)
+class ColorGeometryPlan:
+    """Colour-only decisions for one output gamut.
+
+    `raw_clip_retreat_strength` is applied only through the CFA-derived mask. Output
+    gamut pressure controls the final hue-preserving fit, never the tone endpoints.
+    """
+
+    target_gamut: str
+    raw_clip_retreat_strength: float
+    output_gamut_pressure_pct: float
+    gamut_fit_alpha: float = 0.05
+    # A restrained display-side safety valve for the luminance core. AgX already has
+    # its own inset/outset path toward white, so this is zero for the AgX core.
+    display_highlight_chroma_retreat: float = 0.0
+
+
+@dataclass(frozen=True)
+class RenderPlan:
+    """Immutable contract between analysis and the renderer."""
+
+    tone: ToneCompressionPlan
+    color: ColorGeometryPlan
+    scene: SceneToneMetrics
 
 
 @dataclass

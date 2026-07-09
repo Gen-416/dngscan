@@ -5,7 +5,7 @@
 A physically-grounded RAW/DNG analyzer and **AgX** tone-mapping exporter. It reads a
 camera raw file, measures what the sensor actually captured (dynamic range, per-channel
 clipping, SNR, gamut pressure), and renders that scene-linear signal to an 8-bit JPEG
-through a single AgX view transform — optionally with a **grade** (chromatic look or
+through an AgX or luminance-preserving view transform — optionally with a **grade** (chromatic look or
 display filter) — from the command line or a small local web GUI.
 
 It began as a diagnostic tool (the six-panel PNG dashboard) and grew into a way to
@@ -17,15 +17,16 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
   distributions, RGB exposure histograms, gamut-overflow risk per output space, a
   spatial exposure-zone map, and a clipped-channel highlight map, plus per-channel
   full-well / clip / black-level / white-balance readouts.
-- **AgX export** — Rec.2020-native AgX view transform: inset → log2 → sigmoid →
-  outset. Channel crosstalk gives smooth highlight desaturation and AgX's signature hue
-  flourish. The tone curve is analysis-driven (black/white EV, toe/shoulder, latitude)
-  with darktable-aligned safeguards: adaptive internal gamma keeps the pivot on the
-  diagonal, a minimum shoulder/toe run prevents curve inversion on narrow-DR scenes, and
-  scene-adaptive pivot placement puts maximum contrast on the subject in dark frames.
-  Optional `--agx-primaries {base,punchy,smooth}` reshapes the outset (purity /
-  rotation-reversal scalars). Chromatic looks may override `hue_keep` and lift blacks
-  (`target_black`) for film-sim character.
+- **Separated DRT** — analysis compiles an immutable `RenderPlan`: reliable scene-Y
+  statistics set only the C1 toe/shoulder endpoints, raw CFA clipping drives only
+  pre-curve chroma retreat, and output-gamut pressure drives only the final gamut fit.
+  The AgX formation keeps the calibrated EV=0 pivot while normalizing only scene-derived
+  black/white endpoints, so manual EV never reanchors the pivot or turns a night scene
+  into middle gray. Clean dark scenes may receive a bounded display-referred brightness
+  lift which preserves true black/white, rather than an exposure gain. `--tone-core agx` keeps the Rec.2020 inset → log2 → sigmoid → outset
+  geometry; `--tone-core lum` applies the same endpoint
+  DRT to a luminance norm, preserving RGB ratios and using a restrained display-white
+  chroma fade. Optional `--agx-primaries {base,punchy,smooth}` reshapes only AgX outset.
 - **Pre-AgX scene transform (experimental)** — optional `--scene-transform arri_skin_d55`
   runs in scene-linear Rec.2020 after camera colour interpretation and before AgX,
   blending constrained 3x3 matrices inside skin/cyan chromaticity masks. Off by default.
@@ -39,9 +40,10 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
 - **High-quality demosaic on export** — full-res exports use `--demosaic auto` (DHT
   preferred, libraw-native for non-Bayer / X-Trans sensors) or a manual algorithm;
   preview uses a light demosaic. Interpolation quality only — **no noise reduction**.
-  **Fujifilm RAF** (X-Trans and Bayer) is supported: camera model / ISO are read from
-  the proprietary header and embedded JPEG EXIF; CFA pattern is captured before
-  demosaic for correct analysis.
+  **Fujifilm RAF** (X-Trans and Bayer) and **Nikon NEF/NRW** (Bayer via libraw) are
+  supported: RAF reads model / ISO from the proprietary header and embedded JPEG EXIF;
+  NEF/NRW use the standard TIFF EXIF path. CFA pattern is captured before demosaic for
+  correct analysis on X-Trans.
 - **Local web GUI** (`python -m dngscan.gui`) — pick a file, exposure, AgX primaries,
   grade, quality, demosaic and output gamut; live preview; per-file exposure-headroom
   estimate; sRGB or Display P3; highlight handling (clip / blend / reconstruct).
@@ -52,7 +54,7 @@ produce finished JPEGs directly, without round-tripping through a raw editor.
 
 ## Processing pipeline
 
-Everything through AgX is fixed. `--grade` picks **one** post-AgX path — the Oklab and
+The fixed scene body is separated from its endpoints and colour geometry. `--grade` picks **one** post-core path — the Oklab and
 log-encode branches are mutually exclusive implementations for two different LUT families,
 not two layers you can stack.
 
@@ -63,22 +65,24 @@ not two layers you can stack.
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ② Analysis + exposure                                       │
-│    analyze() · EV manual/auto · compute_exposure_gain(agx)  │
+│ ② Capture analysis + plan                                   │
+│    analyze() · fixed anchor + manual/auto EV · RenderPlan   │
+│    scene Y → C1 toe/shoulder; raw clip → chroma retreat     │
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ②b Pre-AgX scene transform (optional)                       │
+│ ②b Pre-core scene transform (optional)                      │
 │    scene Rec.2020 ──► skin/cyan chroma mask ──► constrained M│
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ③ AgX  (always)                                             │
-│    scene Rec.2020 ──► AgX core ──► mapped Rec.2020          │
+│ ③ Tone core                                                 │
+│    agx: inset → endpoint-normalized C1 curve → outset       │
+│    lum: Y/power/max norm → same C1 curve, RGB ratio preserved│
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ③b grade  `--grade` · pick exactly one · same AgX input     │
+│ ③b Colour geometry + grade  `--grade` · pick exactly one    │
 │                                                             │
 │   none ──────────────► rec2020_to_output (AgX display only) │
 │                                                             │
@@ -101,12 +105,15 @@ not two layers you can stack.
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Why two grade mechanisms?** Both choices sit on the same AgX render. Fujifilm / ARRI
-official LUTs were **measured** into Oklab LookFields — they only describe chromatic
-geometry relative to AgX, so runtime work stays in Oklab with **L untouched**. Kodak /
-RED cubes are **full** log-in → display-out transforms (tone and saturation together);
-they must be sampled after the correct log encode. Feeding those cubes through the
-LookField extractor collapses saturation, so they get a separate log → `.cube` path instead.
+**Why two grade mechanisms?** Both choices sit on the render produced by the selected
+tone core. Fujifilm / ARRI official LUTs were **measured** into Oklab LookFields — they
+only describe chromatic geometry, so runtime work stays in Oklab with **L untouched**.
+Note this means the look never sets luminance itself: L comes from the tone core that ran
+underneath it (AgX per-channel formation, the `lum` luminance norm, or `neutral` passthrough),
+and the look only reshapes a/b on top. Kodak / RED cubes are **full** log-in → display-out
+transforms (tone and saturation together); they must be sampled after the correct log
+encode. Feeding those cubes through the LookField extractor collapses saturation, so they
+get a separate log → `.cube` path instead.
 
 ## Design notes
 
@@ -147,6 +154,11 @@ A few choices worth knowing:
   the same demosaic and highlight mode as your export, so they describe the image you
   actually get. Raw/CFA-domain analysis (clip %, saturation pile, SNR, noise floor) stays
   independent of demosaic and highlight — it reports what the sensor physically captured.
+- **Preview vs export.** The GUI compiles the tone plan from a half-resolution proxy of
+  the scene (full-resolution analysis), so previews are fast and essentially match. Sparse
+  highlights and clip-mask edges can differ slightly at full resolution — when comparing
+  tone cores (e.g. AgX vs neutral) pixel-for-pixel, judge from an actual export, not the
+  proxy preview.
 
 Metrics are single-frame estimates (not photon-transfer measurements); bit depth is
 not the same as usable dynamic range.
@@ -212,8 +224,9 @@ python -m dngscan photo.dng
 # AgX JPEG, +0.5 EV, Display P3
 python -m dngscan photo.dng --jpeg out.jpg --ev 0.5 --output-gamut p3
 
-# Fujifilm RAF (X-Trans) — same CLI/GUI as DNG
+# Fujifilm RAF (X-Trans) or Nikon NEF — same CLI/GUI as DNG
 python -m dngscan photo.raf --jpeg out.jpg
+python -m dngscan photo.nef --jpeg out.jpg
 
 # Fujifilm Velvia look (chromatic geometry on AgX)
 python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_velvia --grade-strength 1.0

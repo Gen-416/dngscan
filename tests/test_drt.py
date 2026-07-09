@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Contracts for the endpoint-normalized C1 DRT."""
+from __future__ import annotations
+
+import unittest
+
+from dngscan._deps import np
+from dngscan.drt import apply_c1_endpoints, curve_params_from_plan
+from dngscan.models import ToneCompressionPlan
+
+
+def _plan() -> ToneCompressionPlan:
+    return ToneCompressionPlan(
+        target_gamut="Rec2020",
+        luma_p1=0.01,
+        luma_p50=0.18,
+        luma_p99=1.0,
+        luma_p999=2.0,
+        black_ev=-7.0,
+        white_ev=4.5,
+        dynamic_range_ev=11.5,
+        contrast=3.0,
+        toe_power=1.5,
+        shoulder_power=3.3,
+        chroma_p95=0.0,
+        negative_rgb_pct=0.0,
+        over_rgb_pct=0.0,
+        toe_start_ev=-3.0,
+        shoulder_start_ev=1.25,
+        use_c1_endpoints=True,
+    )
+
+
+class C1EndpointDrtTest(unittest.TestCase):
+    def test_endpoint_normalization_keeps_calibrated_pivot(self) -> None:
+        plan = _plan()
+        self.assertAlmostEqual(float(apply_c1_endpoints(np.asarray([0.0]), plan)[0]), 0.18, places=5)
+
+        wider = ToneCompressionPlan(**{**plan.__dict__, "white_ev": 6.0})
+        self.assertAlmostEqual(float(apply_c1_endpoints(np.asarray([0.0]), wider)[0]), 0.18, places=5)
+
+    def test_endpoint_values_and_derivatives_are_continuous(self) -> None:
+        plan = _plan()
+        delta = np.float32(1e-3)
+        params = curve_params_from_plan(plan)
+        for transition_x in (float(params["toe_transition_x"]), float(params["shoulder_transition_x"])):
+            endpoint = plan.black_ev + transition_x * float(params["range_ev"])
+            samples = np.asarray([endpoint - delta, endpoint, endpoint + delta], dtype=np.float32)
+            mapped = apply_c1_endpoints(samples, plan)
+            self.assertAlmostEqual(
+                float((mapped[1] - mapped[0]) / delta),
+                float((mapped[2] - mapped[1]) / delta),
+                delta=0.01,
+            )
+
+    def test_curve_is_monotone_and_clamped_at_endpoints(self) -> None:
+        plan = _plan()
+        ev = np.linspace(plan.black_ev - 2.0, plan.white_ev + 2.0, 10001, dtype=np.float32)
+        mapped = apply_c1_endpoints(ev, plan)
+        self.assertGreaterEqual(float(np.diff(mapped).min()), -1e-6)
+        self.assertLess(float(mapped[0]), 1e-6)
+        self.assertAlmostEqual(float(mapped[-1]), 1.0, places=6)
+
+    def test_view_brightness_lifts_interior_without_moving_endpoints(self) -> None:
+        plan = _plan()
+        lifted = ToneCompressionPlan(**{**plan.__dict__, "view_brightness": 1.25})
+        ev = np.asarray([plan.black_ev, -3.0, 0.0, plan.white_ev], dtype=np.float32)
+        base = apply_c1_endpoints(ev, plan)
+        # The runtime applies this as a display-referred interior power, equivalent to
+        # darktable's look brightness after curve linearisation.
+        adjusted = np.power(base, 1.0 / lifted.view_brightness)
+        self.assertLess(float(adjusted[0]), 1e-6)
+        self.assertAlmostEqual(float(adjusted[-1]), 1.0, places=6)
+        self.assertGreater(float(adjusted[1]), float(base[1]))
+        self.assertGreater(float(adjusted[2]), float(base[2]))
+
+
+class LookOverrideC1InteractionTest(unittest.TestCase):
+    """A chromatic look's AgX-core overrides must reach the C1 endpoint path."""
+
+    def test_none_look_is_identity_object(self) -> None:
+        from dngscan.render import plan_with_look_overrides
+
+        plan = _plan()
+        self.assertIs(plan_with_look_overrides(plan, "none"), plan)
+
+    def test_target_black_override_lifts_c1_black(self) -> None:
+        # Faded-film target black flows through curve_params_from_plan into the C1 curve.
+        plan = _plan()
+        faded = ToneCompressionPlan(**{**plan.__dict__, "target_black_linear": 0.05})
+        deep_ev = np.asarray([plan.black_ev - 1.0, plan.black_ev], dtype=np.float32)
+        base = apply_c1_endpoints(deep_ev, plan)
+        lifted = apply_c1_endpoints(deep_ev, faded)
+        self.assertLess(float(base[0]), 1e-4)
+        self.assertGreater(float(lifted[0]), float(base[0]) + 1e-3)
+
+    def test_hue_keep_override_changes_agx_core_output(self) -> None:
+        from dngscan.agx import AGX_INSET_REC2020, AGX_OUTSET_REC2020, apply_core
+
+        plan = _plan()
+        low_keep = ToneCompressionPlan(**{**plan.__dict__, "hue_keep": 0.0})
+        high_keep = ToneCompressionPlan(**{**plan.__dict__, "hue_keep": 1.0})
+        # A near-primary saturated stimulus maximizes the per-channel "notorious six"
+        # skew that hue_keep controls, so the override's effect is unambiguous.
+        rgb = np.asarray([[0.80, 0.04, 0.02]], dtype=np.float32)
+        a = apply_core(rgb, low_keep, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+        b = apply_core(rgb, high_keep, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+        self.assertGreater(float(np.max(np.abs(a - b))), 1e-3)
+
+
+if __name__ == "__main__":
+    unittest.main()

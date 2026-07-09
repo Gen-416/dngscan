@@ -5,6 +5,10 @@ from __future__ import annotations
 from .display_filter import DISPLAY_FILTERS, FILTER_CHOICES
 from .look import LOOK_CHOICES, LOOK_FIELDS
 
+# Legacy pipeline selector kept at its single supported value. It picks the exposure
+# anchor family and the Rec.2020 working space, NOT the tone core — the actual core
+# (agx / lum / neutral) is chosen per render via --tone-core and lives on the plan.
+# Do not read this as "output is always AgX".
 RENDER_MODE = "agx"
 
 LOOK_GRADE_PREFIX = "look:"

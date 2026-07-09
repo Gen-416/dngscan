@@ -189,7 +189,7 @@ class LookOverrideTest(unittest.TestCase):
 
 
 class TonePlanPivotTest(unittest.TestCase):
-    def test_dark_median_pulls_pivot(self) -> None:
+    def test_dark_median_does_not_reanchor_pivot(self) -> None:
         from dngscan.models import Analysis, RawBundle, ToneCompressionPlan
         from dngscan.tone import build_tone_compression_plan
         from pathlib import Path
@@ -251,7 +251,185 @@ class TonePlanPivotTest(unittest.TestCase):
             exposure_gain=1.0,
         )
         plan = build_tone_compression_plan(bundle, analysis, "Rec2020")
-        self.assertLess(plan.pivot_ev_offset, -0.3)
+        # Scene intent is preserved by the fixed exposure anchor: a dark frame may
+        # change the toe endpoint, but never pulls the global pivot toward grey.
+        self.assertEqual(plan.pivot_ev_offset, 0.0)
+
+
+class DarkSceneTonePlanTest(unittest.TestCase):
+    def _dark_analysis(self) -> "Analysis":
+        from dngscan.models import Analysis
+
+        return Analysis(
+            channel_ids=[0, 1, 2],
+            labels={0: "R", 1: "G", 2: "B"},
+            ceilings={0: 1000, 1: 1000, 2: 1000},
+            ceil_spike_counts={0: 0, 1: 0, 2: 0},
+            ceil_near_counts={0: 0, 1: 0, 2: 0},
+            ceil_spike_ok={0: False, 1: False, 2: False},
+            fullwell_channel_ids=[0, 1, 2],
+            fullwell_note="test",
+            saturation_levels={0: 1000, 1: 1000, 2: 1000},
+            channel_fullwell={0: 1000, 1: 1000, 2: 1000},
+            channel_thresholds={0: 996, 1: 996, 2: 996},
+            fullwell=1000,
+            threshold=996,
+            clip_pct={0: 0.0, 1: 0.0, 2: 0.0},
+            cfa_cell_supported=True,
+            cell_union_pct=0.0,
+            cell_ge2_of_clipped_pct=0.0,
+            cell_k_of_clipped_pct={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0},
+            cell_k_of_all_pct={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0},
+            ev_p1=-8.0,
+            ev_raw_p1=-8.0,
+            ev_median=-4.5,
+            ev_p99=-1.0,
+            ev_p999=-0.5,
+            ev_dr_p1_p999=7.5,
+            ev_floor_hit_pct=0.0,
+            median_vs_gray_ev=-2.0,
+            median_y=0.04,
+            noise_floor=0.002,
+            usable_dr_ev=6.0,
+            snr_curves={},
+            snr1_dr={},
+            snr1_stop={},
+            gamut_out_pct={"sRGB": 0.0, "Display P3": 0.0, "Rec2020": 0.0},
+            bright_pixel_pct=0.0,
+            survivor_channel="R",
+            container_bits_est=14,
+            usable_dr_eff_ev=6.0,
+        )
+
+    def test_dark_scene_uses_a_separate_toe_without_lifting_black(self) -> None:
+        from dngscan.models import RawBundle
+        from dngscan.tone import build_tone_compression_plan, compute_exposure_gain
+        from pathlib import Path
+
+        bundle = RawBundle(
+            path=Path("x.nef"),
+            raw_image=np.zeros((4, 4), dtype=np.uint16),
+            raw_colors=np.zeros((4, 4), dtype=np.uint8),
+            xyz_render=np.zeros((2, 2, 3), dtype=np.float32),
+            render_scale=65535.0,
+            scene_rec2020_render=np.full((2, 2, 3), 0.012, dtype=np.float32),
+            scene_scale=1.0,
+            white_level=16383,
+            black_levels=[1000.0, 1000.0, 1000.0],
+            camera_wb=[1.0, 1.0, 1.0, 0.0],
+            color_desc="RGB",
+            raw_pattern=[[0, 1], [1, 2]],
+            camera_white_levels=[16383, 16383, 16383],
+            exposure_gain=compute_exposure_gain("agx", 0.0),
+        )
+        plan = build_tone_compression_plan(bundle, self._dark_analysis(), "Rec2020", ev_from_agx_inset=True)
+        self.assertLess(plan.black_ev, -2.0)
+        self.assertEqual(plan.target_black_linear, 0.0)
+        self.assertGreater(plan.toe_start_ev, plan.black_ev)
+
+    def test_dark_indoor_scene_not_fully_black_after_agx(self) -> None:
+        from dngscan.models import RawBundle
+        from dngscan.tone import build_tone_compression_plan, compute_exposure_gain
+        from pathlib import Path
+
+        gain = compute_exposure_gain("agx", 2.0)
+        scene = np.full((64, 3), 0.025, dtype=np.float32)
+        bundle = RawBundle(
+            path=Path("x.nef"),
+            raw_image=np.zeros((8, 8), dtype=np.uint16),
+            raw_colors=np.zeros((8, 8), dtype=np.uint8),
+            xyz_render=np.zeros((2, 2, 3), dtype=np.float32),
+            render_scale=65535.0,
+            scene_rec2020_render=scene.reshape(8, 8, 3),
+            scene_scale=1.0,
+            white_level=16383,
+            black_levels=[1000.0, 1000.0, 1000.0],
+            camera_wb=[1.0, 1.0, 1.0, 0.0],
+            color_desc="RGB",
+            raw_pattern=[[0, 1], [1, 2]],
+            camera_white_levels=[16383, 16383, 16383],
+            exposure_gain=gain,
+        )
+        plan = build_tone_compression_plan(bundle, self._dark_analysis(), "Rec2020", ev_from_agx_inset=True)
+        boosted = (scene * gain).astype(np.float32)
+        out = apply_core(boosted, plan, AGX_INSET_REC2020, AGX_OUTSET_REC2020)
+        self.assertGreater(float(np.median(out)), 0.02)
+        self.assertGreater(float(np.percentile(out, 1)), 0.005)
+
+
+class AgxPlanStabilityTest(unittest.TestCase):
+    def test_manual_ev_does_not_reshape_tone_plan(self) -> None:
+        from dngscan.models import Analysis, RawBundle
+        from dngscan.tone import build_tone_compression_plan, compute_exposure_gain, plan_for_mode
+        from pathlib import Path
+
+        analysis = Analysis(
+            channel_ids=[0, 1, 2],
+            labels={0: "R", 1: "G", 2: "B"},
+            ceilings={0: 1000, 1: 1000, 2: 1000},
+            ceil_spike_counts={0: 0, 1: 0, 2: 0},
+            ceil_near_counts={0: 0, 1: 0, 2: 0},
+            ceil_spike_ok={0: False, 1: False, 2: False},
+            fullwell_channel_ids=[0, 1, 2],
+            fullwell_note="test",
+            saturation_levels={0: 1000, 1: 1000, 2: 1000},
+            channel_fullwell={0: 1000, 1: 1000, 2: 1000},
+            channel_thresholds={0: 996, 1: 996, 2: 996},
+            fullwell=1000,
+            threshold=996,
+            clip_pct={0: 0.0, 1: 0.0, 2: 0.0},
+            cfa_cell_supported=True,
+            cell_union_pct=0.0,
+            cell_ge2_of_clipped_pct=0.0,
+            cell_k_of_clipped_pct={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0},
+            cell_k_of_all_pct={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0},
+            ev_p1=-6.0,
+            ev_raw_p1=-6.0,
+            ev_median=-1.5,
+            ev_p99=0.5,
+            ev_p999=1.0,
+            ev_dr_p1_p999=7.0,
+            ev_floor_hit_pct=0.0,
+            median_vs_gray_ev=-1.5,
+            median_y=0.06,
+            noise_floor=0.002,
+            usable_dr_ev=9.0,
+            snr_curves={},
+            snr1_dr={},
+            snr1_stop={},
+            gamut_out_pct={"sRGB": 0.0, "Display P3": 0.0, "Rec2020": 0.0},
+            bright_pixel_pct=0.0,
+            survivor_channel="R",
+            container_bits_est=14,
+            usable_dr_eff_ev=9.0,
+        )
+        scene = np.full((8, 8, 3), 0.08, dtype=np.float32)
+        base = RawBundle(
+            path=Path("x.dng"),
+            raw_image=np.zeros((8, 8), dtype=np.uint16),
+            raw_colors=np.zeros((8, 8), dtype=np.uint8),
+            xyz_render=np.zeros((2, 2, 3), dtype=np.float32),
+            render_scale=65535.0,
+            scene_rec2020_render=scene,
+            scene_scale=1.0,
+            white_level=16383,
+            black_levels=[1000.0, 1000.0, 1000.0],
+            camera_wb=[1.0, 1.0, 1.0, 0.0],
+            color_desc="RGB",
+            raw_pattern=[[0, 1], [1, 2]],
+            camera_white_levels=[16383, 16383, 16383],
+            exposure_gain=compute_exposure_gain("agx", 0.0),
+        )
+        boosted = RawBundle(
+            **{**base.__dict__, "exposure_gain": compute_exposure_gain("agx", 2.5)}
+        )
+        plan0 = plan_for_mode(base, analysis, "agx", "srgb")
+        plan_boost = plan_for_mode(boosted, analysis, "agx", "srgb")
+        self.assertAlmostEqual(plan0.black_ev, plan_boost.black_ev, places=4)
+        self.assertAlmostEqual(plan0.white_ev, plan_boost.white_ev, places=4)
+        self.assertAlmostEqual(plan0.pivot_ev_offset, plan_boost.pivot_ev_offset, places=4)
+        self.assertAlmostEqual(plan0.contrast, plan_boost.contrast, places=4)
+        self.assertAlmostEqual(plan0.target_black_linear, plan_boost.target_black_linear, places=5)
 
 
 if __name__ == "__main__":

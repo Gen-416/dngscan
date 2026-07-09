@@ -2,6 +2,7 @@
 """Scene-linear to display-linear tone mapping pipelines."""
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from ._deps import np
@@ -17,8 +18,8 @@ from .color import (
     rgb_to_oklab, smoothstep, srgb_encode,
 )
 from .constants import AGX_INSET, AGX_OUTSET
-from .models import Analysis, RawBundle, ToneCompressionPlan
-from .tone import plan_for_mode, scene_rec2020_to_float
+from .models import Analysis, ColorGeometryPlan, RawBundle, RenderPlan, ToneCompressionPlan
+from .tone import build_render_plan, scene_rec2020_to_float
 
 def dither_quantize_u8(encoded: Any, rng: Any) -> Any:
     """Quantize display-domain [0,1] floats to uint8 with 1-LSB TPDF dither."""
@@ -28,10 +29,14 @@ def dither_quantize_u8(encoded: Any, rng: Any) -> Any:
 
 
 def output_linear_to_u8(
-    rgb_linear: Any, output_gamut: str = "srgb", look: str = "none", look_strength: float = 1.0
+    rgb_linear: Any,
+    output_gamut: str = "srgb",
+    look: str = "none",
+    look_strength: float = 1.0,
+    color_plan: ColorGeometryPlan | None = None,
 ) -> Any:
     return quantize_final_output_linear_to_u8(
-        finalize_output_linear(rgb_linear, output_gamut, look, look_strength)
+        finalize_output_linear(rgb_linear, output_gamut, look, look_strength, color_plan)
     )
 
 
@@ -49,8 +54,28 @@ def quantize_final_output_linear_to_u8(rgb_linear: Any) -> Any:
     return out.reshape(rgb_linear.shape[:2] + (3,))
 
 
+def _apply_display_highlight_chroma_retreat(
+    rgb: Any, output_gamut: str, strength: float
+) -> Any:
+    """Gently fade only near-display-white chroma in the luminance-core path.
+
+    This is deliberately downstream of the scene-linear clip mask: it is an aesthetic
+    guard for bright, *unclipped* colours, not a claim that sensor information is lost.
+    """
+    if strength <= 0.0:
+        return rgb
+    lab_l, lab_a, lab_b = rgb_to_oklab(rgb, output_gamut)
+    amount = np.float32(strength) * smoothstep(0.75, 0.98, lab_l)
+    keep = np.float32(1.0) - np.clip(amount, 0.0, 1.0)
+    return oklab_to_output_rgb(lab_l, lab_a * keep, lab_b * keep, output_gamut)
+
+
 def finalize_output_linear(
-    rgb_linear: Any, output_gamut: str = "srgb", look: str = "none", look_strength: float = 1.0
+    rgb_linear: Any,
+    output_gamut: str = "srgb",
+    look: str = "none",
+    look_strength: float = 1.0,
+    color_plan: ColorGeometryPlan | None = None,
 ) -> Any:
     """Apply the post-AgX chromatic look and output-gamut fit in display-linear RGB."""
     original_shape = rgb_linear.shape
@@ -66,8 +91,13 @@ def finalize_output_linear(
             lab_l, lab_a, lab_b = rgb_to_oklab(piece, output_gamut)
             lab_l, lab_a, lab_b = look_engine.apply_look_oklab(lab_l, lab_a, lab_b, look, look_strength)
             piece = oklab_to_output_rgb(lab_l, lab_a, lab_b, output_gamut)
+        if color_plan is not None and color_plan.display_highlight_chroma_retreat > 0.0:
+            piece = _apply_display_highlight_chroma_retreat(
+                piece, output_gamut, float(color_plan.display_highlight_chroma_retreat)
+            )
         # Oklab hue-preserving gamut fit replaces per-channel clipping for every mode.
-        out[start:end] = fit_to_output_gamut(piece, output_gamut).astype(np.float32, copy=False)
+        alpha = float(color_plan.gamut_fit_alpha) if color_plan is not None else 0.05
+        out[start:end] = fit_to_output_gamut(piece, output_gamut, alpha=alpha).astype(np.float32, copy=False)
     return out.reshape(original_shape)
 
 
@@ -76,16 +106,16 @@ def agx_compress_into_gamut(rgb: Any) -> Any:
 
 
 def plan_with_look_overrides(
-    plan: ToneCompressionPlan, look: str, look_strength: float = 1.0
-) -> ToneCompressionPlan:
+    plan: ToneCompressionPlan | RenderPlan, look: str, look_strength: float = 1.0
+) -> ToneCompressionPlan | RenderPlan:
     """Apply a chromatic look's AgX-core overrides (hue keep, faded target black) to the
     tone plan. Identity when the look carries none, so renders stay byte-identical."""
+    tone = plan.tone if isinstance(plan, RenderPlan) else plan
     overrides = look_engine.agx_plan_overrides(look, look_strength)
     if not overrides:
         return plan
-    from dataclasses import replace
-
-    return replace(plan, **overrides)
+    adjusted = replace(tone, **overrides)
+    return replace(plan, tone=adjusted) if isinstance(plan, RenderPlan) else adjusted
 
 
 def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
@@ -104,27 +134,38 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
 
 
 def apply_tone_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
-    if str(getattr(plan, "tone_core", "agx")) == "lum":
+    core = str(getattr(plan, "tone_core", "agx"))
+    if core == "neutral":
+        return rgb_rec2020.astype(np.float32, copy=False)
+    if core == "lum":
         return lum_engine.apply_lum_core(rgb_rec2020, plan)
     return apply_agx_core(rgb_rec2020, plan)
 
 
-def scene_render_to_agx_linear(
+def scene_render_to_display_linear(
     bundle: RawBundle,
-    plan: ToneCompressionPlan,
+    plan: ToneCompressionPlan | RenderPlan,
     output_gamut: str = "srgb",
     display_filter: str = "none",
     filter_strength: float = 1.0,
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
 ) -> Any:
+    """Scene-linear -> display-linear through the plan's tone core (agx / lum / neutral).
+
+    Named for the pipeline stage, not the AgX core specifically: `plan.tone.tone_core`
+    selects which core runs (see apply_tone_core), and clip retreat + gamut fit come
+    from `plan.color` regardless of core.
+    """
+    tone_plan = plan.tone if isinstance(plan, RenderPlan) else plan
+    color_plan = plan.color if isinstance(plan, RenderPlan) else None
     scene = bundle.scene_rec2020_render
     h, w = scene.shape[:2]
     flat_scene = scene.reshape(-1, scene.shape[-1])
     out = np.empty((flat_scene.shape[0], 3), dtype=np.float32)
     chunk = 1_000_000
     clip_masks = None
-    if str(getattr(plan, "tone_core", "agx")) == "lum" and getattr(bundle, "clip_masks", None) is not None:
+    if color_plan is not None and getattr(bundle, "clip_masks", None) is not None:
         clip_masks = retreat_engine.resize_clip_masks(bundle.clip_masks, (h, w)).reshape(-1, 3)
 
     wb_adapt = scene_transform_engine.wb_adaptation_ratios(
@@ -137,8 +178,12 @@ def scene_render_to_agx_linear(
             rec, scene_transform, scene_transform_strength, wb_adapt
         )
         if clip_masks is not None:
-            rec = retreat_engine.apply_clip_retreat_rec2020(rec, clip_masks[start:end])
-        mapped_rec = apply_tone_core(rec, plan)
+            rec = retreat_engine.apply_clip_retreat_rec2020(
+                rec,
+                clip_masks[start:end],
+                float(color_plan.raw_clip_retreat_strength),
+            )
+        mapped_rec = apply_tone_core(rec, tone_plan)
         if display_filter != "none" and filter_strength > 0.0:
             output_linear = filter_engine.apply_display_filter_rec2020(
                 mapped_rec, output_gamut, display_filter, filter_strength, scene_rec2020=rec
@@ -150,9 +195,14 @@ def scene_render_to_agx_linear(
     return out.reshape(h, w, 3)
 
 
+# Back-compat alias: the pipeline ran only AgX when this was named; kept for external
+# callers. Prefer scene_render_to_display_linear.
+scene_render_to_agx_linear = scene_render_to_display_linear
+
+
 def scene_render_to_agx_u8(
     bundle: RawBundle,
-    plan: ToneCompressionPlan,
+    plan: ToneCompressionPlan | RenderPlan,
     output_gamut: str = "srgb",
     look: str = "none",
     look_strength: float = 1.0,
@@ -164,7 +214,7 @@ def scene_render_to_agx_u8(
     lum_norm: str = "y",
 ) -> Any:
     return output_linear_to_u8(
-        scene_render_to_agx_linear(
+        scene_render_to_display_linear(
             bundle,
             plan_with_look_overrides(plan, look, look_strength),
             output_gamut,
@@ -176,6 +226,7 @@ def scene_render_to_agx_u8(
         output_gamut,
         look,
         look_strength,
+        plan.color if isinstance(plan, RenderPlan) else None,
     )
 
 
@@ -183,7 +234,7 @@ def render_output_linear(
     bundle: RawBundle,
     analysis: Analysis | None,
     output_gamut: str = "srgb",
-    tone_plan: ToneCompressionPlan | None = None,
+    tone_plan: ToneCompressionPlan | RenderPlan | None = None,
     look: str = "none",
     look_strength: float = 1.0,
     display_filter: str = "none",
@@ -198,7 +249,7 @@ def render_output_linear(
         raise ValueError("色度 look 与输出滤镜不能同时启用")
     if analysis is None:
         raise ValueError("AgX 导出需要分析结果")
-    plan = tone_plan if tone_plan is not None else plan_for_mode(
+    plan = tone_plan if tone_plan is not None else build_render_plan(
         bundle,
         analysis,
         "agx",
@@ -209,23 +260,25 @@ def render_output_linear(
         lum_norm=lum_norm,
         agx_primaries=agx_primaries,
     )
-    agx_linear = scene_render_to_agx_linear(
+    effective_plan = plan_with_look_overrides(plan, look, look_strength)
+    agx_linear = scene_render_to_display_linear(
         bundle,
-        plan_with_look_overrides(plan, look, look_strength),
+        effective_plan,
         output_gamut,
         display_filter,
         filter_strength,
         scene_transform,
         scene_transform_strength,
     )
-    return finalize_output_linear(agx_linear, output_gamut, look, look_strength)
+    color_plan = effective_plan.color if isinstance(effective_plan, RenderPlan) else None
+    return finalize_output_linear(agx_linear, output_gamut, look, look_strength, color_plan)
 
 
 def render_output_u8(
     bundle: RawBundle,
     analysis: Analysis | None,
     output_gamut: str = "srgb",
-    tone_plan: ToneCompressionPlan | None = None,
+    tone_plan: ToneCompressionPlan | RenderPlan | None = None,
     look: str = "none",
     look_strength: float = 1.0,
     display_filter: str = "none",

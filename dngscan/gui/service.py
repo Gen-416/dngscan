@@ -224,6 +224,7 @@ def estimate_ev_headroom(
     punch_scale: float = 1.0,
     tone_core: str = "agx",
     lum_norm: str = "y",
+    agx_primaries: str = "base",
 ) -> dict[str, float | str]:
     if analysis is None:
         return {}
@@ -242,6 +243,7 @@ def estimate_ev_headroom(
         punch_scale=punch_scale,
         tone_core=tone_core,
         lum_norm=lum_norm,
+        agx_primaries=agx_primaries,
     )
     return {
         "safe_ev_remaining": max(0.0, float(safe_ev - current_ev)),
@@ -300,8 +302,8 @@ def parse_job_params(params: dict) -> tuple[Path, str, str, str, float, float, i
     return inp, highlight, gamut, output_format, ev, hdr_headroom, quality, want_png, outdir, ev_auto
 
 
-def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, gamut: str) -> dg.ToneCompressionPlan:
-    return dg.plan_for_mode(bundle, analysis, RENDER_MODE, gamut)
+def plan_for_bundle(bundle: dg.RawBundle, analysis: dg.Analysis, gamut: str) -> dg.RenderPlan:
+    return dg.build_render_plan(bundle, analysis, RENDER_MODE, gamut)
 
 
 def parse_punch(params: dict) -> float:
@@ -374,10 +376,10 @@ def export_preview_jpeg(
     proxy_bundle = replace(
         cached.bundle,
         scene_rec2020_render=cached.proxy_scene,
-        exposure_gain=dg.compute_exposure_gain(RENDER_MODE, ev),
+        exposure_gain=dg.compute_exposure_gain(dg.exposure_mode_for_tone_core(tone_core), ev),
     )
     with RENDER_LOCK:
-        tone_plan = dg.plan_for_mode(
+        render_plan = dg.build_render_plan(
             proxy_bundle,
             cached.analysis,
             RENDER_MODE,
@@ -391,7 +393,7 @@ def export_preview_jpeg(
         )
         icc_profile = dg.output_icc_profile_bytes(gamut)
         rgb_u8 = dg.render_output_u8(
-            proxy_bundle, cached.analysis, gamut, tone_plan,
+            proxy_bundle, cached.analysis, gamut, render_plan,
             look, look_strength, display_filter, filter_strength,
             scene_transform, scene_transform_strength,
             tone_core, lum_norm, agx_primaries,
@@ -462,6 +464,7 @@ def run_preview(params: dict) -> dict:
             punch_scale=punch_scale,
             tone_core=tone_core,
             lum_norm=lum_norm,
+            agx_primaries=agx_primaries,
         )
         ev = auto_ev_result.ev
     return export_preview_jpeg(
@@ -556,10 +559,11 @@ def run_export(params: dict) -> dict:
             punch_scale=punch_scale,
             tone_core=tone_core,
             lum_norm=lum_norm,
+            agx_primaries=agx_primaries,
         )
         ev = auto_ev_result.ev
-    bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
-    tone_plan = dg.plan_for_mode(
+    bundle.exposure_gain = dg.compute_exposure_gain(dg.exposure_mode_for_tone_core(tone_core), ev)
+    render_plan = dg.build_render_plan(
         bundle,
         analysis,
         RENDER_MODE,
@@ -588,7 +592,7 @@ def run_export(params: dict) -> dict:
     )
     jpg_path = outdir / f"{inp.stem}_{suffix}.jpg"
     with RENDER_LOCK:
-        bundle.exposure_gain = dg.compute_exposure_gain(RENDER_MODE, ev)
+        bundle.exposure_gain = dg.compute_exposure_gain(dg.exposure_mode_for_tone_core(tone_core), ev)
         icc_profile = dg.output_icc_profile_bytes(gamut)
         dg.export_jpeg(
             inp,
@@ -596,7 +600,7 @@ def run_export(params: dict) -> dict:
             quality,
             bundle,
             analysis,
-            tone_plan,
+            render_plan,
             gamut,
             output_format,
             hdr_headroom,
@@ -626,6 +630,7 @@ def run_export(params: dict) -> dict:
                 punch_scale=punch_scale,
                 tone_core=tone_core,
                 lum_norm=lum_norm,
+                agx_primaries=agx_primaries,
             )
         )
         preview = make_preview_b64(jpg_path, icc_profile=icc_profile)

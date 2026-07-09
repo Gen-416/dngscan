@@ -2,26 +2,26 @@
 
 [English](README.md)
 
-面向物理测量的 RAW/DNG 分析器与 **AgX** 色调映射导出工具。读取相机原始文件，测量传感器实际捕获的内容（动态范围、逐通道剪切、信噪比、色域压力），经统一的 AgX 视图变换将 scene-linear 信号渲染为 8-bit JPEG；可选叠加一层 **成片风格**（色度 Look 或输出滤镜）。支持命令行与本地 Web GUI。
+面向物理测量的 RAW/DNG 分析器与 **AgX / 亮度核**色调映射导出工具。读取相机原始文件，测量传感器实际捕获的内容（动态范围、逐通道剪切、信噪比、色域压力），将 scene-linear 信号渲染为 8-bit JPEG；可选叠加一层 **成片风格**（色度 Look 或输出滤镜）。支持命令行与本地 Web GUI。
 
 项目最初是诊断工具（六面板 PNG 仪表盘），后来扩展为无需经 RAW 编辑器中转、直接产出成片 JPEG 的工作流。
 
 ## 功能概览
 
 - **诊断** — 六面板 PNG：SNR–档数曲线、逐通道 RAW 分布、RGB 曝光直方图、各输出色域的溢出风险、空间曝光分区图、剪切通道高光图；以及逐通道满阱 / 剪切 / 黑电平 / 白平衡读数。
-- **AgX 导出** — Rec.2020 原生 AgX：inset → log2 → sigmoid → outset。通道串扰带来平滑高光去饱和与 AgX 色相 flourish。色调曲线由场景分析驱动（黑白 EV、toe/shoulder、latitude），并借鉴 darktable 的防护：自适应内部 gamma 保持 pivot 在对角线上、shoulder/toe 保留最小 x 段避免窄 DR 场景曲线反转、暗场景自适应 pivot 把最大对比度移到主体上。可选 `--agx-primaries {base,punchy,smooth}` 调节 outset（纯度恢复 / 旋转反转）。色度 Look 可覆盖 `hue_keep`、抬黑（`target_black`）以匹配胶片模拟性格。
+- **拆分式 DRT** — 分析生成不可变 `RenderPlan`：可靠 scene-Y 分布只决定 C1 曲线的黑白端点；RAW CFA 剪切只决定曲线前色度退让；输出色域压力只决定末端色域适配。AgX formation 保持校准的 EV=0 pivot，仅按端点重新归一化，因此手动 EV 不会重设 pivot，也不会把夜景拉向中灰。干净的暗场可获得有限的显示侧 brightness lift，它保持真黑/真白，不是曝光增益。`--tone-core agx` 保留 Rec.2020 的 inset → log2 → sigmoid → outset 几何；`--tone-core lum` 把同一端点 DRT 施于亮度 norm，保持 RGB 比例，并只在显示白附近温和褪色。`--agx-primaries {base,punchy,smooth}` 只改变 AgX 的 outset。
 - **AgX 前馈（实验）** — 可选 `--scene-transform arri_skin_d55`，在相机色彩变换之后、AgX 之前的 scene-linear Rec.2020 域，对肤色/青色区域施加受限 3×3 色度矩阵；默认关闭。
 - **成片风格（互斥）** — AgX 之上可选一层（`--grade`）：
   - **色度 Look** — 由官方 LUT 实测的 Oklab 几何（富士胶片模拟、ARRI Classic / Reveal）。色调仍由 AgX 负责；只改色相 / 饱和度 / 肤色塑形。
   - **输出滤镜** — 完整 Log 编码输出变换（Kodak 2383 FPE、RED IPP2），经 Cineon / Log3G10 编码后采样 `.cube`。
 - **保色相色域适配** — 用 Oklab adaptive-L0 裁切（保色相、降色度），而非逐通道 clip；适用于 sRGB 与 Display P3。
-- **导出高质量去马赛克** — 全分辨率导出默认 `--demosaic auto`（Bayer 优先 DHT，非 Bayer / X-Trans 走 libraw 原生）；预览用轻量去马赛克。仅选插值画质，**不做降噪**。**富士 RAF**（X-Trans 与 Bayer）已适配：机型/ISO 从专有头与内嵌 JPEG EXIF 读取；去马赛克前捕获 CFA pattern 以保证分析正确。
+- **导出高质量去马赛克** — 全分辨率导出默认 `--demosaic auto`（Bayer 优先 DHT，非 Bayer / X-Trans 走 libraw 原生）；预览用轻量去马赛克。仅选插值画质，**不做降噪**。**富士 RAF**（X-Trans 与 Bayer）与 **尼康 NEF/NRW**（Bayer，libraw 原生）已支持：RAF 从专有头与内嵌 JPEG EXIF 读机型/ISO；NEF/NRW 走标准 TIFF EXIF；X-Trans 在去马赛克前捕获 CFA pattern 以保证分析正确。
 - **本地 Web GUI**（`python -m dngscan.gui`）— 选文件、曝光、AgX 基调、成片风格、质量、去马赛克与输出色域；实时预览；单文件曝光余量估计；sRGB / Display P3；高光处理（clip / blend / reconstruct）。控件按曝光 / 色彩与风格 / 输出分组；滑条数值与标签同行；输出文件夹可用浏览选择器（不必手填路径）。
 - **可选 Ultra HDR JPEG** — ISO/Ultra HDR gain-map，带 SDR 回退底图。成片风格目前仅 SDR。默认仍为普通 SDR JPEG。
 
 ## 处理管线
 
-AgX 之前/之中链路固定。`--grade` 在 **同一份 AgX 成品** 上三选一；Oklab 与 Log 编码是两种
+固定 scene body、端点与色彩几何彼此拆开。`--grade` 在 **同一份 tone-core 成品** 上三选一；Oklab 与 Log 编码是两种
 互不叠加的实现方式，对应两类不同的官方 LUT，不是上下两层滤镜。
 
 ```text
@@ -31,22 +31,24 @@ AgX 之前/之中链路固定。`--grade` 在 **同一份 AgX 成品** 上三选
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ② 分析 + 曝光                                                │
-│    analyze() · EV 手动/auto · compute_exposure_gain(agx)      │
+│ ② Capture 分析 + 计划                                        │
+│    analyze() · 固定锚定 + 手动/auto EV · RenderPlan            │
+│    scene Y → C1 toe/shoulder；RAW clip → 色度退让             │
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ②b AgX 前馈（可选）                                          │
+│ ②b Tone-core 前馈（可选）                                     │
 │    scene Rec.2020 ──► skin/cyan chroma mask ──► constrained M │
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ③ AgX（必有）                                                │
-│    scene Rec.2020 ──► AgX core ──► mapped Rec.2020          │
+│ ③ Tone core                                                  │
+│    agx: inset → 端点归一化 C1 曲线 → outset                  │
+│    lum: Y/power/max norm → 同一 C1 曲线，保持 RGB 比例        │
 └────────────────────────────┬────────────────────────────────┘
                              ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ ③b 成片风格  `--grade` · 三选一 · 同一 AgX 输入              │
+│ ③b 色彩几何 + 成片风格  `--grade` · 三选一                   │
 │                                                             │
 │   无 ────────────────► rec2020_to_output（仅 AgX 显示）      │
 │                                                             │
@@ -69,10 +71,12 @@ AgX 之前/之中链路固定。`--grade` 在 **同一份 AgX 成品** 上三选
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**为何两套机制？** 都接在同一份 AgX 之后。富士 / ARRI 官方 LUT 被 **实测** 为相对 AgX 的
-Oklab 色度几何，运行时只在 Oklab 里改 a/b，**亮度 L 仍由 AgX 决定**。Kodak / RED 的
-`.cube` 是 **Log 入 → 显示出** 的完整变换，必须按厂商约定做 Log 编码再采样；若强行抽成
-LookField，饱和度会崩塌，因此走独立的 Log → `.cube` 支路，并与色度 Look **互斥**。
+**为何两套机制？** 都接在所选 tone 核产出的渲染之后。富士 / ARRI 官方 LUT 被 **实测** 为
+Oklab 色度几何，运行时只在 Oklab 里改 a/b，**亮度 L 不动**。注意：这意味着 Look 自身从不决定
+亮度——**L 来自其下运行的 tone 核**（`agx` 逐通道成形、`lum` 亮度 norm、或 `neutral` 直通），
+Look 只在其上重塑 a/b。Kodak / RED 的 `.cube` 是 **Log 入 → 显示出** 的完整变换，必须按厂商
+约定做 Log 编码再采样；若强行抽成 LookField，饱和度会崩塌，因此走独立的 Log → `.cube` 支路，
+并与色度 Look **互斥**。
 
 ## 设计说明
 
@@ -87,6 +91,7 @@ LookField，饱和度会崩塌，因此走独立的 Log → `.cube` 支路，并
 - **RAW 健康检查** — 双绿差分平面 lag-1 空间相关（判断 RAW 是否已烘焙降噪）及 DN 码缺失（重量化）检查；仅诊断用。
 - **固定白平衡选项** — `--wb daylight` 用 libraw 标定日光乘子，胶片式整卷一致；AsShot 始终作为现场光源证词报告。默认仍为相机 AsShot。
 - **分析与导出一致** — 依赖渲染的统计（亮度/EV 分布、色域溢出、auto tone 输入）在与导出相同的去马赛克与高光模式下测量；CFA/RAW 域指标（剪切%、SNR、噪底）与去马赛克无关，反映传感器物理捕获。
+- **预览 vs 导出** — GUI 用半分辨率场景 proxy 编译 tone plan（分析仍为全分辨率），预览快且基本一致；但稀疏高光与 clip mask 边界在全尺寸下可能有细微差别——**逐像素对比 tone 核（如 AgX vs neutral）时以实际导出为准**，不要看 proxy 预览。
 
 指标均为单帧估计（非光子转移曲线测量）；位深不等于可用动态范围。
 
@@ -147,8 +152,9 @@ python -m dngscan photo.dng
 # AgX JPEG，+0.5 EV，Display P3
 python -m dngscan photo.dng --jpeg out.jpg --ev 0.5 --output-gamut p3
 
-# 富士 RAF（X-Trans）— 与 DNG 相同 CLI/GUI
+# 富士 RAF（X-Trans）或尼康 NEF — 与 DNG 相同 CLI/GUI
 python -m dngscan photo.raf --jpeg out.jpg
+python -m dngscan photo.nef --jpeg out.jpg
 
 # 富士 Velvia 色度 Look（叠在 AgX 上的几何）
 python -m dngscan photo.dng --jpeg out.jpg --grade look:fuji_velvia --grade-strength 1.0

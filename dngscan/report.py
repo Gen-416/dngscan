@@ -206,7 +206,7 @@ def print_report(
             if auto_ev is not None
             else f"EV 补偿={jpeg_ev:+.2f}，固定常数非自适应"
         )
-        brighten_note = "EV auto 中灰对齐" if auto_ev is not None else "无自动增亮"
+        brighten_note = "EV auto 中灰对齐" if auto_ev is not None else "无自动曝光"
         print(
             f"JPEG 设置: scene-linear Rec.2020 起点；8-bit {output_gamut_label(output_gamut)}（TPDF 抖动）；"
             f"{wb_label}；{brighten_note}；"
@@ -249,9 +249,9 @@ def print_report(
 def jpeg_policy_cn(mode: str, output_gamut: str = "srgb") -> str:
     label = output_gamut_label(output_gamut)
     if mode == "agx":
-        return f"agx: scene-linear Rec.2020 工作空间；白平衡按导出选项；无自动增亮；高光处理按导出选项；分析全图 Y 自动设定 AgX 黑白相对曝光与曲线；Rec.2020 inset→log2→sigmoid→outset 通道串扰，最后转 {label}；4:4:4 色度采样"
+        return f"agx: scene-linear Rec.2020 工作空间；白平衡按导出选项；无自动增亮；高光处理按导出选项；AgX inset→端点归一化 C1 sigmoid→outset，可靠 scene Y 只编译黑白范围与 toe/shoulder；CFA clip mask 仅驱动曲线前褪白；最后转 {label}；4:4:4 色度采样"
     if mode == "lum":
-        return f"lum: scene-linear Rec.2020 工作空间；raw clip mask 驱动曲线前褪白；标量亮度/norm 进 sigmoid shoulder，RGB 比例保持；无 AgX inset/outset，最后转 {label} 并做输出色域 fit"
+        return f"lum: scene-linear Rec.2020 工作空间；CFA clip mask 驱动曲线前褪白；固定 AgX body 的 C1 endpoint 作用于标量亮度/norm，RGB 比例保持；显示白附近再温和褪色；无 AgX inset/outset，最后转 {label} 并做输出色域 fit"
     return ""
 
 
@@ -282,11 +282,12 @@ def jpeg_tone_plan_cn(
             )
         extra_text = ("；" + "，".join(extras)) if extras else ""
         return (
-            f"{label} 输入范围 black={plan.black_ev:.2f}EV / white=+{plan.white_ev:.2f}EV，"
+            f"{label} endpoint black={plan.black_ev:.2f}EV / toe接回={plan.toe_start_ev:.2f}EV / "
+            f"shoulder起点={plan.shoulder_start_ev:+.2f}EV / white=+{plan.white_ev:.2f}EV，"
             f"DR={plan.dynamic_range_ev:.2f}档；Y p1/p50/p99.9={plan.luma_p1:.4f}/{plan.luma_p50:.4f}/{plan.luma_p999:.4f}；"
-            f"曲线 contrast={plan.contrast:.2f}, toe={plan.toe_power:.2f}, shoulder={plan.shoulder_power:.2f}；"
+            f"pivot=0EV→18%（darktable 默认 gamma）；contrast={plan.contrast:.2f}, toe={plan.toe_power:.2f}, shoulder={plan.shoulder_power:.2f}, view brightness={plan.view_brightness:.2f}；"
             f"纯度补偿={plan.punch_strength:.2f}；"
-            f"色度压缩={plan.chroma_strength:.2f}，{plan.target_gamut} 负通道={plan.negative_rgb_pct:.2f}%"
+            f"{plan.target_gamut} 负通道={plan.negative_rgb_pct:.2f}%"
             f"{extra_text}"
         )
     return ""
