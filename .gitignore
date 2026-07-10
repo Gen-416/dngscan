@@ -5,15 +5,13 @@ __pycache__/
 venv/
 *.egg-info/
 
-# Bundled third-party assets are explicitly unignored below. Keep any other
-# ad-hoc local assets out of git.
+# Bundled open-source/reference assets are explicitly unignored below. Keep local
+# LUT experiments and vendor downloads out of Git.
 *.spi3d
 dngscan_assets/*
 !dngscan_assets/README.md
-!dngscan_assets/TONY_LICENSE-MIT.md
 !dngscan_assets/darktable_agx.c
 !dngscan_assets/darktable_agx.cl
-!dngscan_assets/tony_mc_mapface.spi3d
 !dngscan_assets/spectral/
 !dngscan_assets/spectral/README.md
 !dngscan_assets/spectral/*.csv

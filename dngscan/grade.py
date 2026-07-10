@@ -2,7 +2,7 @@
 """Unified grade picker: chromatic look OR display filter, never both."""
 from __future__ import annotations
 
-from .display_filter import DISPLAY_FILTERS, FILTER_CHOICES
+from .display_filter import DISPLAY_FILTERS, FILTER_CHOICES, filter_available
 from .look import LOOK_CHOICES, LOOK_FIELDS
 
 # Legacy pipeline selector kept at its single supported value. It picks the exposure
@@ -16,9 +16,7 @@ FILTER_GRADE_PREFIX = "filter:"
 
 _LOOK_LABELS = {
     "none": "无",
-    "classic": "ARRI Classic 709",
-    "reveal": "ARRI Reveal 709",
-    "optic_warm_cyan": "Optic Warm/Cyan",
+    "optic_warm_cyan": "暖肤冷调",
 }
 
 
@@ -63,7 +61,9 @@ def grade_label(grade_id: str) -> str:
 
 def grade_choices() -> tuple[str, ...]:
     looks = tuple(grade_id_for_look(n) for n in LOOK_CHOICES if n != "none")
-    filters = tuple(grade_id_for_filter(n) for n in FILTER_CHOICES if n != "none")
+    filters = tuple(
+        grade_id_for_filter(n) for n in FILTER_CHOICES if n != "none" and filter_available(n)
+    )
     return ("none",) + looks + filters
 
 

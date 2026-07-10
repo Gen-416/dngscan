@@ -89,8 +89,7 @@ def finalize_output_linear(
         end = min(start + chunk, flat.shape[0])
         piece = np.nan_to_num(flat[start:end].astype(np.float32, copy=False), nan=0.0, posinf=1e6, neginf=-1e6)
         if look != "none":
-            # Chromatic look layer (measured ARRI/Fujifilm geometry field) in Oklab, before
-            # gamut fit so its result is still brought in-gamut hue-preservingly.
+            # Optional project/local chromatic field in Oklab, before gamut fit.
             lab_l, lab_a, lab_b = rgb_to_oklab(piece, output_gamut)
             lab_l, lab_a, lab_b = look_engine.apply_look_oklab(lab_l, lab_a, lab_b, look, look_strength)
             piece = oklab_to_output_rgb(lab_l, lab_a, lab_b, output_gamut)
@@ -132,8 +131,7 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     mapped = agx_engine.apply_core(rgb_rec2020, plan, inset, outset)
     # Scene-driven purity compensation (dngscan/punch.py). This wrapper is the single
     # convergence point for the main render AND the auto-EV probe path, so both see the
-    # same transform; the look-field extractor calls agx_engine.apply_core directly and
-    # stays punch-free by construction. strength 0 short-circuits to identity.
+    # same transform. Strength 0 short-circuits to identity.
     return punch_engine.apply_punch_rec2020(mapped, float(getattr(plan, "punch_strength", 0.0)))
 
 

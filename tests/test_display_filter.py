@@ -61,10 +61,9 @@ class DisplayFilterTests(unittest.TestCase):
         out = apply_display_filter_rec2020(rec, "srgb", "kodak_2383_d65", 0.0)
         np.testing.assert_allclose(out, expected, rtol=0, atol=1e-6)
 
-    def test_vendor_cubes_present(self) -> None:
-        for name in ("kodak_2383_d65", "red_ipp2_rec709_medium"):
-            self.assertTrue(filter_available(name), msg=name)
-            self.assertTrue(DISPLAY_FILTERS[name].cube.is_file(), msg=name)
+    def test_vendor_cubes_are_not_bundled(self) -> None:
+        for name in DISPLAY_FILTERS:
+            self.assertFalse(filter_available(name), msg=name)
 
     def test_kodak_filter_preserves_color(self) -> None:
         if not filter_available("kodak_2383_d65"):

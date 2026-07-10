@@ -105,7 +105,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--grade",
         choices=grade_choices(),
         default="none",
-        help="成片风格：色度 Look（Fujifilm/ARRI）或输出滤镜（Kodak/RED），互斥",
+        help="可选内置色彩风格；本地 LUT 仅在文件存在时显示",
     )
     parser.add_argument(
         "--grade-strength",

@@ -14,22 +14,23 @@ Reference copies of `agx.c` and `agx.cl` are included under `dngscan_assets/` wi
 their original GPL notices intact.
 
 The AgX inset/outset primaries derive from Troy Sobotka's AgX family of view
-transforms. The Rec.2020-native inset/outset matrix values and the hue-mix
-approach follow the Blender AgX implementation by Eary Chow
-(https://github.com/EaryChow/AgX_LUT_Gen); the constants were computed by running
-that repository's published generation parameters.
+transforms. Optional Blender-reference geometries follow the published construction
+used by Eary Chow's AgX LUT generator:
 
-## Tony McMapface LUT (Apache-2.0 OR MIT)
+- https://github.com/EaryChow/AgX_LUT_Gen
 
-dngscan bundles `tony_mc_mapface.spi3d` (historical; kept for provenance only —
-the current AgX / luminance / neutral tone cores do not sample it at runtime),
-an asset from:
+No third-party display or camera LUT is distributed with dngscan.
 
-- https://github.com/h3r2tic/tony-mc-mapface
+## RAW to ACES spectral data (Apache-2.0)
 
-It is dual-licensed under Apache-2.0 OR MIT by upstream. This repository
-redistributes the LUT under the MIT option; see
-`dngscan_assets/TONY_LICENSE-MIT.md`.
+Selected camera sensitivities and training reflectances under
+`dngscan_assets/spectral/` come from the Academy Software Foundation's
+`rawtoaces-data` repository:
+
+- https://github.com/AcademySoftwareFoundation/rawtoaces-data
+
+That source repository is licensed under Apache-2.0. Derived CSV files retain
+source and measurement notes in `dngscan_assets/spectral/README.md`.
 
 ## libultrahdr (Apache-2.0)
 
