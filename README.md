@@ -90,11 +90,25 @@ from standard rawpy wheel builds. If your libraw build carries them, exposing on
 one-line addition to `DEMOSAIC_CHOICES`: the resolver already checks availability and
 falls back gracefully.
 
-**White balance.** `camera` uses the in-camera AsShot multipliers; `daylight` uses
+**White balance.** `camera` uses the in-camera AsShot measurement; `daylight` uses
 libraw's calibrated daylight multipliers for film-style roll consistency — every frame
 under the same light gets the same balance, and color casts remain as properties of the
-scene. Either way, the AsShot deviation from daylight is always reported as testimony
-about the light source.
+scene. Either way, the AsShot deviation from daylight is reported as testimony about
+the light source. The position here is, again, to trust measurement: as long as the
+illuminant belongs to the daylight family (sun, overcast, shade), the estimation
+problem lives on the roughly one-dimensional blackbody–daylight locus and is
+well-conditioned — the in-camera measurement is usually accurate enough, whereas the
+eye judging a display is already chromatically adapted to that display's white point
+and the room, which makes eyeballing white balance a circular reference. The limits of
+the measurement deserve equal honesty: mixed sources, narrow-band artificial light
+(LED, fluorescent, sodium vapor) and frames dominated by a single color degrade the
+estimate into an ill-posed problem. And one layer further, often overlooked: much of
+what is perceived as "wrong white balance" is not white balance at all — color
+appearance effects (Hunt, Stevens, Abney, Bezold–Brücke) mean that a tone curve's
+redistribution of luminance and purity itself shifts perceived hue and warmth, and
+memory colors (skin, sky, foliage) were never colorimetrically correct expectations to
+begin with. Before touching WB, confirm the deviation is not coming from the tone and
+chroma layers.
 
 **Highlights.** Three libraw strategies: `clip` cuts hard, `blend` mixes the
 transition, `reconstruct` estimates from unclipped channels. The choice affects visual
