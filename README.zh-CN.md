@@ -249,6 +249,22 @@ python -m dngscan photo.dng --jpeg reference.jpg --ev auto
 
 完整参数见 `python -m dngscan --help`。
 
+### 可选的原生加速
+
+NumPy 渲染器是参考实现，永远可用。可选的 C++ 后端（pybind11）只加速 AgX 热路径——
+formation、C1 曲线、hue 恢复与 punch 融合为单遍，该阶段约 2× ——并释放 GIL，可与
+线程化导出流水线叠加。构建方式：
+
+```bash
+pip install pybind11 cmake
+tools/build_native.sh   # 将 _dngscan_fast*.so 放入 dngscan/
+```
+
+调度由 `DNGSCAN_FAST` 控制：`auto`（默认）在扩展可导入且 plan 适用时启用，否则静默
+回退 NumPy；`0` 禁用；`1` 为严格模式，失败时抛错而非回退（适合 CI）。内核与 NumPy
+路径做过一致性验证（真实场景线性域差异 ≤ 2×10⁻⁶，8-bit 下在一个抖动步长以内），并在
+导入时经过 ABI 检查与自测门控。
+
 ## 输出与诊断
 
 SDR 输出为带确定性 TPDF 抖动的 8-bit JPEG（默认质量 100、4:4:4）。Display P3 会嵌入

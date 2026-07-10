@@ -326,6 +326,25 @@ python -m dngscan photo.dng --jpeg reference.jpg --ev auto
 
 `python -m dngscan --help` lists everything.
 
+### Optional native acceleration
+
+The NumPy renderer is the reference implementation and always works. An optional C++
+backend (pybind11) accelerates the AgX hot path only — formation, C1 curve, hue
+restore and punch fused into one pass, roughly 2× on that stage — and releases the GIL
+so it stacks with the threaded export pipeline. Build it with:
+
+```bash
+pip install pybind11 cmake
+tools/build_native.sh   # drops _dngscan_fast*.so into dngscan/
+```
+
+Dispatch is controlled by `DNGSCAN_FAST`: `auto` (default) uses the kernel when it is
+importable and the plan qualifies, silently falling back to NumPy otherwise; `0`
+disables it; `1` is strict mode that raises instead of falling back (useful in CI).
+The kernel is parity-tested against the NumPy path (≤ 2 × 10⁻⁶ linear difference on
+real scenes, within one dither step at 8 bits) and gates itself behind an ABI check
+and a self-test at import.
+
 ## Output and diagnostics
 
 SDR export is an 8-bit JPEG with deterministic TPDF dither (default quality 100,
