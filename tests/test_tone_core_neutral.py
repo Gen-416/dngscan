@@ -1,14 +1,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Neutral tone core: scene-linear direct output without AgX."""
+"""Neutral tone core: fixed generic export curve (Lightroom-style control)."""
 from __future__ import annotations
 
 import unittest
 
 import numpy as np
 
+from dngscan.color import luminance_from_rec2020
 from dngscan.models import RawBundle
 from dngscan.render import apply_tone_core, render_output_linear
-from dngscan.tone import compute_exposure_gain, exposure_mode_for_tone_core, neutral_tone_plan, plan_for_mode
+from dngscan.tone import (
+    build_color_geometry_plan, compute_exposure_gain, exposure_mode_for_tone_core,
+    neutral_tone_plan, plan_for_mode,
+)
 
 
 def _minimal_analysis() -> "Analysis":
@@ -58,21 +62,37 @@ def _minimal_analysis() -> "Analysis":
 
 class NeutralToneCoreTests(unittest.TestCase):
     def test_exposure_mode_mapping(self) -> None:
-        self.assertEqual(exposure_mode_for_tone_core("neutral"), "neutral")
+        self.assertEqual(exposure_mode_for_tone_core("neutral"), "agx")
         self.assertEqual(exposure_mode_for_tone_core("agx"), "agx")
-        self.assertEqual(exposure_mode_for_tone_core("lum"), "agx")
 
-    def test_neutral_gain_is_manual_ev_only(self) -> None:
-        self.assertAlmostEqual(compute_exposure_gain("neutral", 0.0), 1.0)
-        self.assertAlmostEqual(compute_exposure_gain("neutral", 1.0), 2.0)
+    def test_neutral_shares_agx_exposure_anchor(self) -> None:
+        self.assertAlmostEqual(
+            compute_exposure_gain(exposure_mode_for_tone_core("neutral"), 0.0),
+            compute_exposure_gain(exposure_mode_for_tone_core("agx"), 0.0),
+        )
 
-    def test_apply_tone_core_is_identity(self) -> None:
+    def test_neutral_color_plan_keeps_clip_retreat(self) -> None:
+        analysis = _minimal_analysis()
+        color = build_color_geometry_plan(analysis, "srgb", tone_core="neutral")
+        self.assertAlmostEqual(float(color.raw_clip_retreat_strength), 1.0)
+        self.assertAlmostEqual(float(color.display_highlight_chroma_retreat), 0.0)
+
+    def test_neutral_compresses_highlights(self) -> None:
         plan = neutral_tone_plan("Rec2020")
-        rgb = np.array([[0.2, 0.15, 0.1], [0.8, 0.7, 0.6]], dtype=np.float32)
+        rgb = np.asarray([[2.5, 2.0, 1.5]], dtype=np.float32)
         out = apply_tone_core(rgb, plan)
-        np.testing.assert_allclose(out, rgb, rtol=0, atol=1e-6)
+        self.assertLess(float(luminance_from_rec2020(out)[0]), float(luminance_from_rec2020(rgb)[0]))
+        self.assertGreater(float(out[0, 0]), float(rgb[0, 0]) * 0.05)
 
-    def test_neutral_render_matches_linear_gain(self) -> None:
+    def test_neutral_preserves_rgb_ratios(self) -> None:
+        plan = neutral_tone_plan("Rec2020")
+        rgb = np.asarray([[1.2, 0.6, 0.3]], dtype=np.float32)
+        out = apply_tone_core(rgb, plan)
+        ratio_in = rgb[0] / rgb[0].sum()
+        ratio_out = out[0] / out[0].sum()
+        np.testing.assert_allclose(ratio_out, ratio_in, rtol=0, atol=1e-5)
+
+    def test_neutral_render_applies_gain(self) -> None:
         from pathlib import Path
 
         analysis = _minimal_analysis()

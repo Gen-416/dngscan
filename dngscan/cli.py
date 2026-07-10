@@ -141,7 +141,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--tone-core",
         choices=TONE_CORE_CHOICES,
         default="agx",
-        help="tone 核: agx=darktable 风格全图 AgX（默认）；gated=RAW 门控色度路径；lum=亮度域收肩；neutral=直出对比",
+        help="tone 核: agx=默认全图 AgX；gated=RAW 门控；lum=对照·场景 C1 仅亮度；neutral=对照·固定通用导出曲线",
     )
     parser.add_argument(
         "--lum-norm",

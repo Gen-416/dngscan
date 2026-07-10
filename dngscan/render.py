@@ -9,6 +9,7 @@ from ._deps import np
 from . import agx as agx_engine
 from . import display_filter as filter_engine
 from . import lum as lum_engine
+from . import neutral as neutral_engine
 from . import look as look_engine
 from . import gated_drt as gated_drt_engine
 from . import guidance as guidance_engine
@@ -145,7 +146,7 @@ def apply_tone_core(
 ) -> Any:
     core = str(getattr(plan, "tone_core", "agx"))
     if core == "neutral":
-        return rgb_rec2020.astype(np.float32, copy=False)
+        return neutral_engine.apply_neutral_core(rgb_rec2020, plan)
     if core == "lum":
         return lum_engine.apply_lum_core(rgb_rec2020, plan)
     if core == "gated":

@@ -69,18 +69,37 @@ photographic intent and are never applied unless explicitly invoked.
 
 ## Compression strategies
 
-All non-neutral strategies compile black and white endpoints from the reliable
-scene-luminance distribution. The black side is bounded by the usable DR/noise estimate;
-the white side is based on the *reliable* tail, not CFA-clipped or reconstructed samples.
-All use the same C1-continuous toe/shoulder family and the same fixed 18% pivot. What
+Two **non-AgX control paths** bracket the creative cores:
+
+```text
+neutral  →  fixed generic shoulder (Lightroom-style export baseline)
+   ↓       + scene-derived C1 endpoints, still luminance-only
+lum      →  shared science curve, no AgX colour geometry
+   ↓       + AgX inset/outset / hue mix
+agx      →  default finished render
+```
+
+**`neutral`** applies a canned luminance sigmoid (fixed black/white EV window, not compiled
+from scene statistics). It keeps RGB ratios, skips AgX entirely, and shares the same EV
+anchor, CFA clip retreat, and delivery gamut fit as every other core. Use it to ask:
+*what does a conventional export compressor do before we add scene-aware science or AgX?*
+
+**`lum`** uses the **same scene-derived C1 toe/shoulder** as `agx` and `gated`, but maps
+only a scalar luminance norm and preserves RGB ratios — no AgX inset/outset. Use it to ask:
+*what does AgX colour geometry add on top of the shared curve?*
+
+`gated` and `agx` compile black and white endpoints from the reliable scene-luminance
+distribution. The black side is bounded by the usable DR/noise estimate; the white side is
+based on the *reliable* tail, not CFA-clipped or reconstructed samples. All scene-aware
+cores use the same C1-continuous toe/shoulder family and the same fixed 18% pivot. What
 changes is the authority used for colour.
 
 | GUI name / CLI core | What the renderer does | Expected image | Best use |
 | --- | --- | --- | --- |
 | **AgX: darktable global colour path** / `agx` | Applies AgX inset -> log2 C1 curve -> hue mix -> outset to every pixel, followed by the scene-driven purity operator. The default path is darktable `smooth`. | The most recognisably global AgX behaviour: chromatic highlights follow a coherent AgX path, while RAW analysis still sets reliable tone endpoints. | Default finished render. |
-| **Fidelity: RAW evidence driven** / `gated` | Maps Rec.2020 luminance through the C1 curve everywhere. It computes a darktable-`smooth` AgX result, rescales it back to the same Rec.2020 Y, then blends only its chroma/path-to-white by a per-pixel permission weight. | A local, evidence-driven colour path with no RAW-mask brightness seam. It is not a promise of higher saturation than full AgX. | A RAW-aware alternative when the global AgX colour path is too broad for the scene. |
-| **Luminance priority** / `lum` | Reduces a scalar norm through the C1 curve and multiplies RGB by the resulting ratio. Apart from known clipped samples and final delivery guards, RGB ratios are retained. | The closest tone-mapped option to scene RGB proportions. Saturated highlights can remain more literal and less filmic; colour separation comes from the capture rather than an AgX hue path. | Inspecting whether AgX geometry is helping a scene, or preserving product/graphic colours. |
-| **Linear reference** / `neutral` | Skips the tone core. Scene-linear Rec.2020 is converted only for delivery, then gamut-fitted and encoded. | No designed shoulder or toe. Bright values reach delivery limits directly, so this is a diagnostic reference, not a finished JPEG look. | A/B analysis, checking the cost of any DRT. |
+| **Fidelity: RAW evidence driven** / `gated` | Maps Rec.2020 luminance through the scene C1 curve everywhere. It computes a darktable-`smooth` AgX result, rescales it back to the same Rec.2020 Y, then blends only its chroma/path-to-white by a per-pixel permission weight. | A local, evidence-driven colour path with no RAW-mask brightness seam. It is not a promise of higher saturation than full AgX. | A RAW-aware alternative when the global AgX colour path is too broad for the scene. |
+| **Scene C1, luminance only** / `lum` | Same scene-derived C1 endpoints as AgX, applied to a scalar norm; RGB ratios are preserved. No AgX inset/outset or hue mix. | Shared shoulder with AgX, but highlight hue stays closer to the capture. Saturated colours can look more literal, less filmic. | **Control:** measure what AgX colour geometry adds over the shared curve. |
+| **Generic export curve** / `neutral` | Fixed luminance sigmoid (not scene-derived endpoints); RGB ratios preserved; no AgX. Same EV anchor, CFA clip retreat, and gamut fit as other cores. | A Lightroom-style generic compression baseline — filmic shoulder without RAW-science endpoints or AgX colour path. | **Control:** conventional non-AgX export before scene-aware or AgX processing. |
 
 For `gated`, the colour permission is continuous, not a binary "clipped/not clipped"
 mask. It rises with measured per-channel headroom loss and multi-channel clipping; it
@@ -194,7 +213,8 @@ The practical workflow is:
    highlight mode.
 2. Use **Full-frame brightness reference** only as a deliberate comparison; return to
    `EV 0` when the photographed low-key/high-key intent is correct.
-3. Compare `gated`, `agx`, and `lum` before adding a camera correction or finished look.
+3. Compare the two non-AgX controls (`neutral`, then `lum`) against `agx` / `gated` at the
+   same EV before adding a camera correction or finished look.
 4. Use the full-resolution export metrics, not only proxy-preview white percentages,
    when deciding how far to raise manual EV.
 5. Export sRGB for broad delivery or P3 for colour-managed P3 viewers.
@@ -208,10 +228,13 @@ python -m dngscan photo.dng --jpeg photo.jpg
 # Full capture report plus JPEG
 python -m dngscan photo.dng --jpeg photo.jpg --scan --csv photo.csv
 
-# Compare the default and two meaningful DRT alternatives at the same EV
+# Non-AgX control pair at the same EV (generic export vs scene C1 luminance-only)
+python -m dngscan photo.dng --jpeg neutral.jpg --tone-core neutral
+python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
+
+# Compare against the default and RAW-gated creative cores
 python -m dngscan photo.dng --jpeg agx.jpg --tone-core agx --agx-primaries smooth
 python -m dngscan photo.dng --jpeg gated.jpg --tone-core gated
-python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
 
 # Use a different RAW restoration or delivery gamut
 python -m dngscan photo.dng --jpeg photo_p3.jpg --highlight-mode reconstruct --output-gamut p3

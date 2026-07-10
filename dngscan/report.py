@@ -268,7 +268,14 @@ def jpeg_tone_plan_cn(
     scene_transform: str = "none",
     scene_transform_strength: float = 1.0,
 ) -> str:
-    if mode in ("agx", "lum"):
+    if mode == "neutral":
+        from .neutral import NEUTRAL_BLACK_EV, NEUTRAL_WHITE_EV
+
+        return (
+            f"neutral: fixed export curve (Y ratio, black={NEUTRAL_BLACK_EV:.1f}EV "
+            f"white=+{NEUTRAL_WHITE_EV:.1f}EV); no AgX; delivery={output_gamut}"
+        )
+    if mode in ("agx", "lum", "gated"):
         plan = tone_plan if tone_plan is not None else plan_for_mode(
             bundle, analysis, "agx", output_gamut, scene_transform, scene_transform_strength, tone_core=mode
         )

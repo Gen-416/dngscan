@@ -42,14 +42,28 @@ RAW / DNG
 
 ## 压缩策略
 
-除了 `neutral`，所有策略都从**可靠**场景亮度分布编译黑白端点：黑端受可用动态范围/噪声估计约束，白端来自可靠 tail，而不是 CFA 已剪切或经重建的样本。它们共用同一族 C1 连续的 toe/shoulder，并保持同一个 18% 固定 pivot。差异只在于谁拥有色彩决定权。
+两条 **非 AgX 对照路径** 框住创意核：
+
+```text
+neutral  →  固定通用 shoulder（Lightroom 式导出基线）
+   ↓       + 场景编译 C1 端点，仍只动亮度
+lum      →  共享科学曲线，无 AgX 色度几何
+   ↓       + AgX inset/outset / hue mix
+agx      →  默认成片
+```
+
+**`neutral`** 使用固定的亮度 sigmoid（黑白 EV 窗口为常数，不从场景统计编译）。保持 RGB 比例、完全跳过 AgX，并与其他核共用 EV 锚定、CFA clip 还原与交付色域适配。用于回答：*在加入场景感知科学曲线或 AgX 之前，常规导出压缩器会做什么？*
+
+**`lum`** 使用与 `agx` / `gated` **相同的场景编译 C1 toe/shoulder**，但只映射标量亮度 norm 并保持 RGB 比例——无 AgX inset/outset。用于回答：*在共享曲线之上，AgX 色度几何额外改了什么？*
+
+`gated` 与 `agx` 从可靠场景亮度分布编译黑白端点：黑端受可用动态范围/噪声估计约束，白端来自可靠 tail，而不是 CFA 已剪切或经重建的样本。所有场景感知核共用同一族 C1 连续 toe/shoulder 与固定 18% pivot；差异只在色彩决定权。
 
 | GUI 名称 / CLI 核 | 底层处理 | 预期画面 | 适用场景 |
 | --- | --- | --- | --- |
 | **AgX：darktable 全图色彩路径** / `agx` | 每个像素都走 AgX 的 inset -> log2 C1 曲线 -> hue mix -> outset，并接场景驱动的中间调纯度算子。默认路径为 darktable `smooth`。 | 最统一、最典型的全图 AgX 观感；RAW 分析仍负责可靠的 tone 端点。 | 默认的成片策略。 |
-| **保真：RAW 证据驱动** / `gated` | 全图 Rec.2020 亮度先走 C1 曲线；同时计算一份 darktable `smooth` AgX 结果，把它重新缩放回相同的 Rec.2020 Y，再按逐像素许可权重只混入其色度/向白路径。 | 局部、证据驱动的色彩路径，RAW mask 边界没有亮度接缝；它不保证一定比全图 AgX 更饱和。 | 全图 AgX 的色彩路径对这张照片过宽时，作为 RAW-aware 备选。 |
-| **亮度优先：保持通道比例** / `lum` | 将一个标量亮度 norm 走 C1 曲线，再以所得比例缩放 RGB。除已知剪切样本和最终显示端保护外，RGB 比例保持。 | 三个 tone-mapped 选项中最接近 scene RGB 比例；饱和高光可能更直白、较少 filmic 的向白路径。 | 判断 AgX 几何是否帮到这张照片，或尽量保住产品/图形色。 |
-| **线性参考：不做 tone 压缩** / `neutral` | 跳过 tone core。scene-linear Rec.2020 只做交付色域转换、色域适配与编码。 | 没有设计好的肩部或 toe；亮值会直接触到交付上限，因此它是技术参考，不是完成风格。 | A/B 分析，检查某种 DRT 的实际代价。 |
+| **保真：RAW 证据驱动** / `gated` | 全图 Rec.2020 亮度先走场景 C1 曲线；同时计算 darktable `smooth` AgX 结果，缩放回相同 Rec.2020 Y，再按许可权重只混入色度/向白路径。 | 局部、证据驱动的色彩路径，RAW mask 边界无亮度接缝。 | 全图 AgX 色彩路径过宽时的 RAW-aware 备选。 |
+| **场景 C1 · 仅亮度** / `lum` | 与 AgX 相同的场景编译 C1 端点，施于标量 norm；保持 RGB 比例。无 AgX inset/outset 或 hue mix。 | 与 AgX 共享 shoulder，但高光色相更接近采集；饱和色更字面、较少 filmic。 | **对照组：** 衡量 AgX 色度几何在共享曲线之上加了什么。 |
+| **通用导出曲线** / `neutral` | 固定亮度 sigmoid（非场景端点）；保持 RGB 比例；无 AgX。共用 EV 锚定、CFA 还原与色域适配。 | Lightroom 式通用压缩基线——有 filmic shoulder，但无 RAW 科学端点或 AgX 色度路径。 | **对照组：** 场景感知/AgX 之前的常规非 AgX 导出。 |
 
 `gated` 的色彩许可是连续量，不是二元的“剪切/未剪切”遮罩。逐通道 headroom 耗尽和多通道剪切会提高许可；很亮的 shoulder、交付色域压力、可信的色彩 SNR 也能逐步打开它。可靠肤色中调会被保护，亮的绿/青色则可略微更开放。RAW 信息损失的信号永远优先于这层审美色相策略。
 
@@ -119,7 +133,7 @@ GUI 在 localhost 中运行。它会缓存同一文件的解码/分析，用 pro
 
 1. 从 `AgX：darktable 全图色彩路径`、`darktable 平滑`、`EV 0` 与选定的 RAW 高光模式开始。
 2. 把**全图亮度参考**当作主动比较工具；低调/高调意图正确时回到 `EV 0`。
-3. 在加入相机响应校正或成片风格之前，先对比 `gated`、`agx` 与 `lum`。
+3. 在相同 EV 下先对比两条非 AgX 对照（`neutral`，再 `lum`），再与 `agx` / `gated` 比较，然后才加相机响应校正或成片风格。
 4. 决定手动 EV 上限时，以全分辨率导出的指标为准，不只看 proxy 预览的近白比例。
 5. 广泛交付用 sRGB；已知 P3 色彩管理观看环境时用 Display P3。
 
@@ -132,10 +146,13 @@ python -m dngscan photo.dng --jpeg photo.jpg
 # 同时输出采集报告和 JPEG
 python -m dngscan photo.dng --jpeg photo.jpg --scan --csv photo.csv
 
-# 在相同 EV 下比较默认与两条有意义的 DRT 分支
+# 相同 EV 下的非 AgX 对照（通用导出 vs 场景 C1 仅亮度）
+python -m dngscan photo.dng --jpeg neutral.jpg --tone-core neutral
+python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
+
+# 与默认及 RAW 门控创意核对比
 python -m dngscan photo.dng --jpeg agx.jpg --tone-core agx --agx-primaries smooth
 python -m dngscan photo.dng --jpeg gated.jpg --tone-core gated
-python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
 
 # 改变 RAW 还原或交付色域
 python -m dngscan photo.dng --jpeg photo_p3.jpg --highlight-mode reconstruct --output-gamut p3

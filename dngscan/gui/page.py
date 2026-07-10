@@ -110,8 +110,8 @@ button.preview:disabled{opacity:.5;cursor:default}
       <select id="toneCore" title="默认是 darktable 风格的全图 AgX；RAW 门控是基于同一 darktable 几何的可选色度策略。">
         <option value="agx" selected>AgX · darktable 全图色彩路径</option>
         <option value="gated">保真 · RAW 证据门控</option>
-        <option value="lum">亮度优先 · 保持通道比例</option>
-        <option value="neutral">线性参考 · 不做 tone 压缩</option>
+        <option value="lum">对照 · 场景 C1 仅亮度</option>
+        <option value="neutral">对照 · 通用导出曲线</option>
       </select>
     </div>
     <div id="lumNormBlock" style="flex:1;min-width:140px;display:none">
@@ -279,8 +279,8 @@ function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.displa
 const CORE_FACTS={
   gated:["亮度 <b>darktable C1 曲线</b>","色度 <b>smooth 几何 + RAW 门控</b>"],
   agx:["亮度 <b>darktable C1 曲线</b>","色度 <b>全图 AgX path-to-white</b>"],
-  lum:["亮度 <b>C1 比例保持</b>","色度 <b>不改场景比例</b>"],
-  neutral:["亮度 <b>不做压缩</b>","色度 <b>线性参考</b>"]
+  lum:["亮度 <b>场景 C1 曲线</b>","色度 <b>保持 RGB 比例（无 AgX）</b>"],
+  neutral:["亮度 <b>固定通用 shoulder</b>","色度 <b>Lightroom 式导出基线</b>"]
 };
 function updateToneCoreUi(){
   const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";
@@ -321,7 +321,7 @@ function sceneTransformText(j){
 }
 function toneCoreText(j){
   if(!j.tone_core)return "";
-  const labels={gated:"保真（RAW 门控）",agx:"AgX（darktable 全图）",lum:"亮度优先",neutral:"线性参考"};
+  const labels={gated:"保真（RAW 门控）",agx:"AgX（darktable 全图）",lum:"对照（场景 C1 仅亮度）",neutral:"对照（通用导出曲线）"};
   const norms={y:"Y",power:"折中",max:"最大通道"};
   const norm=j.tone_core==="lum"&&j.lum_norm?"（"+(norms[j.lum_norm]||j.lum_norm)+"）":"";
   return "，策略 "+(labels[j.tone_core]||j.tone_core)+norm;

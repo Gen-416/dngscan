@@ -86,9 +86,9 @@ def test_median_align_ev_agx():
 
 def test_median_align_ev_neutral():
     analysis = _minimal_analysis(-1.0)
-    ev = median_align_ev("neutral", analysis)
-    assert abs(ev - 1.0) < 1e-6
-    assert abs(anchored_median_ev("neutral", analysis, ev)) < 1e-6
+    ev = median_align_ev("agx", analysis)
+    assert abs(ev - (-analysis.median_vs_gray_ev - math.log2(compute_exposure_gain("agx", 0.0)))) < 1e-4
+    assert abs(anchored_median_ev("agx", analysis, ev)) < 1e-4
 
 
 def test_resolve_export_ev_manual():

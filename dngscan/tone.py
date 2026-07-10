@@ -24,43 +24,55 @@ LUM_NORM_CHOICES = ("y", "power", "max")
 
 
 def exposure_mode_for_tone_core(tone_core: str) -> str:
-    """Map tone-core selection to the exposure anchor used by compute_exposure_gain."""
-    if tone_core == "neutral":
-        return "neutral"
+    """Exposure anchor for every tone core.
+
+    All cores including neutral share the same fixed mid-gray reference so manual/auto
+    EV means the same thing when A/B-ing against AgX. Only the tone operator differs.
+    """
     return "agx"
 
 
 def neutral_tone_plan(target_gamut: str) -> ToneCompressionPlan:
-    """Placeholder plan for the direct (no tone-map) path; curve fields are unused."""
+    """Fixed generic tone curve — non-AgX export baseline (Lightroom-style).
+
+    Endpoints are constants, not compiled from scene body/tail statistics. The operator
+    is luminance-ratio compression only; AgX inset/outset and scene C1 planning are
+    skipped. Shared EV anchor, CFA clip retreat, and delivery gamut fit still apply.
+    """
+    from .neutral import (
+        NEUTRAL_BLACK_EV, NEUTRAL_CONTRAST, NEUTRAL_SHOULDER_POWER,
+        NEUTRAL_TOE_POWER, NEUTRAL_WHITE_EV,
+    )
+
     return ToneCompressionPlan(
         target_gamut=target_gamut,
         luma_p1=0.0,
         luma_p50=0.0,
         luma_p99=0.0,
         luma_p999=0.0,
-        black_ev=-10.0,
-        white_ev=6.5,
-        dynamic_range_ev=16.5,
-        contrast=3.0,
-        toe_power=1.5,
-        shoulder_power=3.3,
+        black_ev=NEUTRAL_BLACK_EV,
+        white_ev=NEUTRAL_WHITE_EV,
+        dynamic_range_ev=NEUTRAL_WHITE_EV - NEUTRAL_BLACK_EV,
+        contrast=NEUTRAL_CONTRAST,
+        toe_power=NEUTRAL_TOE_POWER,
+        shoulder_power=NEUTRAL_SHOULDER_POWER,
         chroma_p95=0.0,
         negative_rgb_pct=0.0,
         over_rgb_pct=0.0,
         tone_core="neutral",
+        lum_norm="y",
+        use_c1_endpoints=False,
+        view_brightness=1.0,
     )
 
 def compute_exposure_gain(mode: str, ev: float) -> float:
     """Constant, content-independent exposure anchor plus manual EV compensation.
 
-    neutral stays at the raw-clip=1.0 reference (manual EV only). The tone-mapping
-    cores place a nominally-exposed mid gray (~clip / 2**headroom) onto 0.18 so the
-    curve pivot lands on real mid gray. This is a fixed scalar, never derived from
-    scene content, so a dark scene stays dark.
+    Every tone core uses the same anchor: a nominally-exposed mid gray (~clip /
+    2**headroom) maps to 0.18 scene-linear Rec.2020 at EV=0, then manual EV scales
+    from there. This is a fixed scalar, never derived from scene content.
     """
     manual = 2.0 ** float(ev)
-    if mode == "neutral":
-        return manual
     return 0.18 * (2.0 ** MIDGRAY_HEADROOM_STOPS) * manual
 
 
@@ -185,9 +197,9 @@ def build_color_geometry_plan(
         )
     return ColorGeometryPlan(
         target_gamut=output_gamut,
-        # Neutral is a diagnostic scene-linear reference, so it must not hide clipped
-        # colour by applying the delivery transform's retreat operator.
-        raw_clip_retreat_strength=0.0 if tone_core == "neutral" else 1.0,
+        # Neutral skips tone curves but still retreats clipped CFA chroma toward the
+        # Rec.2020 neutral axis at fixed luminance (evidence-based hue restore).
+        raw_clip_retreat_strength=1.0,
         output_gamut_pressure_pct=pressure,
         gamut_fit_alpha=alpha,
         display_highlight_chroma_retreat=0.35 if tone_core == "lum" else 0.0,

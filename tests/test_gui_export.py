@@ -44,7 +44,11 @@ class ExportSuffixTests(unittest.TestCase):
             "agx_p3_arri_skin_d55_st0.75",
         )
 
-    def test_includes_lum_core(self) -> None:
+    def test_neutral_export_suffix(self) -> None:
+        self.assertEqual(
+            export_suffix_parts("clip", "srgb", "sdr", tone_core="neutral"),
+            "neutral",
+        )
         self.assertEqual(
             export_suffix_parts("clip", "srgb", "sdr", tone_core="lum"),
             "lum",
