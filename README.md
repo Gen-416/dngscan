@@ -1,40 +1,40 @@
 # dngscan
 
-A small offline tool that compresses RAW files into JPEGs through AgX — the tone
-reproduction ported from darktable's `agx` module.
+A small offline tool that reads a RAW file and compresses it into a JPEG through AgX.
+The AgX implementation comes from darktable's `agx` module.
 
 [中文说明](README.zh-CN.md) · [License](LICENSE) · [Third-party notices](NOTICE.md)
 
-dngscan reads a RAW file, measures what the sensor actually recorded, renders it in
-scene-linear Rec.2020, and compresses it into an 8-bit sRGB or Display P3 JPEG. That is
-the whole job. There is no catalog, no layers, no masks, no local retouching — this is
-not a photo editor, and it is not trying to become one.
+dngscan does one fairly simple thing: it reads a RAW file, looks at what the sensor
+actually recorded, and uses AgX to fit that signal into an 8-bit sRGB or Display P3
+JPEG. There is no catalog, no layers, no masks and no local retouching. It is not a
+photo editor. It is closer to a signal-processing tool, or simply a toy for trying RAW
+and image-formation algorithms.
 
-## Where it comes from
+## Why I made it
 
-I like darktable. Its scene-referred pipeline is, at heart, a signal-processing
-laboratory, and that is exactly why it is hard to recommend casually: the learning
-curve is real, and the same image can be reached through a dozen interacting modules.
-dngscan takes one opinionated path out of that laboratory and freezes it: LibRaw
-interpretation, scene-linear Rec.2020, and an AgX image formation whose curve
-construction and primaries geometry are ported from darktable's GPL `agx` module. AgX
-itself originates with Troy Sobotka and matured in the Blender / EaryChow ecosystem;
-this project inherits through darktable rather than reinventing.
+I like darktable, especially its scene-referred pipeline. But it takes time to learn,
+and it has far more tools than I need when all I want is to develop one RAW through
+AgX. dngscan is my attempt to take that one path out of darktable and make it small,
+repeatable and easy to play with: LibRaw interpretation, scene-linear Rec.2020, then
+the curve construction and primaries geometry adapted from darktable's GPL `agx`
+module. It is not a new AgX implementation invented from scratch, and it is not meant
+to compete with darktable.
 
-Two convictions shape the design.
+I have two simple rules for the tool.
 
-**Automatic decisions are respect for the digitized optical signal, not a robot
-retoucher.** The tool measures black and white levels, per-channel CFA clipping, usable
-shadow range and the scene's luminance distribution, and compiles the compression curve
-from those measurements. A night scene stays dark at EV 0. A lamp that clipped on the
-sensor is not allowed to redefine the image's white point merely because highlight
-reconstruction painted it smooth.
+**Automatic does not mean automatic retouching.** It means taking the digitised optical
+signal seriously. The tool measures black and white levels, per-channel CFA clipping,
+usable shadow range and the scene's luminance distribution, then uses those facts to
+set the compression. A night scene stays dark at EV 0. A clipped lamp does not get to
+redefine the image's white point just because highlight reconstruction made it look
+smooth.
 
-**The compression pipeline itself is fixed.** What adapts inside it is compiled from
-measurement, never from taste. Everything that does express taste — exposure
-compensation, white balance policy, the camera prefeed, chromatic looks, LUT filters —
-sits explicitly outside the AgX core, before or after it, and defaults to off or
-neutral.
+**The AgX path should stay understandable.** Scene measurements may set its working
+parameters, but taste should not be hidden inside the automatic analysis. Exposure,
+white balance, detail choices, camera prefeed, looks and LUT filters sit outside the
+AgX core and remain visible controls. That makes it easier to tell whether a result
+came from the captured signal, the DRT, or a choice I made afterwards.
 
 ## Pipeline
 
@@ -76,24 +76,32 @@ The `--agx-primaries` presets (`smooth` default, `base`, `punchy`, `muted`) chan
 the AgX inset/outset geometry — comparison references, not different exposure
 algorithms.
 
-## The camera prefeed (experimental)
+## What I mean by camera prefeed (experimental)
 
-The idea I care most about is letting information taken from the sensor *before*
-demosaicing inform the color transform that runs afterwards. dngscan already does this
-rigorously for CFA clipping and headroom: collected pre-demosaic, consulted by the tone
-plan and the gated core. The experimental camera-response prefeed — a soft
-chromaticity-windowed mapping toward an ALEV-like response — runs later, in
-scene-linear Rec.2020 immediately before AgX.
+By "prefeed" I do not mean another look filter. The first goal is practical: use known
+sensor and filter-stack behaviour to compensate recurring colour errors before the DRT
+has to compress them. If that response is measured well enough, the same machinery can
+also map part of one camera's response toward another camera or CMOS/filter stack. It
+cannot recreate spectral information that was never captured, but it may reproduce
+some of the colour relationships that give a camera its character.
 
-I want to be straight about its status: it is not a serious calibration. Serious
-prefeed design needs controlled illuminants, reference targets and spectral
-measurement, and really needs doing per physical camera body rather than per model —
-when ARRI published the ALEXA's spectral sensitivities they averaged five cameras,
-precisely because the sensor stack's interference ripple differs unit to unit. I do not
-own that equipment. What ships is a geometric mapping built from digitized public
-curves and analytic spectra, with its error report and per-material confidence weights
-in the open (`dngscan_assets/spectral/README.md`). Treat it as an invitation, not a
-claim.
+The specific experiment here started with the Sigma fp. I wanted to see whether its
+response could be nudged toward the skin quality I associate with ARRI cameras: a
+warmer, blood-rich skin response set against a slightly cooler cyan field, which I
+suspect is partly related to the ARRI sensor and its comparatively permissive red / IR
+filter stack. That is the intention, not the achievement. The current result is still
+less convincing than I hoped; it behaves more like a cautious geometric colour mapping
+than the skin response of an ARRI camera.
+
+dngscan does collect CFA clipping and headroom before demosaicing and carries that
+evidence into the later render. The colour prefeed itself currently runs after
+demosaicing and camera interpretation, in scene-linear Rec.2020 immediately before
+AgX. A serious version would need controlled illuminants, reference targets and
+spectral measurements, ideally for each physical camera body rather than only each
+model. I do not own that equipment. What ships is a rough ALEV-like mapping built from
+digitised public curves and analytic spectra, with its errors and confidence values
+documented in `dngscan_assets/spectral/README.md`. It is a starting point, not a claim
+of ARRI colour science.
 
 ## Looks and LUT slots
 
@@ -174,6 +182,8 @@ not commit RAW test files or third-party LUTs without permission.
 
 dngscan is GPL-3.0-or-later because its AgX implementation derives from darktable's
 GPL code; see [NOTICE.md](NOTICE.md) for spectral data sources and optional
-dependencies. This is an independent experiment: ARRI, ALEXA, ALEV, darktable, Blender,
-Fujifilm, Sony, RED, Kodak, Resolve and other names belong to their owners, and are
-referenced only for provenance and comparison.
+dependencies. AgX itself originates with Troy Sobotka and matured in the Blender /
+EaryChow ecosystem; this project inherits it through darktable's `agx` module. This is
+an independent experiment: ARRI, ALEXA, ALEV, darktable, Blender, Fujifilm, Sony, RED,
+Kodak, Resolve and other names belong to their owners, and are referenced only for
+provenance and comparison.
