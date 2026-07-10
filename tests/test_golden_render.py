@@ -18,6 +18,21 @@ from tests.golden_support import (
 )
 
 
+def _stats_match(
+    expected: dict[str, dict[str, float]],
+    actual: dict[str, dict[str, float]],
+    *,
+    atol: float = 1e-3,
+) -> bool:
+    for roi, exp_stats in expected.items():
+        act_stats = actual.get(roi, {})
+        for key, exp_val in exp_stats.items():
+            act_val = float(act_stats.get(key, float("nan")))
+            if abs(act_val - float(exp_val)) > atol:
+                return False
+    return True
+
+
 def _format_stats_delta(
     expected: dict[str, dict[str, float]],
     actual: dict[str, dict[str, float]],
@@ -71,16 +86,22 @@ class GoldenRenderTest(unittest.TestCase):
                     tone_core=case.tone_core,
                     agx_primaries=case.agx_primaries if case.tone_core == "agx" else "smooth",
                 ).reshape(expected.shape)
-                if not np.array_equal(actual, expected):
-                    exp_stats = fixture["stats"].item() if "stats" in fixture else {}
-                    act_stats = {name: oklab_stats(actual, mask) for name, mask in scene.rois.items()}
-                    msg = _format_stats_delta(exp_stats, act_stats)
-                    diff = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
-                    msg = (
-                        f"{case.fixture_name}: max byte delta {int(diff.max())}, "
-                        f"{int(np.count_nonzero(diff))} px differ\n{msg}"
-                    )
-                    self.fail(msg)
+                if np.array_equal(actual, expected):
+                    continue
+                exp_stats = fixture["stats"].item() if "stats" in fixture else {}
+                act_stats = {name: oklab_stats(actual, mask) for name, mask in scene.rois.items()}
+                diff = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
+                max_delta = int(diff.max())
+                # Cross-platform libm can move a handful of pixels by one dither LSB while
+                # Oklab scene stats stay unchanged; reject only real regressions.
+                if max_delta <= 1 and _stats_match(exp_stats, act_stats):
+                    continue
+                msg = _format_stats_delta(exp_stats, act_stats)
+                msg = (
+                    f"{case.fixture_name}: max byte delta {max_delta}, "
+                    f"{int(np.count_nonzero(diff))} px differ\n{msg}"
+                )
+                self.fail(msg)
 
 
 if __name__ == "__main__":

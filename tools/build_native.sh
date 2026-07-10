@@ -3,7 +3,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
+if [[ -z "${PYTHON:-}" ]]; then
+  if [[ -x "$ROOT/.venv/bin/python" ]]; then
+    PYTHON="$ROOT/.venv/bin/python"
+  else
+    PYTHON="$(command -v python)"
+  fi
+fi
 CMAKE_BIN="$("$PYTHON" -c 'import cmake, os; print(os.path.join(os.path.dirname(cmake.__file__), "data", "bin", "cmake"))')"
 PYBIND11_DIR="$("$PYTHON" -m pybind11 --cmakedir)"
 "$CMAKE_BIN" -S . -B build/native \

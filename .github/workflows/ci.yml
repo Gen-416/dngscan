@@ -35,7 +35,7 @@ jobs:
       - name: Build native kernel
         run: |
           pip install pybind11 cmake
-          bash tools/build_native.sh
+          PYTHON=python bash tools/build_native.sh
 
       - name: Unit tests (strict native path)
         run: DNGSCAN_FAST=1 python -m unittest discover -s tests -q
