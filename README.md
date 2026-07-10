@@ -110,26 +110,30 @@ memory colors (skin, sky, foliage) were never colorimetrically correct expectati
 begin with. Before touching WB, confirm the deviation is not coming from the tone and
 chroma layers.
 
-**Highlights.** Three libraw strategies: `clip` cuts hard, `blend` mixes the
-transition, `reconstruct` estimates from unclipped channels. The choice affects visual
-continuity only, never evidence: the CFA clipping state is captured before demosaicing,
-and reconstructed pixels can never feed back into the curve endpoints.
+**Highlights.** The three libraw strategies differ in mechanism. `clip` cuts hard at
+sensor saturation — the most honest, but the three channels clip at different levels,
+so highlight borders often carry magenta or cyan fringes; `blend` feathers the
+transition; `reconstruct` estimates the clipped channels from the surviving ones —
+plausible luminance structure, but the chroma is an estimate that drifts toward the
+surviving channel's hue. The choice affects visual continuity only, never evidence:
+the CFA clipping state is captured before demosaicing, reconstructed pixels can never
+feed back into the curve endpoints, and the clip classes are exactly what the `gated`
+core consumes. In practice: use reconstruct where highlight gradients matter (lamps,
+backlit sky), and clip where maximum honesty matters (calibration, measurement).
 
-**Compression core and lum norm.** The four cores are described in the next section.
-When `lum` is selected, a norm option decides which scalar the C1 curve acts on: `y` is
-Rec.2020 luminance (colorimetric lightness); `max` takes the maximum channel, so
-saturated colors are never under-weighted — flattest rendering, best saturation
-retention; `power` is a fourth-power weighted compromise. All three only change what
-counts as "bright"; RGB ratios are always preserved.
-
-**Purity compensation (punch).** AgX-family formation is inherently flat: the inset
-desaturates up front, and only deep-toe content earns purity back through per-channel
-expansion — which is why high-ISO night frames look rich while daylight wide-DR scenes
-look washed. Punch is a scene-gated chroma compensation aimed at exactly that: bright,
-low-ISO, wide-window scenes automatically receive an Oklab chroma lift (attenuated on
-the neutral axis, in deep shadows, in highlights and in the skin band), while night and
-high-ISO scenes gate to zero and short-circuit entirely. The slider is a multiplier on
-the automatic value: 1 uses the analyzed value, 0 disables.
+**Purity compensation (punch).** The mechanism behind AgX-family flatness is described
+in the section above; punch is a scene-gated correction for it, not a style layer. The
+gate is a product of three scalars — subject brightness (median near mid gray), sensor
+quality (usable DR from camera priors or single-frame measurement), and window width —
+so bright, low-ISO, wide-window scenes receive an Oklab chroma lift automatically,
+while night and high-ISO scenes gate to exactly zero and short-circuit the operator:
+their renders are byte-identical. Every weight multiplies into the gain's increment,
+so the gain is ≥ 1 everywhere (it never desaturates) and attenuates on the neutral
+axis (grays immune), in deep shadows (no noise amplification), in highlights
+(preserving the path-to-white), on already-rich colors (a knee caps them) and in the
+skin band (halved). Its limits deserve stating too: this is a global chroma policy
+driven by scalar scene statistics, with thresholds tuned on a limited corpus. The
+slider is a multiplier on the automatic value: 1 uses the analyzed value, 0 disables.
 
 **Output and gamut.** SDR is an 8-bit JPEG, default quality 100 with 4:4:4 chroma
 (4:2:2 / 4:2:0 available), with deterministic TPDF dither applied before quantization
@@ -140,11 +144,46 @@ HDR JPEG, with `--hdr-headroom` setting the gain-map ceiling in EV; this path re
 experimental.
 
 **Exposure.** The anchor is a content-independent constant: nominally exposed mid gray
-maps to scene-linear 0.18, and `--ev` offsets from there. `--ev auto` is an explicit
-brightness reference — median aligned to 18% gray, bounded by a highlight growth
-budget — a reading you choose deliberately, never applied silently.
+maps to scene-linear 0.18, shared by all four cores, so EV means the same thing in any
+scene under any core, and `--ev` offsets from there. This is a deliberate rejection of
+content-adaptive exposure — a night scene staying dark at EV 0 is design, not defect;
+for sufficiently clean dark scenes the tool applies a display-side interior brightness
+lift (view brightness, true black and white point untouched) instead of raising
+exposure. `--ev auto` is an explicit brightness reference: it aligns the frame median
+to 18% gray, bounded by a highlight growth budget — light sources already clipped on
+the sensor do not count against the budget (lamps are supposed to clip), only newly
+created clipping limits the boost. Its limitation follows from its mechanism: the
+median is a global statistic, so a backlit subject whose median is dominated by the
+background still needs manual EV — which is what the slider is for.
 
-## Compression cores
+## AgX formation and the compression cores
+
+First, what AgX itself is. A per-channel sigmoid is the shared skeleton of every
+film-like digital formation: R, G and B each pass through the same S-curve, so
+highlights roll off and shadows compress naturally. But a bare per-channel curve has a
+famous side effect — the three channels saturate at different rates, so hue drifts with
+brightness (the "notorious six": pure red slides toward orange-yellow in highlights,
+pure blue toward cyan). AgX's contribution is a pair of matrices around the curve. The
+**inset**, before the curve, contracts the working primaries toward the achromatic axis
+with a small rotation: the contraction guarantees no color enters the curve at extreme
+purity, giving bright saturated colors a smooth path-to-white instead of congealing
+into neon patches at the channel ceiling; the rotation pre-compensates perceptual hue
+shifts such as Abney. The **outset**, after the curve, restores purity — deliberately
+not the inverse of the inset, and the difference between the two is precisely AgX's
+character. The curve itself uses darktable's C1 piecewise construction (toe, linear
+segment, shoulder, continuous in both value and slope at the joins); its endpoints are
+compiled from scene statistics, and calibrated EV 0 always maps to 18% output.
+
+AgX's inherent limits deserve equal clarity, because they motivate several of this
+tool's later designs. First, the inset's up-front desaturation is only earned back by
+content deep in the toe, through per-channel expansion — which is why high-ISO night
+frames look rich while daylight wide-DR scenes run inherently flat (that the Blender
+ecosystem never ships AgX Base without a Punchy look is the same fact stated
+differently); purity compensation (punch) exists for exactly this. Second, chromatic
+behavior is coupled to where content lands on the curve: the same object can render
+with different saturation in different framings or exposures. That is the structural
+price of delegating color decisions to per-channel curves — and the reason the `gated`
+and `lum` control paths exist.
 
 All four cores share the same exposure anchor and delivery safeguards, so an A/B
 between them isolates exactly one variable.
@@ -155,6 +194,25 @@ between them isolates exactly one variable.
 | `gated` | Same AgX candidate, but RAW evidence decides per pixel how much of its chromatic path applies. More conservative. |
 | `lum` | The same scene-compiled C1 toe/shoulder applied to luminance only, RGB ratios preserved. Shows what AgX color geometry adds. |
 | `neutral` | A fixed generic shoulder, no AgX at all. A conventional-export reference, not a recommendation. |
+
+`gated` deserves one more sentence of mechanism: it renders both the lum luminance
+result and the AgX color result, re-normalizes the AgX output to the same Rec.2020
+luminance as lum, and then lets RAW evidence (clip class, remaining headroom, noise
+confidence) decide the per-pixel mix — there is exactly one luminance authority, so a
+confidence boundary can never produce a brightness seam. `neutral`'s curve endpoints
+are fixed constants rather than scene-compiled; the question it answers is "roughly
+what would an ordinary converter produce".
+
+When `lum` is selected, the norm option decides which scalar the curve acts on, and
+this is a trade with no single right answer: `y` (Rec.2020 luminance) is
+colorimetrically strictest, but a saturated color's loudest channel can overshoot the
+display ceiling and needs the display-side chroma retreat as a backstop; `max` drives
+the curve with the loudest channel, so saturated colors never overshoot — at the cost
+of darkening every saturated color relative to its luminance, the flattest rendering;
+`power` (fourth-power weighting) is the compromise. Ratio preservation means hue and
+saturation are carried through tone exactly — which also means bright saturated
+highlights read "neon". That is the known failure mode of chromaticity-preserving tone
+mapping, and precisely the reason the per-channel AgX route is the default.
 
 The `--agx-primaries` presets (`smooth` default, `base`, `punchy`, `muted`) change only
 the AgX inset/outset geometry — comparison references, not different exposure
