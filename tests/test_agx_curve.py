@@ -209,24 +209,11 @@ class LookOverrideTest(unittest.TestCase):
     def test_plan_overrides_from_look_fields(self) -> None:
         from dngscan import look as look_engine
 
-        field = look_engine.LOOK_FIELDS["classic"]
+        field = look_engine.LOOK_FIELDS["optic_warm_cyan"]
         self.assertIsNone(field.agx_hue_keep)
-        self.assertEqual(look_engine.agx_plan_overrides("classic"), {})
+        optic = look_engine.agx_plan_overrides("optic_warm_cyan")
+        self.assertAlmostEqual(optic["hue_keep"], 0.52)
         self.assertEqual(look_engine.agx_plan_overrides("does_not_exist"), {})
-
-        velvia = look_engine.agx_plan_overrides("fuji_velvia")
-        self.assertAlmostEqual(velvia["hue_keep"], 0.55)
-        half = look_engine.agx_plan_overrides("fuji_velvia", 0.5)
-        self.assertAlmostEqual(half["hue_keep"], 0.6 + 0.5 * (0.55 - 0.6))
-        blender_half = look_engine.agx_plan_overrides("fuji_velvia", 0.5, 0.4)
-        self.assertAlmostEqual(blender_half["hue_keep"], 0.4 + 0.5 * (0.55 - 0.4))
-
-        neg = look_engine.agx_plan_overrides("fuji_classic_neg")
-        self.assertAlmostEqual(neg["target_black_linear"], 0.022)
-        self.assertAlmostEqual(neg["target_white_linear"], 0.90)
-
-        eterna = look_engine.agx_plan_overrides("fuji_eterna")
-        self.assertAlmostEqual(eterna["target_white_linear"], 0.88)
 
         import dataclasses
 

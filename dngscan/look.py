@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Chromatic look layer applied on top of the AgX render, in Oklab.
-
-Parameters are MEASURED geometry (facts), not copied LUT data: tools/extract_arri_look.py
-feeds a synthetic hue×L×C sweep through locally downloaded official ARRI display LUTs and
-dngscan AgX, then records the Oklab delta. No ARRI LUT ships with this repository.
-Tone stays with AgX; this layer is purely chromatic.
-"""
+"""Optional project-authored chromatic look layer applied after AgX, in Oklab."""
 
 from __future__ import annotations
 
@@ -19,9 +13,8 @@ try:
 except Exception:  # pragma: no cover
     np = None  # type: ignore[assignment]
 
-# User-extendable look registry: fields measured from locally downloaded official LUTs
-# are appended here by `tools/extract_arri_look.py --append-json` — adding a new look
-# never requires editing code. The file lives next to the other local-only assets.
+# User-extendable local look registry. The file is ignored by Git so users can keep
+# private experiments without accidentally redistributing third-party colour assets.
 LOOK_FIELDS_JSON = Path(__file__).resolve().parents[1] / "dngscan_assets" / "look_fields.json"
 
 
@@ -75,48 +68,7 @@ class LookField:
     agx_target_white: float | None = None
 
 
-# Populated by tools/extract_arri_look.py --emit; re-run that script to refresh from local LUTs.
 LOOK_FIELDS: dict[str, LookField] = {
-    "classic": LookField(
-        hue_rotation_deg=(-2.12, -3.32, 0.57, 4.12, 3.11, -0.0, -0.89, 0.84, 4.71, 6.06, 3.26, 0.07),
-        chroma_ratio=(1.043, 0.928, 0.909, 0.945, 1.002, 1.015, 0.989, 0.949, 0.981, 1.139, 1.165, 1.137),
-        mid_chroma_ratio=1.008,
-        shadow_chroma_ratio=0.94,
-        highlight_chroma_ratio=1.039,
-        shadow_cool_a=0.0003,
-        shadow_cool_b=-0.0002,
-        shadow_l_lo=0.1,
-        shadow_l_hi=0.16,
-        highlight_l_lo=0.75,
-        highlight_l_hi=0.92,
-        sat_knee_c=0.2,
-        sat_knee_relief=1.085,
-        skin_hue_lo=20.0,
-        skin_hue_hi=60.0,
-        skin_hue_center=40.0,
-        skin_hue_pull=0.041,
-        skin_chroma_scale=0.961,
-    ),
-    "reveal": LookField(
-        hue_rotation_deg=(-3.48, -3.26, 2.2, 6.49, 5.32, 0.92, 0.05, 1.97, 4.57, 4.88, 2.69, -0.4),
-        chroma_ratio=(0.985, 0.897, 0.866, 0.918, 1.011, 0.988, 0.926, 0.801, 0.913, 1.037, 1.066, 1.05),
-        mid_chroma_ratio=0.984,
-        shadow_chroma_ratio=0.822,
-        highlight_chroma_ratio=0.873,
-        shadow_cool_a=-0.0004,
-        shadow_cool_b=-0.0019,
-        shadow_l_lo=0.1,
-        shadow_l_hi=0.24,
-        highlight_l_lo=0.75,
-        highlight_l_hi=0.92,
-        sat_knee_c=0.2,
-        sat_knee_relief=1.024,
-        skin_hue_lo=20.0,
-        skin_hue_hi=60.0,
-        skin_hue_center=40.0,
-        skin_hue_pull=0.001,
-        skin_chroma_scale=0.951,
-    ),
     "optic_warm_cyan": LookField(
         hue_rotation_deg=(-1.0, -2.5, 1.5, 4.8, 5.2, 2.4, 0.8, -0.6, -1.4, -1.0, 0.4, 0.8),
         chroma_ratio=(1.04, 1.07, 1.00, 0.96, 0.94, 0.98, 1.02, 1.04, 0.98, 0.88, 0.86, 0.94),
@@ -161,7 +113,7 @@ LOOK_FIELDS: dict[str, LookField] = {
 def _load_json_fields() -> None:
     """Merge user-measured looks from dngscan_assets/look_fields.json into the registry.
 
-    JSON entries win over same-named built-ins (re-measuring 'classic' overrides it).
+    JSON entries win over same-named built-ins.
     Names reserved for display filters are skipped. Bad entries are skipped, never fatal."""
     try:
         raw = json.loads(LOOK_FIELDS_JSON.read_text(encoding="utf-8"))
@@ -192,16 +144,6 @@ LOOK_CHOICES = ("none",) + tuple(LOOK_FIELDS)
 # win when explicitly set). hue_keep preserves more per-channel skew (sunset/orange);
 # target_black lifts the curve floor for faded film sims.
 AGX_LOOK_DEFAULTS: dict[str, dict[str, float]] = {
-    "fuji_velvia": {"agx_hue_keep": 0.55},
-    "fuji_provia": {"agx_hue_keep": 0.45},
-    "fuji_astia": {"agx_hue_keep": 0.42},
-    "fuji_reala_ace": {"agx_hue_keep": 0.42},
-    "fuji_classic_chrome": {"agx_hue_keep": 0.38, "agx_target_black": 0.008, "agx_target_white": 0.92},
-    "fuji_classic_neg": {"agx_target_black": 0.022, "agx_target_white": 0.90},
-    "fuji_pro_neg_std": {"agx_target_black": 0.018, "agx_target_white": 0.93},
-    "fuji_eterna": {"agx_hue_keep": 0.35, "agx_target_black": 0.012, "agx_target_white": 0.88},
-    "fuji_eterna_bb": {"agx_hue_keep": 0.38, "agx_target_black": 0.016, "agx_target_white": 0.85},
-    "reveal": {"agx_hue_keep": 0.38},
     "optic_warm_cyan": {"agx_hue_keep": 0.52},
 }
 

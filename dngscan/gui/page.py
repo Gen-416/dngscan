@@ -74,13 +74,13 @@ button.preview:disabled{opacity:.5;cursor:default}
 }
 </style></head>
 <body><div class="wrap">
-<h1>dngscan · darktable AgX + RAW 分析</h1>
+<h1>dngscan · RAW 分析与转换</h1>
 
 <div class="card">
-  <label>DNG / RAW 文件</label>
+  <label>RAW 文件</label>
   <div class="row" style="align-items:flex-end">
     <div style="flex:4"><input type="text" id="input" placeholder="/path/to/photo.dng"></div>
-    <div style="flex:0"><button class="ghost" id="browseBtn">浏览…</button></div>
+    <div style="flex:0"><button class="ghost" id="browseBtn">选择</button></div>
   </div>
   <div id="browser" class="browserList"></div>
 </div>
@@ -92,32 +92,32 @@ button.preview:disabled{opacity:.5;cursor:default}
   <div class="secTitle">曝光</div>
   <div class="row">
     <div class="evMain">
-      <div class="labelRow"><label>曝光补偿 EV（默认 0 保留拍摄锚点）</label><span class="val" id="evval">+0.00</span></div>
+      <div class="labelRow"><label title="0 EV 保留拍摄时的亮度关系。">曝光 EV</label><span class="val" id="evval">+0.00</span></div>
       <input type="range" id="ev" min="-3" max="3" step="0.05" value="0">
       <div class="modes">
         <button type="button" data-ev="-0.50"><span class="m">-0.50</span></button>
         <button type="button" data-ev="0"><span class="m">0.00</span></button>
         <button type="button" data-ev="0.50"><span class="m">+0.50</span></button>
         <button type="button" data-ev="1.00"><span class="m">+1.00</span></button>
-        <button type="button" id="evReferenceBtn" title="以全图中位亮度计算 18% 灰参考值，并受高光安全上限约束；点击会应用建议 EV。"><span class="m">参考</span><span class="d">全图亮度</span></button>
+        <button type="button" id="evReferenceBtn" title="将全图中位亮度对齐 18% 灰，并限制高光溢出。"><span class="m">亮度参考</span></button>
       </div>
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div class="secTitle">渲染策略</div>
+  <div class="secTitle">成像</div>
   <div class="row">
     <div style="flex:2;min-width:210px">
-      <label>压缩策略</label>
-      <select id="toneCore" title="成片：AgX 或 RAW 门控。对照组：与成片共用 EV 锚定，用于 A/B 比较 AgX 与常规导出。">
+      <label>压缩核心</label>
+      <select id="toneCore" title="选择亮度压缩与高光色彩路径。">
         <optgroup label="成片">
-          <option value="agx" selected>AgX · darktable 全图色彩路径</option>
-          <option value="gated">保真 · RAW 证据门控</option>
+          <option value="agx" selected>AgX · 默认</option>
+          <option value="gated">RAW 门控 · 保真</option>
         </optgroup>
         <optgroup label="非 AgX 对照">
-          <option value="neutral">对照 1 · 通用导出曲线</option>
-          <option value="lum">对照 2 · 场景 C1 仅亮度</option>
+          <option value="neutral">通用曲线 · 对照</option>
+          <option value="lum">场景 C1 · 仅亮度</option>
         </optgroup>
       </select>
     </div>
@@ -130,12 +130,12 @@ button.preview:disabled{opacity:.5;cursor:default}
       </select>
     </div>
     <div id="agxPrimariesBlock" style="flex:1;min-width:150px">
-      <label>AgX 高光路径</label>
-      <select id="agxPrimaries" title="仅全图 AgX 使用：选择高亮饱和色的 path-to-white 几何。">
-        <option value="smooth" selected>darktable 平滑 · 默认</option>
-        <option value="base">Blender 参考 · 平衡退白</option>
-        <option value="punchy">Blender 参考 · 鲜明</option>
-        <option value="muted">Blender 参考 · 柔和</option>
+      <label>AgX 色彩路径</label>
+      <select id="agxPrimaries" title="控制饱和高光如何向白色收敛。">
+        <option value="smooth" selected>darktable · 默认</option>
+        <option value="base">Blender Base</option>
+        <option value="punchy">Blender Punchy</option>
+        <option value="muted">Blender Muted</option>
       </select>
     </div>
   </div>
@@ -144,31 +144,31 @@ button.preview:disabled{opacity:.5;cursor:default}
 </div>
 
 <div class="card">
-  <div class="secTitle">相机颜色</div>
+  <div class="secTitle">颜色</div>
   <div class="row">
     <div style="flex:2;min-width:210px">
-      <label>相机响应校正</label>
-      <select id="sceneTransform" title="在 scene-linear 域，以色度窗口做受限的相机响应校正。">
+      <label>前馈校正</label>
+      <select id="sceneTransform" title="在 AgX 前校正相机的 scene-linear 色彩响应。">
 SCENE_TRANSFORM_OPTIONS
       </select>
     </div>
     <div id="sceneTransformStrengthBlock" class="sliderField" style="display:none">
-      <div class="labelRow"><label>校正强度</label><span class="val" id="sceneTransformStrengthVal">1.00</span></div>
-      <input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1=推荐强度；大于 1 用于诊断或强化 A/B。">
+      <div class="labelRow"><label>前馈强度</label><span class="val" id="sceneTransformStrengthVal">1.00</span></div>
+      <input type="range" id="sceneTransformStrength" min="0" max="3" step="0.05" value="1" title="1 为校准强度；更高数值用于比较。">
     </div>
     <div id="punchBlock" class="sliderField">
-      <div class="labelRow"><label>中间调纯度</label><span class="val" id="punchVal">1.00</span></div>
-      <input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="1=由场景分析决定的默认量；0=关闭；夜景的自动值为 0。">
+      <div class="labelRow"><label>中调纯度</label><span class="val" id="punchVal">1.00</span></div>
+      <input type="range" id="punch" min="0" max="1.5" step="0.05" value="1" title="1 使用场景分析值；0 关闭。">
     </div>
   </div>
 </div>
 
 <div class="card">
-  <div class="secTitle">成片风格</div>
+  <div class="secTitle">风格</div>
   <div class="row">
     <div style="flex:2;min-width:210px">
-      <label>成片风格</label>
-      <select id="grade" title="相机色彩渲染和输出 LUT 互斥，一次只能选一种。">
+      <label>色彩风格</label>
+      <select id="grade" title="曲线后的可选色彩处理。">
 GRADE_OPTIONS
       </select>
     </div>
@@ -180,27 +180,27 @@ GRADE_OPTIONS
 </div>
 
 <div class="card">
-  <div class="secTitle">RAW 还原</div>
+  <div class="secTitle">RAW</div>
   <div class="row">
     <div style="flex:1;min-width:160px">
-      <label>剪切高光</label>
-      <select id="highlight">
-        <option value="clip">保持剪切 · 不估算缺失颜色</option>
-        <option value="blend">高光混合 · 利用幸存通道</option>
-        <option value="reconstruct">高光重建 · 估算邻域颜色</option>
+      <label>高光</label>
+      <select id="highlight" title="决定 RAW 剪切区域的颜色恢复方式。">
+        <option value="clip">保持剪切 · 原始</option>
+        <option value="blend">通道混合 · 温和</option>
+        <option value="reconstruct">邻域重建 · 完整</option>
       </select>
     </div>
     <div style="flex:1;min-width:150px">
-      <label>拍摄白平衡</label>
-      <select id="wb" title="相机记录：使用 AsShot；固定日光：以日光配平作为整卷一致的基准。">
-        <option value="camera">相机记录（As Shot）</option>
-        <option value="daylight">固定日光配平</option>
+      <label>白平衡</label>
+      <select id="wb" title="使用拍摄值，或统一到相机日光基准。">
+        <option value="camera">拍摄值 · As Shot</option>
+        <option value="daylight">日光基准</option>
       </select>
     </div>
     <div style="flex:1;min-width:170px">
-      <label>细节插值</label>
-      <select id="demosaic" title="仅影响全分辨率导出的去马赛克算法；不包含降噪。">
-        <option value="auto">自动 · DHT 优先</option>
+      <label>去马赛克</label>
+      <select id="demosaic" title="仅影响全尺寸细节，不包含降噪。">
+        <option value="auto">自动 · DHT</option>
         <option value="dht">DHT</option>
         <option value="dcb">DCB</option>
         <option value="ahd">AHD</option>
@@ -213,30 +213,30 @@ GRADE_OPTIONS
 </div>
 
 <div class="card">
-  <div class="secTitle">交付</div>
+  <div class="secTitle">输出</div>
   <div class="row">
     <div style="flex:1;min-width:170px">
-      <label>输出形式</label>
+      <label>格式</label>
       <select id="format">
         <option value="sdr">SDR JPEG</option>
-        <option value="ultrahdr">HDR gain-map JPEG</option>
+        <option value="ultrahdr">HDR gain-map · 实验</option>
       </select>
     </div>
     <div style="flex:1;min-width:140px">
-      <label>交付色域</label>
+      <label>色域</label>
       <select id="gamut">
         <option value="srgb">sRGB · 兼容优先</option>
         <option value="p3">Display P3 · 宽色域</option>
       </select>
     </div>
     <div style="flex:0;min-width:110px">
-      <label>JPEG 质量</label>
+      <label>质量</label>
       <input type="number" id="quality" min="1" max="100" value="100">
     </div>
     <div style="flex:1;min-width:140px">
-      <label>色度精度</label>
-      <select id="chroma" title="4:4:4 保留完整色度；4:2:0 体积最小。">
-        <option value="444">4:4:4 · 满色度</option>
+      <label>色度采样</label>
+      <select id="chroma" title="4:4:4 保留完整色度，4:2:0 文件更小。">
+        <option value="444">4:4:4 · 完整</option>
         <option value="422">4:2:2</option>
         <option value="420">4:2:0 · 最小</option>
       </select>
@@ -244,21 +244,21 @@ GRADE_OPTIONS
   </div>
   <div class="row" id="hdrBlock" style="margin-top:12px">
     <div style="min-width:220px">
-      <div class="labelRow"><label>HDR 高光余量（仅 HDR 输出）</label><span class="val" id="hdrHeadroomVal">+3.00</span></div>
+      <div class="labelRow"><label>HDR 余量</label><span class="val" id="hdrHeadroomVal">+3.00</span></div>
       <input type="range" id="hdrHeadroom" min="1" max="5" step="0.25" value="3">
-      <div class="muted" id="hdrHint">微信/QQ 想保住 HDR：走原图或文件，别走朋友圈。</div>
+      <div class="muted" id="hdrHint">社交平台可能移除 HDR 增益图。</div>
     </div>
   </div>
   <div style="margin-top:12px">
-    <label>输出文件夹（留空=源文件所在文件夹）</label>
+    <label>文件夹</label>
     <div class="outdirRow">
-      <input type="text" id="outdir" placeholder="默认：源文件所在文件夹">
-      <button class="ghost" id="outdirBtn">选择…</button>
+      <input type="text" id="outdir" placeholder="默认与原图相同">
+      <button class="ghost" id="outdirBtn">选择</button>
     </div>
     <div id="outdirBrowser" class="browserList"></div>
   </div>
   <div class="chk" style="margin-top:12px">
-    <input type="checkbox" id="png"><label for="png" style="margin:0">同时导出 RAW 分析图</label>
+    <input type="checkbox" id="png"><label for="png" style="margin:0">附带分析图</label>
   </div>
 </div>
 
@@ -266,9 +266,9 @@ GRADE_OPTIONS
 
 <div class="card previewCard">
   <div class="actions">
-    <button class="preview" id="previewBtn">预览</button>
-    <button class="go" id="go">导出</button>
-    <button class="ghost" id="revealBtn" style="display:none">在 Finder 中显示</button>
+    <button class="preview" id="previewBtn">更新预览</button>
+    <button class="go" id="go">导出 JPEG</button>
+    <button class="ghost" id="revealBtn" style="display:none">在 Finder 显示</button>
   </div>
   <div id="status"></div>
   <div id="previewWrap"><img id="preview"><div id="spinner"></div></div>
@@ -285,14 +285,16 @@ function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
 const CORE_FACTS={
-  gated:["角色 <b>成片</b>","亮度 <b>darktable C1</b>","色度 <b>smooth + RAW 门控</b>"],
-  agx:["角色 <b>成片</b>","亮度 <b>darktable C1</b>","色度 <b>全图 AgX</b>"],
-  lum:["角色 <b>对照 2</b>","亮度 <b>场景 C1 曲线</b>","色度 <b>仅保持 RGB 比例</b>"],
-  neutral:["角色 <b>对照 1</b>","亮度 <b>固定通用 shoulder</b>","色度 <b>无 AgX</b>"]
+  gated:["亮度 <b>darktable C1</b>","色彩 <b>RAW 门控</b>"],
+  agx:["亮度 <b>darktable C1</b>","色彩 <b>全图 AgX</b>"],
+  lum:["曲线 <b>场景 C1</b>","色彩 <b>保持比例</b>"],
+  neutral:["曲线 <b>固定</b>","色彩 <b>保持比例</b>"]
 };
 const CONTROL_HINTS={
-  neutral:"对照 1 · 固定通用导出曲线（Lightroom 式），不从场景统计编译端点。与成片共用 EV 锚定、CFA 还原与色域适配。先与 lum 对比，再与 AgX 对比，可分离「常规压缩 / 场景 C1 / AgX 色度」三层差异。",
-  lum:"对照 2 · 与 AgX 共享同一条场景编译 C1 toe/shoulder，但只压缩亮度、不改色度几何。用于回答：AgX 色度路径在共享曲线之上额外改了什么。"
+  gated:"RAW 证据决定 AgX 色彩路径的混合量。",
+  agx:"默认成片；全图使用 AgX 色彩路径。",
+  neutral:"固定 shoulder，用作常规导出对照。",
+  lum:"共用场景 C1，仅压缩亮度。"
 };
 function updateToneCoreUi(){
   const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";const control=neutral||lum;
@@ -485,7 +487,7 @@ function handleJobResult(j, prefix){
 
 $("#previewBtn").onclick=async()=>{
   const body=payload();if(!body)return;
-  $("#previewBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("生成预览…（首次会建立缓存）","");
+  $("#previewBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("正在生成预览…","");
   try{
     const j=await postJob("/preview",body);
     if(!handleJobResult(j,"预览")){endBusy();setStatus("错误："+j.error,"err");}
@@ -496,7 +498,7 @@ $("#previewBtn").onclick=async()=>{
 $("#evReferenceBtn").onclick=async()=>{
   const body=payload();if(!body)return;
   body.evAuto=true;
-  $("#previewBtn").disabled=true;$("#evReferenceBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("计算全图亮度参考…","");
+  $("#previewBtn").disabled=true;$("#evReferenceBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("正在计算亮度参考…","");
   try{
     const j=await postJob("/preview",body);
     if(!handleJobResult(j,"全图亮度参考预览")){endBusy();setStatus("错误："+j.error,"err");}
@@ -506,7 +508,7 @@ $("#evReferenceBtn").onclick=async()=>{
 
 $("#go").onclick=async()=>{
   const body=payload();if(!body)return;
-  $("#go").disabled=true;$("#previewBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("导出 full-res…","");
+  $("#go").disabled=true;$("#previewBtn").disabled=true;$("#revealBtn").style.display="none";beginBusy();setStatus("正在全尺寸导出…","");
   try{
     const j=await postJob("/export",body);
     if(!j.ok){endBusy();setStatus("错误："+j.error,"err");}
@@ -531,19 +533,17 @@ function setStatus(t,c){const s=$("#status");s.textContent=t;s.className=c||"";}
 
 
 _LOOK_LABELS = {
-    "classic": "ARRI Classic 709",
-    "reveal": "ARRI Reveal 709",
-    "optic_warm_cyan": "Optic Warm/Cyan",
+    "optic_warm_cyan": "暖肤冷调",
 }
 
 
 def _grade_options_html() -> str:
-    from ..display_filter import DISPLAY_FILTERS, FILTER_CHOICES
+    from ..display_filter import DISPLAY_FILTERS, FILTER_CHOICES, filter_available
     from ..grade import grade_id_for_filter, grade_id_for_look
     from ..look import LOOK_CHOICES
 
     lines = ['        <option value="none">无</option>']
-    lines.append('        <optgroup label="相机色彩渲染">')
+    lines.append('        <optgroup label="内置风格">')
     for name in LOOK_CHOICES:
         if name == "none":
             continue
@@ -551,13 +551,13 @@ def _grade_options_html() -> str:
         gid = grade_id_for_look(name)
         lines.append(f'          <option value="{gid}">{label}</option>')
     lines.append("        </optgroup>")
-    lines.append('        <optgroup label="输出 LUT">')
-    for name in FILTER_CHOICES:
-        if name == "none":
-            continue
-        gid = grade_id_for_filter(name)
-        lines.append(f'          <option value="{gid}">{DISPLAY_FILTERS[name].label}</option>')
-    lines.append("        </optgroup>")
+    available_filters = [name for name in FILTER_CHOICES if name != "none" and filter_available(name)]
+    if available_filters:
+        lines.append('        <optgroup label="本地 LUT">')
+        for name in available_filters:
+            gid = grade_id_for_filter(name)
+            lines.append(f'          <option value="{gid}">{DISPLAY_FILTERS[name].label}</option>')
+        lines.append("        </optgroup>")
     return "\n".join(lines)
 
 

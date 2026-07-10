@@ -6,9 +6,19 @@ from __future__ import annotations
 import unittest
 
 from dngscan.gui.service import export_suffix_parts
+from dngscan.gui.page import render_page
 
 
 class ExportSuffixTests(unittest.TestCase):
+    def test_public_gui_is_concise_and_has_no_vendor_luts(self) -> None:
+        html = render_page("/tmp").decode("utf-8")
+        self.assertIn("更新预览", html)
+        self.assertIn("导出 JPEG", html)
+        self.assertIn("前馈校正", html)
+        self.assertNotIn('optgroup label="本地 LUT"', html)
+        for vendor in ("ARRI Classic", "ARRI Reveal", "Fujifilm", "Kodak", "RED IPP2"):
+            self.assertNotIn(vendor, html)
+
     def test_default_agx_only(self) -> None:
         self.assertEqual(export_suffix_parts("clip", "srgb", "sdr"), "agx")
 
@@ -24,8 +34,8 @@ class ExportSuffixTests(unittest.TestCase):
 
     def test_includes_grade(self) -> None:
         self.assertEqual(
-            export_suffix_parts("clip", "srgb", "sdr", "look:classic", 1.0),
-            "agx_look_classic",
+            export_suffix_parts("clip", "srgb", "sdr", "look:optic_warm_cyan", 1.0),
+            "agx_look_optic_warm_cyan",
         )
         self.assertEqual(
             export_suffix_parts("clip", "srgb", "sdr", "filter:kodak_2383_d65", 1.0),
@@ -34,8 +44,8 @@ class ExportSuffixTests(unittest.TestCase):
 
     def test_includes_grade_strength_when_not_one(self) -> None:
         self.assertEqual(
-            export_suffix_parts("clip", "srgb", "sdr", "look:fuji_velvia", 0.8),
-            "agx_look_fuji_velvia_gs0.8",
+            export_suffix_parts("clip", "srgb", "sdr", "look:optic_warm_cyan", 0.8),
+            "agx_look_optic_warm_cyan_gs0.8",
         )
 
     def test_includes_scene_transform(self) -> None:

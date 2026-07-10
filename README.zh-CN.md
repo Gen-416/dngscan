@@ -1,161 +1,168 @@
 # dngscan
 
-[English](README.md)
+**一个以 darktable AgX 为基础、本地离线运行的轻量 RAW 转 JPEG 实验室。**
 
-`dngscan` 是一个本地、离线运行的 RAW 分析器与 JPEG 渲染器。它不把 RAW 只当成等待套曲线的像素，而是先读取它留下的采集证据：逐 CFA 通道的黑/白电平、剩余满阱、剪切类别、SNR、可靠场景亮度分布，以及交付色域压力；再把 scene-linear Rec.2020 信号编译为 SDR JPEG。
+[English](README.md) · [许可证](LICENSE) · [第三方声明](NOTICE.md)
 
-它不是通用 RAW 编辑器。它的目标是把少数关键渲染决策变成可解释、可重复的流程：保住拍摄时的曝光意图，把肩部留给有证据的高光，并且只在采集信息或交付容器确实要求时改变高光色彩。
+`dngscan` 读取 RAW，分析采集信号，在 scene-linear Rec.2020 中完成渲染，再压缩为
+8-bit sRGB 或 Display P3 JPEG。它刻意比 darktable 窄：没有图库、图层、蒙版、局部修饰，
+也不试图成为完整的修图软件。
 
-## 核心思路
+更准确地说，它是一个**信号处理工具、算法玩具和专注于 AgX 的 RAW 压缩器**。
 
-默认渲染器是 **AgX：darktable 全图色彩路径**，并使用 darktable 的 `smooth` 原色几何。RAW 分析仍然是结构性输入：它编译 C1 toe/shoulder，阻止剪切/重建样本定义白端点，指导交付色域适配，并报告这次采集的物理限制；它不会把默认管线变成 Blender 风格的图像处理器。
+## 为什么做这个工具
 
-**保真：RAW 证据驱动** 是一条独立、可选的策略。它同样以 darktable `smooth` AgX 几何生成候选色彩路径，但只在 RAW 证据、场景亮度、SNR、色域压力与色相策略允许时混入。这种拆分使一盏经重建的灯既不能定义全局白端点，也不会因为其剪切让正常曝光肤色失去色度。
+[darktable](https://github.com/darktable-org/darktable) 很强大，它的 scene-linear 管线也是
+本项目的基础；但 darktable 的编辑体系很广，上手门槛也不低。我想要一个更小、更专注的工具，
+只回答一个问题：
+
+> 面对 RAW 记录下来的数码化光学信号，怎样用一条确定的 AgX 成像管线把它压缩成普通 JPEG，
+> 同时不随意丢掉高光色彩、暗场意图和传感器证据？
+
+AgX 的结构是 dngscan 的稳定中心。这里的“自动判断”不是替你修图，而是尊重数码化的光学信息：
+先测量黑白电平、逐通道剪切、暗部可用范围、场景分布和输出色域压力，再用这些事实编译保守的曲线参数。
+
+曝光补偿、白平衡、去马赛克、相机响应校正和创意色彩都在 AgX 核心之外。它们保持显式可选，
+因为这些控制表达的是人的意图，而不是这张 RAW 唯一正确的答案。
+
+## 它是什么，不是什么
+
+| dngscan 是 | dngscan 不是 |
+| --- | --- |
+| 本地离线的 RAW 分析器与转换器 | Lightroom 或 darktable 的替代品 |
+| 聚焦 darktable AgX 的轻量渲染器 | 局部修图、蒙版或磨皮工具 |
+| RAW 证据驱动压缩的可重复实验 | 自动审美评分器 |
+| 比较 tone 与色彩几何的算法玩具 | 完美相机色彩科学的宣称 |
+
+在 `EV 0` 时，dngscan 保留拍摄时的相对亮度：夜景仍然应该是暗的。可选的**亮度参考**按钮
+只是一个对照工具，它会尝试把全图中位亮度推向 18% 灰，同时受渲染后高光余量限制；它不会静默启用。
+
+## 处理管线
 
 ```text
 RAW / DNG
   |
-  +-- CFA 证据：逐通道黑/白、剪切类别、headroom、SNR
+  +-- 去马赛克前的 CFA 证据
+  |     黑白电平 · 逐通道剪切 · 满阱余量 · 噪声置信度
   |
-  +-- LibRaw 解码：去马赛克、白平衡、相机矩阵 -> scene-linear Rec.2020
-                                                    |
-                                                    +-- 可选相机响应校正
-                                                    |
-可靠场景 body / tail --------------------------------+-- RenderPlan
-                                                         | tone：C1 端点、toe、shoulder
-                                                         | colour：RAW / 色域许可
-                                                         v
-                                                   所选压缩策略
-                                                         |
-                                      可选成片 Look 或输出 LUT（二选一）
-                                                         |
-                                     Oklab 色域适配 -> sRGB/P3 编码 -> 抖动 -> JPEG
+  +-- LibRaw
+        去马赛克 · 所选白平衡 · 相机色彩解释
+  |
+scene-linear Rec.2020
+  |
+  +-- 可选相机响应前馈
+  |
+  +-- 由可靠场景 body/tail 与 RAW 证据编译 RenderPlan
+  |
+  +-- 所选压缩核心
+  |     AgX · RAW 门控 AgX · 仅亮度 C1 对照 · 通用曲线对照
+  |
+  +-- 可选项目内置色彩风格
+  |
+Oklab 色域适配 · sRGB/P3 编码 · 8-bit 抖动 · JPEG
 ```
 
-分析和导出使用同一种高光模式与场景缓冲。CFA/RAW 域指标仍独立于去马赛克和高光重建，因此工具能区分“渲染器把高光补得连贯”与“传感器原本仍剪切了这个通道”。
+这里最重要的是区分**证据**与**观感**。高光重建可以让画面看起来连续，但不会让传感器重新获得
+满阱余量。dngscan 会在去马赛克前保存 CFA 剪切证据，使重建出来的像素不能错误地定义全局白端点。
 
-## 曝光与全图亮度参考
+## 压缩核心
 
-对三个 tone-mapped 策略，工具会使用一个固定、与照片内容无关的常数，把名义中灰放到曲线的 18% 锚点。这不是从画面内容自动算出来的。因此在 `EV 0` 时，夜景仍是夜景：tone plan 可以塑造 toe 和 shoulder，但不会把暗场景重写成灰亮的日景。
+所有成片模式共用同一个曝光锚点和交付保护。
 
-`EV` 是这个锚点上的手动偏移。GUI 的 **全图亮度参考** 按钮，以及 CLI 的 `--ev auto`，是可选的参考操作：它读取整张图的中位亮度，计算把中灰放到 18% 所需的 EV，并用渲染后的高光安全上限限制向上提升。它适合“本应正常曝光、但整体明显偏暗”的照片，也适合用作比较起点；它不是对场景意图的判断，只有用户主动点击或显式指定时才会应用。
-
-## 压缩策略
-
-两条 **非 AgX 对照路径** 框住创意核：
-
-```text
-neutral  →  固定通用 shoulder（Lightroom 式导出基线）
-   ↓       + 场景编译 C1 端点，仍只动亮度
-lum      →  共享科学曲线，无 AgX 色度几何
-   ↓       + AgX inset/outset / hue mix
-agx      →  默认成片
-```
-
-**`neutral`** 使用固定的亮度 sigmoid（黑白 EV 窗口为常数，不从场景统计编译）。保持 RGB 比例、完全跳过 AgX，并与其他核共用 EV 锚定、CFA clip 还原与交付色域适配。用于回答：*在加入场景感知科学曲线或 AgX 之前，常规导出压缩器会做什么？*
-
-**`lum`** 使用与 `agx` / `gated` **相同的场景编译 C1 toe/shoulder**，但只映射标量亮度 norm 并保持 RGB 比例——无 AgX inset/outset。用于回答：*在共享曲线之上，AgX 色度几何额外改了什么？*
-
-`gated` 与 `agx` 从可靠场景亮度分布编译黑白端点：黑端受可用动态范围/噪声估计约束，白端来自可靠 tail，而不是 CFA 已剪切或经重建的样本。所有场景感知核共用同一族 C1 连续 toe/shoulder 与固定 18% pivot；差异只在色彩决定权。
-
-| GUI 名称 / CLI 核 | 底层处理 | 预期画面 | 适用场景 |
-| --- | --- | --- | --- |
-| **AgX：darktable 全图色彩路径** / `agx` | 每个像素都走 AgX 的 inset -> log2 C1 曲线 -> hue mix -> outset，并接场景驱动的中间调纯度算子。默认路径为 darktable `smooth`。 | 最统一、最典型的全图 AgX 观感；RAW 分析仍负责可靠的 tone 端点。 | 默认的成片策略。 |
-| **保真：RAW 证据驱动** / `gated` | 全图 Rec.2020 亮度先走场景 C1 曲线；同时计算 darktable `smooth` AgX 结果，缩放回相同 Rec.2020 Y，再按许可权重只混入色度/向白路径。 | 局部、证据驱动的色彩路径，RAW mask 边界无亮度接缝。 | 全图 AgX 色彩路径过宽时的 RAW-aware 备选。 |
-| **场景 C1 · 仅亮度** / `lum` | 与 AgX 相同的场景编译 C1 端点，施于标量 norm；保持 RGB 比例。无 AgX inset/outset 或 hue mix。 | 与 AgX 共享 shoulder，但高光色相更接近采集；饱和色更字面、较少 filmic。 | **对照组：** 衡量 AgX 色度几何在共享曲线之上加了什么。 |
-| **通用导出曲线** / `neutral` | 固定亮度 sigmoid（非场景端点）；保持 RGB 比例；无 AgX。共用 EV 锚定、CFA 还原与色域适配。 | Lightroom 式通用压缩基线——有 filmic shoulder，但无 RAW 科学端点或 AgX 色度路径。 | **对照组：** 场景感知/AgX 之前的常规非 AgX 导出。 |
-
-`gated` 的色彩许可是连续量，不是二元的“剪切/未剪切”遮罩。逐通道 headroom 耗尽和多通道剪切会提高许可；很亮的 shoulder、交付色域压力、可信的色彩 SNR 也能逐步打开它。可靠肤色中调会被保护，亮的绿/青色则可略微更开放。RAW 信息损失的信号永远优先于这层审美色相策略。
-
-`lum` 有三种标量 norm：`y` 是 Rec.2020 亮度，也是正常选择；`power` 让强单通道更有影响；`max` 跟随最亮通道，对高光最保守，但画面可能更平。这是亮度度量的比较开关，不是三种不同的曝光锚点。
-
-## AgX 高光路径
-
-**AgX 高光路径** 只作用于 `agx`。`gated` 在 RAW 许可混合前固定使用 darktable `smooth` 几何。它**不会**选择另一条 shoulder 曲线、白端点、曝光或动态范围计划。四个选项使用相同的场景 C1 曲线；它们改变的是曲线两侧的 AgX 原色几何：
-
-```text
-Rec.2020 RGB -> inset / 原色旋转 -> 逐通道 C1 曲线 -> hue mix -> outset
-```
-
-Inset 会在曲线前有意混合、收缩原色，使一个饱和高光不会像三个互不相关的通道剪切。Outset 决定曲线之后回收多少色彩几何。因此这个选择改变的是**向白色走的路线**，不是亮度 shoulder 的位置。
-
-| 路径 | 底层几何 | 预期高光表现 |
+| GUI / CLI | 作用 | 预期画面 |
 | --- | --- | --- |
-| **darktable 平滑** / `smooth` | darktable 的 smooth-primary 构造：不同的 inset/outset 距离和旋转；它不是另一种 sigmoid。 | 默认。饱和高光沿更安静的色相轨迹移动；它是 dngscan 全图 AgX 与 RAW 门控的基线。 |
-| **Blender 参考：平衡退白** / `base` | Blender-like / darktable blender-like 的 Rec.2020 原色构造，色相混合锚点遵循 Blender 的 0.4。 | 相对 smooth 的参考选项：明亮饱和色柔和向白靠近，但不做强创意色彩回收。 |
-| **Blender 参考：鲜明** / `punchy` | 与 `base` 使用相同 inset，但在几何构造中减少 outward-primary recovery（`master_outset_ratio=0.5`），曲线后保留更多可见纯度。 | 有色光、霓虹、叶片等高光会更有颜色和局部区分；极端 sRGB/P3 颜色仍可能在最终色域适配中被降色度。 |
-| **Blender 参考：柔和** / `muted` | 采用 base inset，同时恢复 outward primary 的旋转（`master_unrotation_ratio=1`）。亮度曲线不变，改变的只有曲线后的色彩几何。 | 比 `base` 更安静、较少强调高亮色的回收。它可能**看起来**更早走向中性，但亮度 shoulder 实际起点相同。 |
+| **AgX** / `agx` | 默认的 darktable 风格全图 AgX，使用 `smooth` 原色几何；RAW 分析编译可靠的 C1 端点。 | 最统一的向白路径，也是正常成片默认。 |
+| **RAW 门控** / `gated` | 使用同一份 darktable `smooth` 候选结果，但由 RAW 证据决定每个像素混入多少 AgX 色彩路径。 | 当全图 AgX 改色过宽时，提供更保守的替代方案。 |
+| **场景 C1，仅亮度** / `lum` | 使用与 AgX 相同的场景 C1 toe/shoulder，但保持 RGB 比例。 | 用来观察 AgX 色彩几何在亮度曲线之外增加了什么。 |
+| **通用曲线** / `neutral` | 固定的非 AgX 亮度 shoulder，共用相同曝光锚点和交付色域适配。 | 常规导出参考，不是成片推荐。 |
 
-独立的 **中间调纯度** 不是这四条路径之一。它是只在 `gated` 与 `agx` 后运行的、由场景条件门控的色度算子；不适合的暗场/高 ISO 场景会自动降到零。它不改变曝光、toe、shoulder 或白端点。
+可选的 AgX 几何只是比较参考，不是不同的曝光算法：
 
-## RAW 还原选项
+- `smooth`：darktable 几何，默认。
+- `base`：Blender 风格的平衡参考。
+- `punchy`：曲线后恢复更多颜色。
+- `muted`：更柔和的 outward 色彩几何。
 
-这些设置发生在 tone core 之前，其事实性影响通常大于后面的创意 Look。
+## RAW 证据如何参与判断
 
-| 设置 | 含义 | 取舍 |
-| --- | --- | --- |
-| **保持剪切** / `clip` | LibRaw 保留已剪切的高光。 | 不凭空估颜色；最清楚地反映传感器损失。 |
-| **高光混合** / `blend` | LibRaw 混合幸存通道的信息。 | 单通道剪切时可能保住更多颜色；严重剪切时不如原始值字面。 |
-| **高光重建** / `reconstruct` | LibRaw 的邻域高光重建。 | 高光往往更连续、更有颜色，但部分结果是估计；gated 策略仍可读取原始 CFA 剪切证据。 |
-| **相机记录白平衡** / `camera` | 使用相机 As Shot 白平衡。 | 最接近拍摄元数据。 |
-| **固定日光配平** / `daylight` | 使用 LibRaw 的标定日光乘子。 | 为整组照片提供可重复基线；不代表现场一定是日光。 |
-| **细节插值自动** / `auto` | 全分辨率 Bayer 导出优先 DHT，再 DCB/AHD；非 Bayer 走 LibRaw 原生路径。 | 只影响细节重建。dngscan 不做降噪。 |
+dngscan 只在 RAW 分析具有事实权威的地方使用自动判断：
 
-## 其他色彩与交付层
+- 逐通道黑白电平和剪切阈值来自元数据与实际 RAW 分布。
+- CFA 剪切 mask 在白平衡与去马赛克前提取。
+- 剪切或重建样本不会参与定义可靠场景 body 和 tone 端点。
+- 暗部边界同时参考实测噪声和机型先验，不把所有暗码值都当成可恢复细节。
+- 输出色域压力只影响色彩压缩，不反向改变曝光或 tone 端点。
 
-**相机响应校正** 是实验性的、tone core 前的 scene-linear 变换。内置的 ARRI-like 与 ALEV 材质预设，在软色度窗口中混入受约束矩阵，保持中性轴，不是显示 LUT。它们的光谱输入仍是可替换的 bootstrap/校准数据，不能被理解为严格 ALEXA 仿真。需要中性基线时应关闭它。
+这也是它与独立 tone-mapping 模块最根本的区别：渲染器仍然可以访问在普通编辑器后段通常已经丢失的
+采集证据。
 
-**成片风格** 可选，发生在 tone core 后。色度 LookField 在 Oklab 中改色相/色度而保持亮度；输出 LUT 则是完整的 log-in/display-out 变换，可能同时改变色调和色彩。两者互斥。厂商 LUT 文件不会随仓库分发，只应在本机安装你有权使用的副本。
+## 实验性相机前馈
 
-**交付色域** 是另一层约束。场景渲染一直留在 Rec.2020，直到最后才转 sRGB 或 P3。出界颜色在 Oklab 中尽量保色相、降低色度拉回，而不是逐 RGB 通道硬剪。`sRGB` 适合兼容性；`Display P3` 会嵌入 P3 ICC，如果找不到 profile 会直接报错，不会写出被误读为 sRGB 的 P3 数据。JPEG 默认质量 100、4:4:4 色度采样。
+我最喜欢的想法，是在去马赛克前读取传感器证据，再让它指导后面的色彩变换。dngscan 已经把这个
+思路用于 CFA 剪切和满阱余量。当前实验性的**相机响应前馈**本身则运行在去马赛克和相机色彩解释之后、
+AgX 之前的 scene-linear Rec.2020 域。
 
-ISO gain-map HDR 路径仍是**实验性**输出，在跨平台兼容性验证完成前不属于推荐的稳定交付流程。普通 SDR JPEG 是当前受支持的默认结果。
+内置的肤色/材质前馈是一个刻意保持诚实的粗糙原型：它使用软色度窗口和受约束矩阵，输入来自公开测量、
+论文曲线数字化和解析光谱模型。它**不是** ARRI 官方变换，也不是严格的 ALEXA/ALEV 仿真。
 
-## 诊断图
+严肃的前馈标定需要可控光源、标准靶、光谱测量设备，而且理想情况下应针对每一台实体相机，而不只是
+每一款型号。我目前缺少这些设备，所以现在的 ALEV-like 几何映射只是一个不严肃但可运行的实验，
+也希望它能成为社区补充实测数据的起点。
 
-`--scan` 会输出六面板诊断 PNG。它是采集报告，不是审美评分。
+校准输入与局限见
+[`dngscan_assets/spectral/README.md`](dngscan_assets/spectral/README.md)。
 
-- **SNR 对档数**：用于判断暗部可恢复余量。约 SNR 32 通常较干净，约 10 通常可用但有代价，接近 1 时信号已被噪声淹没。它不是要求把所有阴影抬到固定亮度的指令。
-- **R/G/B 原始分布**：横轴为距离剪切的档数。R/G/B 分开避免遮挡，红带是剪切区；图上可平滑，但统计仍用未平滑 RAW 数据。
-- **RGB 曝光分布与色域压力**：用于判断交付时可能需要多少色彩处理；它们不改动 C1 tone 端点。
-- **空间曝光/剪切通道图**：用来判断 tail 是少量光源、大片主体剪切，还是单通道问题。
+## 风格与 LUT
 
-## 安装与使用
+公开版保留了一个项目自制的“暖肤冷背景”色度风格，因为我自己很喜欢它。它是 AgX 后的小型 Oklab
+色度场，不是厂商 LUT。
 
-需要 Python 3.10+。
+代码也保留了本地 LUT 适配器，方便大家把自己合法获得的 LUT 接在 AgX 周围做实验。什么 LUT 真正适合
+这条 DRT 没有唯一答案，这部分可以自由探索。仓库**不会分发 ARRI、Fujifilm、Sony、RED、
+Resolve/Kodak 或其它厂商 LUT**。除非具有明确的再分发许可，请不要在 issue 或 PR 中上传厂商 LUT 文件。
+
+## 快速开始
+
+需要 Python 3.10 或更新版本。
 
 ```bash
+git clone https://github.com/Gen-416/dngscan.git
+cd dngscan
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 python -m dngscan.gui
 ```
 
-GUI 在 localhost 中运行。它会缓存同一文件的解码/分析，用 proxy 加速连续预览，但导出始终使用全分辨率缓冲。建议工作流：
+GUI 在 localhost 打开并完全离线运行。同一文件会缓存 RAW 解码和分析，连续预览使用代理图；最终导出
+始终回到全分辨率 scene buffer。
 
-1. 从 `AgX：darktable 全图色彩路径`、`darktable 平滑`、`EV 0` 与选定的 RAW 高光模式开始。
-2. 把**全图亮度参考**当作主动比较工具；低调/高调意图正确时回到 `EV 0`。
-3. 在相同 EV 下先对比两条非 AgX 对照（`neutral`，再 `lum`），再与 `agx` / `gated` 比较，然后才加相机响应校正或成片风格。
-4. 决定手动 EV 上限时，以全分辨率导出的指标为准，不只看 proxy 预览的近白比例。
-5. 广泛交付用 sRGB；已知 P3 色彩管理观看环境时用 Display P3。
+### 推荐 GUI 流程
 
-CLI 示例：
+1. 选择 RAW，第一次预览保持 `EV 0`。
+2. 从 `AgX`、`darktable`、拍摄白平衡与“保持剪切”开始。
+3. 想知道差异来自哪里时，在相同 EV 下比较 `RAW 门控`、`场景 C1` 和 `通用曲线`。
+4. 先理解基线画面，再尝试前馈。
+5. 只把**亮度参考**当作主动选择的另一种曝光读法。
+6. 广泛分享用 sRGB；确定观看链支持色彩管理时再用 Display P3。
+
+### CLI 示例
 
 ```bash
-# 成片 SDR JPEG：默认 darktable 风格全图 AgX，质量 100，4:4:4
+# 默认全图 AgX，质量 100，4:4:4
 python -m dngscan photo.dng --jpeg photo.jpg
 
-# 同时输出采集报告和 JPEG
+# 同时输出六面板 RAW 报告
 python -m dngscan photo.dng --jpeg photo.jpg --scan --csv photo.csv
 
-# 相同 EV 下的非 AgX 对照（通用导出 vs 场景 C1 仅亮度）
-python -m dngscan photo.dng --jpeg neutral.jpg --tone-core neutral
-python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum --lum-norm y
-
-# 与默认及 RAW 门控创意核对比
-python -m dngscan photo.dng --jpeg agx.jpg --tone-core agx --agx-primaries smooth
+# 在同一 EV 下比较压缩核心
 python -m dngscan photo.dng --jpeg gated.jpg --tone-core gated
+python -m dngscan photo.dng --jpeg lum.jpg --tone-core lum
+python -m dngscan photo.dng --jpeg generic.jpg --tone-core neutral
 
-# 改变 RAW 还原或交付色域
-python -m dngscan photo.dng --jpeg photo_p3.jpg --highlight-mode reconstruct --output-gamut p3
+# 高光重建并输出 Display P3
+python -m dngscan photo.dng --jpeg photo_p3.jpg \
+  --highlight-mode reconstruct --output-gamut p3
 
 # 主动应用全图亮度参考
 python -m dngscan photo.dng --jpeg reference.jpg --ev auto
@@ -163,8 +170,30 @@ python -m dngscan photo.dng --jpeg reference.jpg --ev auto
 
 完整参数见 `python -m dngscan --help`。
 
-## 校准资源与许可
+## 输出与诊断
 
-仓库保留可运行代码、光谱 bootstrap 数据和开源许可的来源资产。可选的厂商 LUT 留在本机，并被 Git 忽略。当前 scene-transform 校准数据及其限制见 [`dngscan_assets/spectral/README.md`](dngscan_assets/spectral/README.md)。
+- SDR 输出为带确定性 TPDF 抖动的 8-bit JPEG，默认质量 100、4:4:4 色度采样。
+- Display P3 输出会嵌入 P3 ICC；找不到 profile 时直接失败，不写入未标记 P3。
+- ISO gain-map HDR 仍是实验路径，目前不是推荐的兼容性交付目标。
+- `--scan` 输出六面板采集报告：SNR 对档数、分离的 R/G/B RAW 分布、曝光与色域压力、空间剪切图。
+  显示曲线可以平滑，数值统计始终使用未平滑 RAW 样本。
 
-dngscan 使用 [GPL-3.0-or-later](LICENSE)。AgX 实现派生自 darktable 的 GPL-3.0-or-later AgX 代码；第三方声明，包括历史性的 Tony McMapface LUT，见 [NOTICE.md](NOTICE.md)。
+## 参与改进
+
+项目公开的目的，就是让其他人可以玩这条管线，也可以挑战里面的假设。尤其欢迎：
+
+- 相机实测数据和可复现的标定流程；
+- 更好的 RAW 证据模型、高光重建和噪声置信度；
+- 基于真实场景的 AgX/DRT 对比；
+- GUI、跨平台打包和色彩管理输出测试；
+- 原创或具有明确再分发许可的 look 与变换。
+
+请在代码和文档中明确区分“实测证据、启发式策略、创意口味”。不要提交测试 RAW 或没有许可的第三方 LUT。
+
+## 许可证与致谢
+
+dngscan 使用 [GPL-3.0-or-later](LICENSE)，因为 AgX 实现派生自 darktable 的 GPL-3.0-or-later
+代码。开源光谱数据与可选依赖见 [NOTICE.md](NOTICE.md)。
+
+这是一个独立的社区实验。ARRI、ALEXA、ALEV、darktable、Blender、Fujifilm、Sony、RED、
+Kodak、Resolve 等名称属于各自权利人；文中的引用只用于兼容性、来源或比较说明，不代表官方认可。
