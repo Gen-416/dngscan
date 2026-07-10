@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from .debug_util import maybe_print_exc
+
 from ._deps import IMPORT_ERRORS
 from .agx import AGX_PRIMARIES_CLI_CHOICES, resolve_agx_primaries
 from .analysis import analyze
@@ -325,5 +327,6 @@ def main(argv: list[str]) -> int:
             print(f"JPEG HDR: ISO 21496-1 gain-map；headroom=+{args.hdr_headroom:.2f}EV；gain map scale=1/{args.hdr_gainmap_scale}")
         return 0
     except Exception as exc:
+        maybe_print_exc()
         print(f"error: {exc}", file=sys.stderr)
         return 1

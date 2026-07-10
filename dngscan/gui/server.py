@@ -6,13 +6,13 @@ import json
 import socket
 import subprocess
 import threading
-import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import dngscan as dg
+from dngscan.debug_util import maybe_print_exc
 
 from .page import render_page
 from .service import list_dir, prepare_preview, run_export_isolated, run_preview
@@ -71,7 +71,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = reveal_path(params)
             self._json(result)
         except Exception as exc:  # surface any pipeline error to the UI
-            traceback.print_exc()
+            maybe_print_exc()
             self._json({"ok": False, "error": str(exc)}, code=200)
 
     def log_message(self, fmt: str, *args: object) -> None:  # keep the console quiet

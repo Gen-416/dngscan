@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import dngscan as dg
+from dngscan.debug_util import maybe_print_exc
 from dngscan.grade import RENDER_MODE, resolve_grade_params
 
 from .constants import RAW_EXTS
@@ -688,6 +689,7 @@ def _export_worker(params: dict, result_queue: Any) -> None:
     try:
         result_queue.put(("ok", run_export(params)))
     except Exception as exc:
+        maybe_print_exc()
         result_queue.put(("error", str(exc)))
 
 
