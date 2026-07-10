@@ -5,36 +5,46 @@ The AgX implementation comes from darktable's `agx` module.
 
 [中文说明](README.zh-CN.md) · [License](LICENSE) · [Third-party notices](NOTICE.md)
 
-dngscan does one fairly simple thing: it reads a RAW file, looks at what the sensor
-actually recorded, and uses AgX to fit that signal into an 8-bit sRGB or Display P3
-JPEG. There is no catalog, no layers, no masks and no local retouching. It is not a
-photo editor. It is closer to a signal-processing tool, or simply a toy for trying RAW
-and image-formation algorithms.
+dngscan reads a RAW file, measures the signal the sensor actually recorded, renders it
+in scene-linear Rec.2020, and compresses it through AgX into an 8-bit sRGB or Display
+P3 JPEG. Its responsibility ends there: no catalog, no layers, no masks, no local
+retouching. **It is not a photo editor** — it is more precisely a signal-processing
+tool: a developer, in the darkroom sense, whose single concern is compressing RAW
+through AgX.
 
-## Why I made it
+## Why it exists
 
-I like darktable, especially its scene-referred pipeline. But it takes time to learn,
-and it has far more tools than I need when all I want is to develop one RAW through
-AgX. dngscan is my attempt to take that one path out of darktable and make it small,
-repeatable and easy to play with: LibRaw interpretation, scene-linear Rec.2020, then
-the curve construction and primaries geometry adapted from darktable's GPL `agx`
-module. It is not a new AgX implementation invented from scratch, and it is not meant
-to compete with darktable.
+My judgment of darktable is that it is, at its core, a signal-and-algorithm processing
+instrument — a toy for signals, in the entirely respectful sense of an apparatus whose
+pleasure lies in understanding and manipulating them. Its scene-referred pipeline is
+rigorous and complete, but that completeness carries the full complexity of a general
+editor: modules interact, the same image can be reached along many paths, and the
+learning cost falls on everyone who only wants one RAW developed correctly. For the
+single task of compressing a RAW through AgX, most of that capability is beside the
+point — and dngscan exists for exactly that reason. It takes this one path out of the
+full editing system and makes it a standalone, reproducible, deliberately small tool:
+LibRaw interpretation, scene-linear Rec.2020, and the curve construction and primaries
+geometry ported from darktable's GPL `agx` module. It does not compete with darktable,
+and it does not reinvent AgX.
 
-I have two simple rules for the tool.
+Two positions run through the design.
 
-**Automatic does not mean automatic retouching.** It means taking the digitised optical
-signal seriously. The tool measures black and white levels, per-channel CFA clipping,
-usable shadow range and the scene's luminance distribution, then uses those facts to
-set the compression. A night scene stays dark at EV 0. A clipped lamp does not get to
-redefine the image's white point just because highlight reconstruction made it look
-smooth.
+**First, automatic decisions can only be justified by measurement.** The digitized
+optical signal is the only source of fact this tool recognizes: black and white levels,
+per-channel CFA clipping, usable shadow range, the scene's luminance distribution — the
+compression curve is compiled from these measurements. Automation here is respect for
+the captured signal, not aesthetic decision-making on the user's behalf. A night scene
+therefore stays dark at EV 0, and a lamp that clipped on the sensor does not acquire
+the authority to define the image's white point merely because highlight reconstruction
+rendered it smooth.
 
-**The AgX path should stay understandable.** Scene measurements may set its working
-parameters, but taste should not be hidden inside the automatic analysis. Exposure,
-white balance, detail choices, camera prefeed, looks and LUT filters sit outside the
-AgX core and remain visible controls. That makes it easier to tell whether a result
-came from the captured signal, the DRT, or a choice I made afterwards.
+**Second, the imaging path must remain explainable.** The AgX compression pipeline
+itself is deterministic; scene measurement compiles its working parameters, but taste
+never enters the automatic analysis. Every control that expresses intent — exposure
+compensation, white balance policy, the camera-response prefeed, chromatic looks, LUT
+filters — stands outside the AgX core as an explicit option, off or neutral by default.
+When the image changes, the cause can be named: the RAW itself, the DRT, or a choice
+the user made.
 
 ## Pipeline
 
