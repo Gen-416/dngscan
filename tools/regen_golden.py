@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -60,7 +61,10 @@ def regen_all(compare: bool = True) -> int:
         if compare and path.is_file():
             prev = np.load(path)["u8"]
             rows.append(f"{case.fixture_name}: {_delta_table(prev, u8)}")
-        np.savez_compressed(path, u8=u8, stats=np.asarray(stats, dtype=object))
+        # JSON-encoded stats keep the fixture loadable with allow_pickle=False: a
+        # pickled object array in a committed fixture would be an arbitrary-code
+        # execution vector for anyone running tests on a contributed PR.
+        np.savez_compressed(path, u8=u8, stats=np.asarray(json.dumps(stats)))
     if rows:
         print("Golden delta summary:")
         for row in rows:

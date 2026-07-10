@@ -352,6 +352,26 @@ def build_staggered_clip(seed: int = 37) -> GoldenScene:
     return GoldenScene("staggered_clip", bundle, analysis, rois)
 
 
+def _build_real_crop(crop_path: Path) -> GoldenScene:
+    """Real-scene excerpt exported by tools/regen_golden.py --from-dng.
+
+    The stored buffer is a scene-linear Rec.2020 uint16 crop of an actual capture, so
+    these cases exercise real material/illumination statistics rather than synthetic
+    manifolds. Pickle stays disabled: every stored field is a plain array."""
+    with np.load(crop_path, allow_pickle=False) as payload:
+        scene = np.asarray(payload["scene"], dtype=np.uint16)
+        median_ev = float(payload["analysis_median_ev"])
+    rois = {"full": np.ones(scene.shape[:2], dtype=bool)}
+    analysis = _analysis_for(
+        median_vs_gray_ev=median_ev,
+        ev_median=median_ev,
+        ev_p99=min(3.0, median_ev + 4.0),
+        ev_p999=min(3.5, median_ev + 5.0),
+        usable_dr_ev=10.0,
+    )
+    return GoldenScene(crop_path.stem, _bundle_from_scene(scene), analysis, rois)
+
+
 SCENE_BUILDERS = {
     "daylight_wide_dr": build_daylight_wide_dr,
     "night_sparse_lamps": build_night_sparse_lamps,
@@ -360,6 +380,14 @@ SCENE_BUILDERS = {
     "neutral_hue_wheel": build_neutral_hue_wheel,
     "staggered_clip": build_staggered_clip,
 }
+
+# Real-scene crops are committed fixtures (crop__<name>.npz): register whichever are
+# present so they run through the same case matrix as the synthetic scenes. Their OWN
+# rendered fixtures also start with "crop__" (crop__<name>__<plan>__<core>__...), so
+# filter to source crops only: exactly one "__" separator in the stem.
+for _crop_path in sorted(GOLDEN_DIR.glob("crop__*.npz")):
+    if _crop_path.stem.count("__") == 1:
+        SCENE_BUILDERS[_crop_path.stem] = (lambda p=_crop_path: _build_real_crop(p))
 
 
 def all_scenes() -> dict[str, GoldenScene]:

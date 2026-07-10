@@ -71,10 +71,14 @@ class GoldenRenderTest(unittest.TestCase):
             )
 
     def test_golden_byte_parity(self) -> None:
+        import json
+
         scenes = all_scenes()
         for case in iter_cases():
             with self.subTest(case=case.fixture_name):
-                fixture = np.load(case.fixture_path, allow_pickle=True)
+                # allow_pickle stays False: fixtures come in via PRs, and a pickled
+                # object array would execute on whoever runs the suite.
+                fixture = np.load(case.fixture_path, allow_pickle=False)
                 expected = fixture["u8"]
                 scene = scenes[case.scene_id]
                 plan = render_plan_for_case(scene, case)
@@ -88,13 +92,16 @@ class GoldenRenderTest(unittest.TestCase):
                 ).reshape(expected.shape)
                 if np.array_equal(actual, expected):
                     continue
-                exp_stats = fixture["stats"].item() if "stats" in fixture else {}
+                exp_stats = json.loads(str(fixture["stats"])) if "stats" in fixture else {}
                 act_stats = {name: oklab_stats(actual, mask) for name, mask in scene.rois.items()}
                 diff = np.abs(actual.astype(np.int16) - expected.astype(np.int16))
                 max_delta = int(diff.max())
                 # Cross-platform libm can move a handful of pixels by one dither LSB while
-                # Oklab scene stats stay unchanged; reject only real regressions.
-                if max_delta <= 1 and _stats_match(exp_stats, act_stats):
+                # Oklab scene stats stay unchanged; reject only real regressions. The
+                # escape is bounded in pixel count too, so a broad 1-LSB drift (which a
+                # per-ROI mean could dilute) still fails.
+                differing_frac = float(np.count_nonzero(diff)) / float(diff.size)
+                if max_delta <= 1 and differing_frac <= 0.01 and _stats_match(exp_stats, act_stats):
                     continue
                 msg = _format_stats_delta(exp_stats, act_stats)
                 msg = (
