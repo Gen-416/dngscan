@@ -43,7 +43,10 @@ button.preview:disabled{opacity:.5;cursor:default}
 .muted{color:#828a99;font-size:12px}
 .coreFacts{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 .coreFacts span{background:#151922;border:1px solid #303746;border-radius:6px;padding:5px 8px;color:#9aa1b0;font-size:12px}
+.coreFacts span.control{border-color:#4a5568;background:#171b24}
 .coreFacts b{color:#e7e9ee;font-weight:500}
+#controlHint{margin-top:10px;color:#9aa7c0;font-size:12px;line-height:1.55;min-height:0}
+#controlHint:empty{display:none}
 #status{margin-top:10px;min-height:20px}
 .err{color:#ff8a8a}.ok{color:#8ae08a}
 .browserList{display:none;margin-top:10px;border:1px solid #2b2f3a;border-radius:8px;max-height:260px;overflow:auto;background:#12141a}
@@ -107,11 +110,15 @@ button.preview:disabled{opacity:.5;cursor:default}
   <div class="row">
     <div style="flex:2;min-width:210px">
       <label>压缩策略</label>
-      <select id="toneCore" title="默认是 darktable 风格的全图 AgX；RAW 门控是基于同一 darktable 几何的可选色度策略。">
-        <option value="agx" selected>AgX · darktable 全图色彩路径</option>
-        <option value="gated">保真 · RAW 证据门控</option>
-        <option value="lum">对照 · 场景 C1 仅亮度</option>
-        <option value="neutral">对照 · 通用导出曲线</option>
+      <select id="toneCore" title="成片：AgX 或 RAW 门控。对照组：与成片共用 EV 锚定，用于 A/B 比较 AgX 与常规导出。">
+        <optgroup label="成片">
+          <option value="agx" selected>AgX · darktable 全图色彩路径</option>
+          <option value="gated">保真 · RAW 证据门控</option>
+        </optgroup>
+        <optgroup label="非 AgX 对照">
+          <option value="neutral">对照 1 · 通用导出曲线</option>
+          <option value="lum">对照 2 · 场景 C1 仅亮度</option>
+        </optgroup>
       </select>
     </div>
     <div id="lumNormBlock" style="flex:1;min-width:140px;display:none">
@@ -133,6 +140,7 @@ button.preview:disabled{opacity:.5;cursor:default}
     </div>
   </div>
   <div class="coreFacts" id="coreFacts" aria-live="polite"></div>
+  <div id="controlHint"></div>
 </div>
 
 <div class="card">
@@ -277,17 +285,23 @@ function setPunchLabel(){const v=+$("#punch").value;$("#punchVal").textContent=v
 function setSceneTransformStrengthLabel(){const v=+$("#sceneTransformStrength").value;$("#sceneTransformStrengthVal").textContent=v.toFixed(2);}
 function updateSceneTransformUi(){$("#sceneTransformStrengthBlock").style.display=$("#sceneTransform").value!=="none"?"block":"none";}
 const CORE_FACTS={
-  gated:["亮度 <b>darktable C1 曲线</b>","色度 <b>smooth 几何 + RAW 门控</b>"],
-  agx:["亮度 <b>darktable C1 曲线</b>","色度 <b>全图 AgX path-to-white</b>"],
-  lum:["亮度 <b>场景 C1 曲线</b>","色度 <b>保持 RGB 比例（无 AgX）</b>"],
-  neutral:["亮度 <b>固定通用 shoulder</b>","色度 <b>Lightroom 式导出基线</b>"]
+  gated:["角色 <b>成片</b>","亮度 <b>darktable C1</b>","色度 <b>smooth + RAW 门控</b>"],
+  agx:["角色 <b>成片</b>","亮度 <b>darktable C1</b>","色度 <b>全图 AgX</b>"],
+  lum:["角色 <b>对照 2</b>","亮度 <b>场景 C1 曲线</b>","色度 <b>仅保持 RGB 比例</b>"],
+  neutral:["角色 <b>对照 1</b>","亮度 <b>固定通用 shoulder</b>","色度 <b>无 AgX</b>"]
+};
+const CONTROL_HINTS={
+  neutral:"对照 1 · 固定通用导出曲线（Lightroom 式），不从场景统计编译端点。与成片共用 EV 锚定、CFA 还原与色域适配。先与 lum 对比，再与 AgX 对比，可分离「常规压缩 / 场景 C1 / AgX 色度」三层差异。",
+  lum:"对照 2 · 与 AgX 共享同一条场景编译 C1 toe/shoulder，但只压缩亮度、不改色度几何。用于回答：AgX 色度路径在共享曲线之上额外改了什么。"
 };
 function updateToneCoreUi(){
-  const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";
+  const core=$("#toneCore").value;const lum=core==="lum";const neutral=core==="neutral";const control=neutral||lum;
   $("#lumNormBlock").style.display=lum?"block":"none";
   $("#agxPrimariesBlock").style.display=core==="agx"?"block":"none";
-  $("#punchBlock").style.display=(lum||neutral)?"none":"block";
-  $("#coreFacts").innerHTML=(CORE_FACTS[core]||[]).map(v=>"<span>"+v+"</span>").join("");
+  $("#punchBlock").style.display=control?"none":"block";
+  const facts=(CORE_FACTS[core]||[]).map(v=>"<span"+(control?' class="control"':"")+">"+v+"</span>").join("");
+  $("#coreFacts").innerHTML=facts;
+  $("#controlHint").textContent=CONTROL_HINTS[core]||"";
 }
 function updateFormatUi(){$("#hdrBlock").style.display=$("#format").value==="ultrahdr"?"flex":"none";}
 function setEvLabel(){const v=+$("#ev").value;$("#evval").textContent=(v>=0?"+":"")+v.toFixed(2);}
@@ -321,7 +335,7 @@ function sceneTransformText(j){
 }
 function toneCoreText(j){
   if(!j.tone_core)return "";
-  const labels={gated:"保真（RAW 门控）",agx:"AgX（darktable 全图）",lum:"对照（场景 C1 仅亮度）",neutral:"对照（通用导出曲线）"};
+  const labels={gated:"成片·RAW 门控",agx:"成片·AgX 全图",lum:"对照 2·场景 C1 仅亮度",neutral:"对照 1·通用导出曲线"};
   const norms={y:"Y",power:"折中",max:"最大通道"};
   const norm=j.tone_core==="lum"&&j.lum_norm?"（"+(norms[j.lum_norm]||j.lum_norm)+"）":"";
   return "，策略 "+(labels[j.tone_core]||j.tone_core)+norm;

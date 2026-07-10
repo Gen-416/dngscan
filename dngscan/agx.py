@@ -70,23 +70,29 @@ _BLENDER_GEOMETRY = PrimariesGeometry(
     master_unrotation_ratio=0.0,
 )
 
-# punchy: lower master_outset_ratio restores more purity on the outward path (geometric
-# analogue of a >1 purity scalar; stays on spectral locus rays, unlike matrix lerp).
+# Outset direction (darktable semantics): the outward matrix is the INVERSE of an
+# inset built from ratio*outset amounts, so a LARGER master_outset_ratio insets those
+# primaries further and its inverse expands purity MORE. ratio > 1 boosts purity above
+# Blender's reference (dt slider range 0..2); ratio < 1 mutes it (dt smooth uses 0).
+# Verified end-to-end: mean Oklab chroma punchy(1.35)=0.194 > base(1.0)=0.172 >
+# muted(0.60)=0.164 on a saturated probe set.
 _PUNCHY_GEOMETRY = PrimariesGeometry(
     inset=_BLENDER_GEOMETRY.inset,
     rotation=_BLENDER_GEOMETRY.rotation,
     outset=_BLENDER_GEOMETRY.outset,
     unrotation=_BLENDER_GEOMETRY.unrotation,
-    master_outset_ratio=0.5,
+    master_outset_ratio=1.35,
     master_unrotation_ratio=0.0,
 )
 
+# muted: reduced purity restoration plus full rotation reversal (the softening comes
+# from both), keeping the Blender inset character rather than switching to dt smooth.
 _MUTED_GEOMETRY = PrimariesGeometry(
     inset=_BLENDER_GEOMETRY.inset,
     rotation=_BLENDER_GEOMETRY.rotation,
     outset=_BLENDER_GEOMETRY.outset,
     unrotation=_BLENDER_GEOMETRY.unrotation,
-    master_outset_ratio=1.0,
+    master_outset_ratio=0.60,
     master_unrotation_ratio=1.0,
 )
 
@@ -214,8 +220,12 @@ def formation_matrices(plan: Any) -> tuple[Any, Any]:
 def compute_pivot_ev_offset(body_ev_p50: float, black_ev: float, white_ev: float) -> float:
     """Move max-contrast pivot toward the scene body (darktable picker workflow).
 
+    PARKED: no production caller yet — build_tone_compression_plan keeps pivot_ev_offset
+    at 0 until a constrained solver can hold the EV=0 -> 18% anchor while moving the
+    contrast pivot (see the pivot comment in tone.py). Tests keep this honest meanwhile.
+
     Negative body_ev_p50 pulls the steep part of the curve onto the subject without
-  changing exposure gain; brightness at the pivot is preserved by curve_params.
+    changing exposure gain; brightness at the pivot is preserved by curve_params.
     """
     if body_ev_p50 >= -0.25:
         return 0.0

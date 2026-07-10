@@ -123,15 +123,31 @@ class OutsetPresetTest(unittest.TestCase):
         self.assertTrue(np.allclose(inset, AGX_INSET_REC2020))
         self.assertTrue(np.allclose(outset, AGX_OUTSET_REC2020))
 
-    def test_punchy_restores_more_outset_chroma(self) -> None:
-        linear = np.asarray([[0.40, 0.20, 0.15]], dtype=np.float32)
-        _, outset_b = matrices_for_preset("base")
-        _, outset_p = matrices_for_preset("punchy")
+    def test_preset_purity_ordering_end_to_end(self) -> None:
+        # Directional contract through the REAL pipeline path (left-multiply M @ v via
+        # apply_core), not `linear @ M` which silently tests the transpose: punchy must
+        # render more chroma than base, muted less. This is the ordering the GUI labels
+        # (鲜明 / 柔和) promise.
+        from dngscan.color import apply_rgb_matrix3
+        from dngscan.constants import OKLAB_M1, OKLAB_M2, RGB_TO_XYZ
 
-        def spread(v):
-            return float(v.max() - v.min())
+        def mean_chroma(rgb):
+            xyz = apply_rgb_matrix3(rgb.astype(np.float32), RGB_TO_XYZ["Rec2020"])
+            lab = apply_rgb_matrix3(np.cbrt(np.maximum(apply_rgb_matrix3(xyz, OKLAB_M1), 0.0)), OKLAB_M2)
+            return float(np.hypot(lab[:, 1], lab[:, 2]).mean())
 
-        self.assertGreater(spread(linear @ outset_p), spread(linear @ outset_b))
+        test = np.asarray(
+            [[0.5, 0.10, 0.05], [0.06, 0.30, 0.10], [0.08, 0.12, 0.45], [0.35, 0.25, 0.06]],
+            dtype=np.float32,
+        )
+        chroma = {}
+        for name in ("base", "punchy", "muted"):
+            plan = _PlanStub()
+            plan.agx_primaries = name
+            inset, outset = formation_matrices(plan)
+            chroma[name] = mean_chroma(apply_core(test, plan, inset, outset))
+        self.assertGreater(chroma["punchy"], chroma["base"] + 1e-3)
+        self.assertLess(chroma["muted"], chroma["base"] - 1e-3)
 
     def test_muted_differs_from_base(self) -> None:
         rgb = np.asarray([[0.30, 0.12, 0.06], [0.05, 0.20, 0.35]], dtype=np.float32)
