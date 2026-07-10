@@ -70,16 +70,25 @@ renderer, so reconstructed pixels cannot define the global white endpoint.
 
 ## Stage-by-stage choices
 
+Every option visible in the GUI corresponds to a real stage of the pipeline; this
+section explains, in order, what each one actually does.
+
 **Demosaic.** Full-resolution export defaults to `--demosaic auto`: Bayer sensors get
 the best algorithm the current build supports in DHT → DCB → AHD order; non-Bayer
-sensors (Fujifilm X-Trans) keep libraw's native path; previews use a fast half-size
-path. Manual choices are `dht / dcb / ahd / aahd / vng / ppg`. One judgment matters
-here: this tool performs no noise reduction, which makes demosaic the only texture
-lever. DHT resolves the most detail on clean low-ISO signal; on noise-heavy high-ISO
-files, detail-aggressive interpolation amplifies chroma noise into maze patterns and
-false color — the smoother `vng` and `ppg`, or the false-color-suppressing `dcb` and
-`aahd`, often read better there. Noisy night captures are worth one manual algorithm
-comparison.
+sensors (Fujifilm X-Trans) keep libraw's native path. Previews bypass interpolation
+entirely and use half-size superpixel binning (each 2×2 cell collapses to one pixel),
+so preview texture says nothing about interpolation quality. Manual choices are
+`dht / dcb / ahd / aahd / vng / ppg`. One judgment matters here: this tool performs no
+noise reduction, which makes demosaic the only texture lever. DHT resolves the most
+detail on clean low-ISO signal; on noise-heavy high-ISO files, detail-aggressive
+interpolation amplifies chroma noise into maze patterns and false color — the smoother
+`vng` and `ppg`, or the false-color-suppressing `dcb` and `aahd`, often read better
+there. Noisy night captures are worth one manual comparison. Worth knowing: libraw
+itself defines more algorithms — LMMSE (the classic choice designed for noise-heavy
+captures), AMaZE, VCD, AFD — which come from the GPL demosaic packs and are absent
+from standard rawpy wheel builds. If your libraw build carries them, exposing one is a
+one-line addition to `DEMOSAIC_CHOICES`: the resolver already checks availability and
+falls back gracefully.
 
 **White balance.** `camera` uses the in-camera AsShot multipliers; `daylight` uses
 libraw's calibrated daylight multipliers for film-style roll consistency — every frame
@@ -87,17 +96,34 @@ under the same light gets the same balance, and color casts remain as properties
 scene. Either way, the AsShot deviation from daylight is always reported as testimony
 about the light source.
 
-**Highlights.** Three libraw strategies: `clip / blend / reconstruct`. The choice
-affects visual continuity only, never evidence: the CFA clipping state is captured
-before demosaicing, and reconstructed pixels can never feed back into the curve
-endpoints.
+**Highlights.** Three libraw strategies: `clip` cuts hard, `blend` mixes the
+transition, `reconstruct` estimates from unclipped channels. The choice affects visual
+continuity only, never evidence: the CFA clipping state is captured before demosaicing,
+and reconstructed pixels can never feed back into the curve endpoints.
+
+**Compression core and lum norm.** The four cores are described in the next section.
+When `lum` is selected, a norm option decides which scalar the C1 curve acts on: `y` is
+Rec.2020 luminance (colorimetric lightness); `max` takes the maximum channel, so
+saturated colors are never under-weighted — flattest rendering, best saturation
+retention; `power` is a fourth-power weighted compromise. All three only change what
+counts as "bright"; RGB ratios are always preserved.
+
+**Purity compensation (punch).** AgX-family formation is inherently flat: the inset
+desaturates up front, and only deep-toe content earns purity back through per-channel
+expansion — which is why high-ISO night frames look rich while daylight wide-DR scenes
+look washed. Punch is a scene-gated chroma compensation aimed at exactly that: bright,
+low-ISO, wide-window scenes automatically receive an Oklab chroma lift (attenuated on
+the neutral axis, in deep shadows, in highlights and in the skin band), while night and
+high-ISO scenes gate to zero and short-circuit entirely. The slider is a multiplier on
+the automatic value: 1 uses the analyzed value, 0 disables.
 
 **Output and gamut.** SDR is an 8-bit JPEG, default quality 100 with 4:4:4 chroma
 (4:2:2 / 4:2:0 available), with deterministic TPDF dither applied before quantization
 to avoid banding in smooth gradients. `--output-gamut srgb` targets maximum
 compatibility; `p3` embeds a Display P3 ICC profile and fails loudly rather than
 writing untagged wide-gamut data. `--output-format ultrahdr` writes an ISO gain-map
-HDR JPEG and remains experimental.
+HDR JPEG, with `--hdr-headroom` setting the gain-map ceiling in EV; this path remains
+experimental.
 
 **Exposure.** The anchor is a content-independent constant: nominally exposed mid gray
 maps to scene-linear 0.18, and `--ev` offsets from there. `--ev auto` is an explicit
