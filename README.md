@@ -291,9 +291,14 @@ pip install -r requirements.txt
 python -m dngscan.gui
 ```
 
-The GUI runs on localhost, fully offline. Decode and analysis are cached per file;
-previews use a proxy, and export always renders from the full-resolution scene buffer.
-A reasonable first session: open a RAW at EV 0 with the default AgX core, look at the
+The GUI runs on localhost, fully offline. Selecting a file silently warms a proxy scene
+and its basic analysis; that proxy stays in memory and is also kept in the local user cache,
+so reopening the same file after a restart can reuse it. On macOS the default location is
+`~/Library/Caches/dngscan/preview-v1`; it is bounded to 768 MB and evicts old entries automatically.
+Deleting it only means the next preview will warm again: it never changes a RAW or an export.
+Previews use the proxy, while export always renders from the full-resolution scene buffer in a
+short-lived worker process, so its large arrays return to the OS when it finishes. A reasonable
+first session: open a RAW at EV 0 with the default AgX core, look at the
 render, then switch cores at the same EV when you want to know where a visual
 difference comes from. The brightness-reference button (`--ev auto`) is an explicit
 alternate exposure reading — it is never applied silently.

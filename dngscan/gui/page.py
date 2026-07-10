@@ -404,9 +404,11 @@ function restoreSettings(){
   setEvLabel();setHdrLabel();setGradeStrengthLabel();setSceneTransformStrengthLabel();setPunchLabel();updateGradeUi();updateSceneTransformUi();updateToneCoreUi();updateFormatUi();
   if(migrated)saveSettings();
 }
-["input","quality","highlight","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
-["wb","demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
-$("#toneCore").addEventListener("change",()=>{updateToneCoreUi();saveSettings();});
+["quality","gamut","outdir","png"].forEach(id=>$("#"+id).addEventListener("change",saveSettings));
+["input","highlight"].forEach(id=>$("#"+id).addEventListener("change",()=>{saveSettings();preparePreview();}));
+["demosaic","chroma","grade"].forEach(id=>$("#"+id).addEventListener("change",()=>{updateGradeUi();saveSettings();}));
+$("#wb").addEventListener("change",()=>{updateGradeUi();saveSettings();preparePreview();});
+$("#toneCore").addEventListener("change",()=>{updateToneCoreUi();saveSettings();preparePreview();});
 $("#lumNorm").addEventListener("change",saveSettings);
 $("#agxPrimaries").addEventListener("change",saveSettings);
 $("#sceneTransform").addEventListener("change",()=>{updateSceneTransformUi();saveSettings();});
@@ -427,7 +429,7 @@ async function listDir(d){
   const mk=(t,fn)=>{const e=document.createElement("div");e.textContent=t;e.onclick=fn;b.appendChild(e);};
   mk("⬆︎ "+j.parent,()=>listDir(j.parent));
   j.dirs.forEach(d=>mk("📁 "+d,()=>listDir(j.cwd+"/"+d)));
-  j.files.forEach(f=>mk("🖼 "+f,()=>{$("#input").value=j.cwd+"/"+f;b.style.display="none";saveSettings();}));
+  j.files.forEach(f=>mk("🖼 "+f,()=>{$("#input").value=j.cwd+"/"+f;b.style.display="none";saveSettings();preparePreview();}));
 }
 $("#browseBtn").onclick=()=>{const b=$("#browser");if(b.style.display==="block"){b.style.display="none";}else{b.style.display="block";listDir(curDir);}};
 
@@ -467,6 +469,10 @@ function payload(){
 async function postJob(path, body){
   const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
   return await r.json();
+}
+async function preparePreview(){
+  const body=payload();if(!body)return;
+  try{await postJob("/prepare",body);}catch(_){/* Preview remains available on demand. */}
 }
 function beginBusy(){const w=$("#previewWrap");w.classList.add("loading");}
 function endBusy(){const w=$("#previewWrap");w.classList.remove("loading");}

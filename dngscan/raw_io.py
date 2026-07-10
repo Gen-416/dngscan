@@ -54,9 +54,19 @@ def scene_rec2020_to_xyz_render(scene_rec2020: Any, scene_scale: float) -> Any:
 
     scene = np.asarray(scene_rec2020)
     if np.issubdtype(scene.dtype, np.integer):
-        linear = scene.astype(np.float64).reshape(-1, 3) / float(scene_scale)
-        xyz = rec2020_to_xyz(linear).reshape(scene.shape)
-        return (np.clip(xyz, 0.0, 1.0) * float(scene_scale)).astype(np.uint16)
+        flat = scene.reshape(-1, 3)
+        out = np.empty((flat.shape[0], 3), dtype=np.uint16)
+        chunk = 1_000_000
+        for start in range(0, flat.shape[0], chunk):
+            end = min(start + chunk, flat.shape[0])
+            # Keep float64 here for byte-for-byte compatibility with the original
+            # analysis buffer, but never materialize a full-frame float64 RGB copy.
+            linear = flat[start:end].astype(np.float64) / float(scene_scale)
+            xyz = rec2020_to_xyz(linear)
+            out[start:end] = (
+                np.clip(xyz, 0.0, 1.0) * float(scene_scale)
+            ).astype(np.uint16)
+        return out.reshape(scene.shape)
     xyz = rec2020_to_xyz(scene.reshape(-1, 3)).reshape(scene.shape)
     return xyz.astype(scene.dtype, copy=False)
 
@@ -210,30 +220,82 @@ def _resize_mask_to_shape(mask: Any, shape: tuple[int, int]) -> Any:
         return mask
     from PIL import Image
 
-    channels = []
+    out = np.empty((target_h, target_w, mask.shape[2]), dtype=np.float32)
     for idx in range(mask.shape[2]):
         im = Image.fromarray(mask[:, :, idx].astype(np.float32, copy=False), mode="F")
         im = im.resize((target_w, target_h), Image.Resampling.BILINEAR)
-        channels.append(np.asarray(im, dtype=np.float32))
-    return np.stack(channels, axis=2)
+        out[:, :, idx] = np.asarray(im, dtype=np.float32)
+    return out
 
 
 def _feather_masks(mask: Any) -> Any:
     # Small separable Gaussian-like kernel, enough to hide demosaic/half-size seams.
     kernel = np.asarray([1, 4, 6, 4, 1], dtype=np.float32) / np.float32(16.0)
     radius = len(kernel) // 2
-    out = mask.astype(np.float32, copy=False)
-    for axis in (0, 1):
-        pad = [(0, 0), (0, 0), (0, 0)]
-        pad[axis] = (radius, radius)
-        padded = np.pad(out, pad, mode="edge")
-        acc = np.zeros_like(out, dtype=np.float32)
-        for i, weight in enumerate(kernel):
-            sl = [slice(None), slice(None), slice(None)]
-            sl[axis] = slice(i, i + out.shape[axis])
-            acc += np.float32(weight) * padded[tuple(sl)]
-        out = acc
+    source = mask.astype(np.float32, copy=False)
+    out = np.empty_like(source, dtype=np.float32)
+    for channel in range(source.shape[2]):
+        plane = source[:, :, channel]
+        for axis in (0, 1):
+            pad = [(0, 0), (0, 0)]
+            pad[axis] = (radius, radius)
+            padded = np.pad(plane, pad, mode="edge")
+            acc = np.zeros_like(plane, dtype=np.float32)
+            scratch = np.empty_like(plane, dtype=np.float32)
+            for i, weight in enumerate(kernel):
+                sl = [slice(None), slice(None)]
+                sl[axis] = slice(i, i + plane.shape[axis])
+                np.multiply(padded[tuple(sl)], np.float32(weight), out=scratch)
+                np.add(acc, scratch, out=acc)
+            plane = acc
+        out[:, :, channel] = plane
     return np.clip(out, 0.0, 1.0)
+
+
+def _build_bayer_clip_mask_planes(
+    raw_image: Any,
+    raw_pattern: Any,
+    color_desc: str,
+    white_level: int,
+    black_levels: list[float],
+    camera_white_levels: list[float],
+) -> Any:
+    """Build the 2x2-binned mask directly from Bayer planes.
+
+    This is equivalent to constructing a full-resolution RGB mask and taking a
+    2x2 maximum, but avoids the much larger intermediate arrays.
+    """
+    pattern = np.asarray(raw_pattern)
+    if pattern.shape != (2, 2):
+        return None
+    h2 = raw_image.shape[0] // 2
+    w2 = raw_image.shape[1] // 2
+    if h2 == 0 or w2 == 0:
+        return None
+    binned = np.zeros((h2, w2, 3), dtype=np.float32)
+    for row in range(2):
+        for col in range(2):
+            cid = int(pattern[row, col])
+            label = channel_label(color_desc, cid)
+            if label.startswith("R"):
+                out_idx = 0
+            elif label.startswith("G"):
+                out_idx = 1
+            elif label.startswith("B"):
+                out_idx = 2
+            else:
+                continue
+            black = channel_black_level(black_levels, cid)
+            fullwell = channel_fullwell(white_level, camera_white_levels, cid)
+            denom = max(fullwell - black, 1.0)
+            plane = raw_image[
+                row : row + h2 * 2 : 2,
+                col : col + w2 * 2 : 2,
+            ].astype(np.float32, copy=False)
+            raw_norm = (plane - np.float32(black)) / np.float32(denom)
+            channel_soft = _smoothstep(0.95, 0.99, raw_norm)
+            np.maximum(binned[:, :, out_idx], channel_soft, out=binned[:, :, out_idx])
+    return binned
 
 
 def build_clip_masks(
@@ -245,28 +307,40 @@ def build_clip_masks(
     camera_white_levels: list[float],
     orientation_flip: int,
     scene_shape: tuple[int, int],
+    raw_pattern: Any | None = None,
 ) -> Any:
     """Build half-resolution RGB soft clip masks from pre-WB raw DN values."""
-    h, w = raw_image.shape[:2]
-    soft = np.zeros((h, w, 3), dtype=np.float32)
-    for cid in np.unique(raw_colors):
-        cid_int = int(cid)
-        label = channel_label(color_desc, cid_int)
-        if label.startswith("R"):
-            out_idx = 0
-        elif label.startswith("G"):
-            out_idx = 1
-        elif label.startswith("B"):
-            out_idx = 2
-        else:
-            continue
-        black = channel_black_level(black_levels, cid_int)
-        fullwell = channel_fullwell(white_level, camera_white_levels, cid_int)
-        denom = max(fullwell - black, 1.0)
-        raw_norm = (raw_image.astype(np.float32, copy=False) - np.float32(black)) / np.float32(denom)
-        channel_soft = _smoothstep(0.95, 0.99, raw_norm)
-        soft[:, :, out_idx] = np.maximum(soft[:, :, out_idx], np.where(raw_colors == cid_int, channel_soft, 0.0))
-    binned = _bin_2x2_max(soft)
+    binned = _build_bayer_clip_mask_planes(
+        raw_image,
+        raw_pattern,
+        color_desc,
+        white_level,
+        black_levels,
+        camera_white_levels,
+    )
+    if binned is None:
+        h, w = raw_image.shape[:2]
+        soft = np.zeros((h, w, 3), dtype=np.float32)
+        for cid in np.unique(raw_colors):
+            cid_int = int(cid)
+            label = channel_label(color_desc, cid_int)
+            if label.startswith("R"):
+                out_idx = 0
+            elif label.startswith("G"):
+                out_idx = 1
+            elif label.startswith("B"):
+                out_idx = 2
+            else:
+                continue
+            black = channel_black_level(black_levels, cid_int)
+            fullwell = channel_fullwell(white_level, camera_white_levels, cid_int)
+            denom = max(fullwell - black, 1.0)
+            raw_norm = (raw_image.astype(np.float32, copy=False) - np.float32(black)) / np.float32(denom)
+            channel_soft = _smoothstep(0.95, 0.99, raw_norm)
+            soft[:, :, out_idx] = np.maximum(
+                soft[:, :, out_idx], np.where(raw_colors == cid_int, channel_soft, 0.0)
+            )
+        binned = _bin_2x2_max(soft)
     oriented = _orient_like_libraw(binned, orientation_flip)
     aligned = _resize_mask_to_shape(oriented, scene_shape)
     return _feather_masks(aligned).astype(np.float16, copy=False)
@@ -345,6 +419,7 @@ def load_raw(
                 [float(x) for x in camera_white_levels],
                 orientation_flip,
                 scene_rec2020_render.shape[:2],
+                raw_pattern,
             )
     except FileNotFoundError:
         raise

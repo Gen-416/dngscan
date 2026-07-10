@@ -10,6 +10,7 @@ from ._deps import IMPORT_ERRORS
 from .agx import AGX_PRIMARIES_CLI_CHOICES, resolve_agx_primaries
 from .analysis import analyze
 from .auto_ev import AutoEvResult, compute_auto_ev, is_ev_auto, parse_ev_value, resolve_export_ev
+from .color import output_gamut_space
 from .constants import (
     CHROMA_CHOICES, DEFAULT_GAINMAP_SCALE, DEFAULT_HDR_HEADROOM_EV, DEMOSAIC_CHOICES,
     JPEG_OUTPUT_FORMATS, WB_CHOICES,
@@ -198,7 +199,15 @@ def main(argv: list[str]) -> int:
         out_path = args.out if args.out is not None else (default_png_path(args.path) if scan_requested else None)
 
         bundle = load_raw(args.path, args.highlight_mode, demosaic=args.demosaic, wb_mode=args.wb)
-        analysis, y, ev = analyze(bundle, args.margin)
+        diagnostics_requested = bool(scan_requested or args.csv is not None)
+        analysis, y, ev = analyze(
+            bundle,
+            args.margin,
+            diagnostics=diagnostics_requested,
+            gamut_names=None
+            if diagnostics_requested
+            else (output_gamut_space("p3" if args.output_format == "ultrahdr" else args.output_gamut),),
+        )
         look, look_strength, display_filter, filter_strength = resolve_grade(
             args.grade, args.grade_strength
         )
@@ -273,24 +282,26 @@ def main(argv: list[str]) -> int:
                 args.scene_transform_strength,
             )
 
-        row = csv_row(
-            bundle,
-            analysis,
-            out_path,
-            jpeg_path,
-            args.jpeg_quality if jpeg_path is not None else None,
-            RENDER_MODE if jpeg_path is not None else "",
-            jpeg_icc_embedded,
-            resolved_ev,
-            render_plan.tone if render_plan is not None else None,
-            jpeg_output_gamut,
-            auto_ev_result,
-            args.grade,
-            args.grade_strength,
-            args.scene_transform,
-            args.scene_transform_strength,
-        )
         if args.csv is not None:
+            # Only built on demand: without --scan/--csv the analysis deliberately
+            # computes a gamut subset, which the full CSV schema must not read.
+            row = csv_row(
+                bundle,
+                analysis,
+                out_path,
+                jpeg_path,
+                args.jpeg_quality if jpeg_path is not None else None,
+                RENDER_MODE if jpeg_path is not None else "",
+                jpeg_icc_embedded,
+                resolved_ev,
+                render_plan.tone if render_plan is not None else None,
+                jpeg_output_gamut,
+                auto_ev_result,
+                args.grade,
+                args.grade_strength,
+                args.scene_transform,
+                args.scene_transform_strength,
+            )
             write_csv(args.csv, row)
         print_report(
             bundle,

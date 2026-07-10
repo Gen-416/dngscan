@@ -165,7 +165,14 @@ def summary_lines(bundle: RawBundle, analysis: Analysis) -> list[str]:
         wb_line_cn(bundle),
         "SNR=1 可用 DR: " + format_snr_dr(analysis.snr1_dr),
         "高亮色域越界 %: "
-        + " ".join(f"{name}={analysis.gamut_out_pct[name]:.3f}" for name in ("sRGB", "P3", "Rec2020")),
+        + (
+            " ".join(
+                f"{name}={analysis.gamut_out_pct[name]:.3f}"
+                for name in ("sRGB", "P3", "Rec2020")
+                if name in analysis.gamut_out_pct
+            )
+            or "（本次仅分析输出色域子集）"
+        ),
         f"高亮采样比例: {analysis.bright_pixel_pct:.2f}% 像素",
         f"最不易剪切通道: {analysis.survivor_channel}",
         "注: SNR/噪声为单帧估计，不是光子转移测量。",
@@ -374,9 +381,11 @@ def csv_row(
         "snr1_stop_R": analysis.snr1_stop.get("R", float("nan")),
         "snr1_stop_G": analysis.snr1_stop.get("G", float("nan")),
         "snr1_stop_B": analysis.snr1_stop.get("B", float("nan")),
-        "gamut_out_srgb_bright_pct": analysis.gamut_out_pct["sRGB"],
-        "gamut_out_p3_bright_pct": analysis.gamut_out_pct["P3"],
-        "gamut_out_rec2020_bright_pct": analysis.gamut_out_pct["Rec2020"],
+        # Defensive .get: the CSV path requests full diagnostics, but a subset-gamut
+        # analysis (GUI / plain export) must degrade to blanks, never KeyError.
+        "gamut_out_srgb_bright_pct": analysis.gamut_out_pct.get("sRGB", ""),
+        "gamut_out_p3_bright_pct": analysis.gamut_out_pct.get("P3", ""),
+        "gamut_out_rec2020_bright_pct": analysis.gamut_out_pct.get("Rec2020", ""),
         "bright_pixel_pct": analysis.bright_pixel_pct,
         "survivor_channel": analysis.survivor_channel,
         "png": str(out_path) if out_path is not None else "",

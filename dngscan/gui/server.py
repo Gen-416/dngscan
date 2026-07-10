@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 import dngscan as dg
 
 from .page import render_page
-from .service import list_dir, run_export, run_preview
+from .service import list_dir, prepare_preview, run_export_isolated, run_preview
 
 
 def reveal_path(params: dict) -> dict:
@@ -55,7 +55,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in ("/export", "/preview", "/reveal"):
+        if path not in ("/export", "/preview", "/prepare", "/reveal"):
             self.send_error(404)
             return
         length = int(self.headers.get("Content-Length", 0))
@@ -64,7 +64,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/preview":
                 result = run_preview(params)
             elif path == "/export":
-                result = run_export(params)
+                result = run_export_isolated(params)
+            elif path == "/prepare":
+                result = prepare_preview(params)
             else:
                 result = reveal_path(params)
             self._json(result)

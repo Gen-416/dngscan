@@ -40,3 +40,8 @@ test_output/compare_results.json
 .DS_Store
 *.swp
 *.swo
+
+# Native extension build artifacts
+build/
+*.so
+*.pyd

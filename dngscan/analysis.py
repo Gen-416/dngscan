@@ -456,7 +456,16 @@ def compute_snr_curves(
     return curves, snr1_dr, snr1_stop
 
 
-def compute_gamut_metrics(xyz_render: Any, render_scale: float, y: Any) -> tuple[dict[str, float], float]:
+def compute_gamut_metrics(
+    xyz_render: Any,
+    render_scale: float,
+    y: Any,
+    gamut_names: tuple[str, ...] | list[str] | None = None,
+) -> tuple[dict[str, float], float]:
+    names = tuple(gamut_names) if gamut_names is not None else tuple(XYZ_TO_RGB.keys())
+    names = tuple(name for name in names if name in XYZ_TO_RGB)
+    if not names:
+        names = tuple(XYZ_TO_RGB.keys())
     flat_y = y.reshape(-1)
     median_y = float(np.median(flat_y))
     bright_flat = flat_y > median_y
@@ -466,9 +475,9 @@ def compute_gamut_metrics(xyz_render: Any, render_scale: float, y: Any) -> tuple
     bright_total = int(np.count_nonzero(bright_flat))
     total_pixels = int(flat_y.size)
     if bright_total == 0:
-        return {name: 0.0 for name in XYZ_TO_RGB.keys()}, 0.0
+        return {name: 0.0 for name in names}, 0.0
 
-    counts = {name: 0 for name in XYZ_TO_RGB.keys()}
+    counts = {name: 0 for name in names}
     flat_xyz = xyz_render.reshape(-1, xyz_render.shape[-1])
     inv_scale = np.float32(1.0 / render_scale)
     chunk = 1_000_000
@@ -483,7 +492,8 @@ def compute_gamut_metrics(xyz_render: Any, render_scale: float, y: Any) -> tuple
         x = xyz[:, 0]
         y_chan = xyz[:, 1]
         z = xyz[:, 2]
-        for name, matrix in XYZ_TO_RGB.items():
+        for name in names:
+            matrix = XYZ_TO_RGB[name]
             rgb = np.empty((xyz.shape[0], 3), dtype=np.float32)
             rgb[:, 0] = matrix[0, 0] * x + matrix[0, 1] * y_chan + matrix[0, 2] * z
             rgb[:, 1] = matrix[1, 0] * x + matrix[1, 1] * y_chan + matrix[1, 2] * z
@@ -496,7 +506,7 @@ def compute_gamut_metrics(xyz_render: Any, render_scale: float, y: Any) -> tuple
             norm = rgb[valid] / denom[valid, None]
             counts[name] += int(np.count_nonzero(np.any(norm < -GAMUT_EPS, axis=1)))
 
-    pct = {name: counts[name] / bright_total * 100.0 for name in XYZ_TO_RGB.keys()}
+    pct = {name: counts[name] / bright_total * 100.0 for name in names}
     bright_pct = bright_total / total_pixels * 100.0 if total_pixels else 0.0
     return pct, bright_pct
 
@@ -590,7 +600,13 @@ def raw_health_verdict_cn(lag1: float, hist_empty: float) -> str:
     return verdict
 
 
-def analyze(bundle: RawBundle, margin: int) -> tuple[Analysis, Any, Any]:
+def analyze(
+    bundle: RawBundle,
+    margin: int,
+    *,
+    diagnostics: bool = True,
+    gamut_names: tuple[str, ...] | list[str] | None = None,
+) -> tuple[Analysis, Any, Any]:
     raw_image = bundle.raw_image
     raw_colors = bundle.raw_colors
     channel_ids = [int(x) for x in sorted(np.unique(raw_colors).tolist())]
@@ -616,8 +632,15 @@ def analyze(bundle: RawBundle, margin: int) -> tuple[Analysis, Any, Any]:
     ev, raw_p1, p1, p50, p99, p999, dr, floor_hit_pct, vs_gray = compute_ev_metrics(y)
     nf = estimate_raw_noise_floor(bundle, channel_fullwell)
     usable_dr = math.log2(1.0 / max(nf, NOISE_DR_EPS))
-    snr_curves, snr1_dr, snr1_stop = compute_snr_curves(bundle, channel_ids, labels, channel_fullwell)
-    gamut_pct, bright_pct = compute_gamut_metrics(bundle.xyz_render, bundle.render_scale, y)
+    if diagnostics:
+        snr_curves, snr1_dr, snr1_stop = compute_snr_curves(
+            bundle, channel_ids, labels, channel_fullwell
+        )
+    else:
+        snr_curves, snr1_dr, snr1_stop = {}, {}, {}
+    gamut_pct, bright_pct = compute_gamut_metrics(
+        bundle.xyz_render, bundle.render_scale, y, gamut_names
+    )
 
     # Priors layer: electron-domain calibration from public measurements (best-effort).
     prior = sensor_priors.find_priors(bundle.shot_make, bundle.shot_model)
@@ -635,7 +658,10 @@ def analyze(bundle: RawBundle, margin: int) -> tuple[Analysis, Any, Any]:
         usable_dr_eff = clamp_float(usable_dr, prior_pdr - 1.5, prior_pdr + 1.5)
     else:
         usable_dr_eff = usable_dr
-    health_lag1, health_hist = raw_health_metrics(bundle, channel_ids, labels)
+    if diagnostics:
+        health_lag1, health_hist = raw_health_metrics(bundle, channel_ids, labels)
+    else:
+        health_lag1 = health_hist = float("nan")
 
     survivor_id = min(channel_ids, key=lambda cid: clip_pct.get(cid, float("inf")))
     analysis = Analysis(
@@ -719,4 +745,3 @@ def rgb_channel_groups(channel_ids: list[int], labels: dict[int, str]) -> list[t
         if ids:
             groups.append((base, ids))
     return groups
-

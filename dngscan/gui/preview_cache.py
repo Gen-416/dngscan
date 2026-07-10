@@ -1,0 +1,339 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Small persistent cache for proxy preview sessions."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+import threading
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import dngscan as dg
+from dngscan.guidance import raw_guidance_for_shape
+from dngscan.models import Analysis, RawBundle, RawGuidanceMaps
+from dngscan.retreat import resize_clip_masks
+
+from .constants import PROXY_LONG_EDGE
+
+
+PREVIEW_CACHE_VERSION = 1
+MAX_DISK_CACHE_FILES = 24
+MAX_DISK_CACHE_BYTES = 768 * 1024 * 1024
+
+
+@dataclass
+class PreviewEntry:
+    """Everything needed to render a proxy, without retaining the RAW mosaic."""
+
+    bundle: RawBundle
+    analysis: Analysis
+
+
+INT_KEY_ANALYSIS_FIELDS = {
+    "labels",
+    "ceilings",
+    "ceil_spike_counts",
+    "ceil_near_counts",
+    "ceil_spike_ok",
+    "saturation_levels",
+    "channel_fullwell",
+    "channel_thresholds",
+    "clip_pct",
+    "cell_k_of_clipped_pct",
+    "cell_k_of_all_pct",
+    "snr1_dr",
+    "snr1_stop",
+}
+
+
+def downsample_mean(image: object, max_long_edge: int = PROXY_LONG_EDGE) -> object:
+    """Exact-size area proxy in scene-linear code values."""
+    np = dg.np
+    if np is None:
+        return image
+    arr = np.asarray(image)
+    h, w = arr.shape[:2]
+    long_edge = max(h, w)
+    if long_edge <= max_long_edge:
+        return arr
+    from PIL import Image
+
+    scale = float(max_long_edge) / float(long_edge)
+    target = (max(1, round(w * scale)), max(1, round(h * scale)))
+    channels = []
+    for idx in range(arr.shape[2]):
+        plane = Image.fromarray(arr[:, :, idx].astype(np.float32, copy=False), mode="F")
+        channels.append(np.asarray(plane.resize(target, Image.Resampling.BOX), dtype=np.float32))
+    return np.stack(channels, axis=2)
+
+
+def _cache_dir() -> Path:
+    override = os.environ.get("DNGSCAN_PREVIEW_CACHE_DIR")
+    if override:
+        return Path(override).expanduser()
+    if os.name == "posix" and (Path.home() / "Library" / "Caches").is_dir():
+        return Path.home() / "Library" / "Caches" / "dngscan" / "preview-v1"
+    return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "dngscan" / "preview-v1"
+
+
+def _cache_identity(path: Path, highlight: str, wb: str) -> tuple[tuple[str, int, int, str, str], str]:
+    stat = path.stat()
+    key = (str(path.resolve()), int(stat.st_mtime_ns), int(stat.st_size), highlight, wb)
+    encoded = "\0".join((str(PREVIEW_CACHE_VERSION), *(str(value) for value in key))).encode("utf-8")
+    return key, hashlib.sha256(encoded).hexdigest()
+
+
+def _analysis_to_json(analysis: Analysis) -> dict[str, Any]:
+    return asdict(analysis)
+
+
+def _analysis_from_json(data: dict[str, Any]) -> Analysis:
+    restored = dict(data)
+    for field in INT_KEY_ANALYSIS_FIELDS:
+        values = restored.get(field)
+        if isinstance(values, dict):
+            restored[field] = {int(key): value for key, value in values.items()}
+    return Analysis(**restored)
+
+
+def _bundle_metadata(bundle: RawBundle) -> dict[str, Any]:
+    return {
+        "render_scale": float(bundle.render_scale),
+        "scene_scale": float(bundle.scene_scale),
+        "white_level": int(bundle.white_level),
+        "black_levels": [float(value) for value in bundle.black_levels],
+        "camera_wb": [float(value) for value in bundle.camera_wb],
+        "color_desc": str(bundle.color_desc),
+        "raw_pattern": bundle.raw_pattern,
+        "camera_white_levels": [float(value) for value in bundle.camera_white_levels],
+        "scene_highlight_mode": str(bundle.scene_highlight_mode),
+        "orientation_flip": int(bundle.orientation_flip),
+        "wb_mode": str(bundle.wb_mode),
+        "daylight_wb": (
+            [float(value) for value in bundle.daylight_wb]
+            if bundle.daylight_wb is not None
+            else None
+        ),
+        "shot_make": bundle.shot_make,
+        "shot_model": bundle.shot_model,
+        "shot_iso": bundle.shot_iso,
+    }
+
+
+def _bundle_from_cache(
+    path: Path,
+    metadata: dict[str, Any],
+    scene: Any,
+    masks: Any | None,
+    guidance: RawGuidanceMaps | None,
+) -> RawBundle:
+    return RawBundle(
+        path=path,
+        raw_image=None,
+        raw_colors=None,
+        xyz_render=None,
+        render_scale=float(metadata["render_scale"]),
+        scene_rec2020_render=scene,
+        scene_scale=float(metadata["scene_scale"]),
+        white_level=int(metadata["white_level"]),
+        black_levels=[float(value) for value in metadata["black_levels"]],
+        camera_wb=[float(value) for value in metadata["camera_wb"]],
+        color_desc=str(metadata["color_desc"]),
+        raw_pattern=metadata["raw_pattern"],
+        camera_white_levels=[float(value) for value in metadata["camera_white_levels"]],
+        scene_highlight_mode=str(metadata["scene_highlight_mode"]),
+        orientation_flip=int(metadata["orientation_flip"]),
+        wb_mode=str(metadata["wb_mode"]),
+        daylight_wb=metadata["daylight_wb"],
+        shot_make=metadata["shot_make"],
+        shot_model=metadata["shot_model"],
+        shot_iso=metadata["shot_iso"],
+        clip_masks=masks,
+        raw_guidance=guidance,
+        _raw_guidance_has_sensor_snr=(
+            guidance is not None and guidance.snr_confidence is not None
+        ),
+    )
+
+
+def _copy_guidance(maps: RawGuidanceMaps | None) -> RawGuidanceMaps | None:
+    if maps is None:
+        return None
+    np = dg.np
+    return RawGuidanceMaps(
+        headroom=np.asarray(maps.headroom).copy(),
+        clip_class=np.asarray(maps.clip_class).copy(),
+        snr_confidence=(
+            np.asarray(maps.snr_confidence).copy()
+            if maps.snr_confidence is not None
+            else None
+        ),
+    )
+
+
+def build_proxy_entry(
+    source: RawBundle,
+    analysis: Analysis,
+    include_guidance: bool = False,
+) -> PreviewEntry:
+    """Discard full RAW state after reducing the scene and evidence to proxy geometry."""
+    np = dg.np
+    proxy_scene = downsample_mean(source.scene_rec2020_render, PROXY_LONG_EDGE)
+    proxy_shape = proxy_scene.shape[:2]
+    proxy_masks = resize_clip_masks(source.clip_masks, proxy_shape)
+    if proxy_masks is not None:
+        proxy_masks = proxy_masks.astype(np.float16, copy=False)
+    proxy_guidance = None
+    if include_guidance:
+        proxy_guidance = _copy_guidance(raw_guidance_for_shape(source, proxy_shape, analysis))
+    bundle = _bundle_from_cache(
+        source.path,
+        _bundle_metadata(source),
+        proxy_scene,
+        proxy_masks,
+        proxy_guidance,
+    )
+    return PreviewEntry(bundle=bundle, analysis=analysis)
+
+
+def _read_disk_entry(cache_path: Path, source_path: Path, require_guidance: bool) -> PreviewEntry | None:
+    np = dg.np
+    try:
+        with np.load(cache_path, allow_pickle=False) as payload:
+            metadata = json.loads(str(payload["metadata"].item()))
+            if int(metadata.get("version", -1)) != PREVIEW_CACHE_VERSION:
+                return None
+            if require_guidance and not bool(metadata.get("has_guidance", False)):
+                return None
+            scene = np.asarray(payload["scene"]).copy()
+            masks = np.asarray(payload["masks"]).copy() if bool(metadata.get("has_masks", False)) else None
+            guidance = None
+            if bool(metadata.get("has_guidance", False)):
+                snr = (
+                    np.asarray(payload["guidance_snr"]).copy()
+                    if bool(metadata.get("guidance_has_snr", False))
+                    else None
+                )
+                guidance = RawGuidanceMaps(
+                    headroom=np.asarray(payload["guidance_headroom"]).copy(),
+                    clip_class=np.asarray(payload["guidance_clip_class"]).copy(),
+                    snr_confidence=snr,
+                )
+            bundle = _bundle_from_cache(source_path, metadata["bundle"], scene, masks, guidance)
+            return PreviewEntry(bundle=bundle, analysis=_analysis_from_json(metadata["analysis"]))
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        try:
+            cache_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+
+
+def _trim_disk_cache(directory: Path) -> None:
+    try:
+        files = sorted(directory.glob("*.npz"), key=lambda item: item.stat().st_mtime)
+    except OSError:
+        return
+    total = sum(item.stat().st_size for item in files)
+    while files and (len(files) > MAX_DISK_CACHE_FILES or total > MAX_DISK_CACHE_BYTES):
+        oldest = files.pop(0)
+        try:
+            size = oldest.stat().st_size
+            oldest.unlink()
+            total -= size
+        except OSError:
+            continue
+
+
+def _write_disk_entry(cache_path: Path, entry: PreviewEntry) -> None:
+    np = dg.np
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        bundle = entry.bundle
+        maps = bundle.raw_guidance
+        metadata = {
+            "version": PREVIEW_CACHE_VERSION,
+            "bundle": _bundle_metadata(bundle),
+            "analysis": _analysis_to_json(entry.analysis),
+            "has_masks": bundle.clip_masks is not None,
+            "has_guidance": maps is not None,
+            "guidance_has_snr": maps is not None and maps.snr_confidence is not None,
+        }
+        fd, temp_name = tempfile.mkstemp(prefix=".preview-", suffix=".npz", dir=cache_path.parent)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                values: dict[str, Any] = {
+                    "scene": np.asarray(bundle.scene_rec2020_render),
+                    "masks": (
+                        np.asarray(bundle.clip_masks)
+                        if bundle.clip_masks is not None
+                        else np.empty((0, 0, 0), dtype=np.float16)
+                    ),
+                    "metadata": np.asarray(json.dumps(metadata, allow_nan=True)),
+                }
+                if maps is not None:
+                    values["guidance_headroom"] = np.asarray(maps.headroom)
+                    values["guidance_clip_class"] = np.asarray(maps.clip_class)
+                    if maps.snr_confidence is not None:
+                        values["guidance_snr"] = np.asarray(maps.snr_confidence)
+                np.savez(handle, **values)
+            os.replace(temp_name, cache_path)
+        finally:
+            try:
+                Path(temp_name).unlink(missing_ok=True)
+            except OSError:
+                pass
+        _trim_disk_cache(cache_path.parent)
+    except OSError:
+        return
+
+
+class PreviewCache:
+    """One in-memory proxy plus a bounded, validated on-disk cache."""
+
+    def __init__(self) -> None:
+        self.entries: dict[tuple[str, int, int, str, str], PreviewEntry] = {}
+        self.lock = threading.Lock()
+        self.build_lock = threading.Lock()
+
+    def clear_memory(self) -> None:
+        with self.lock:
+            self.entries.clear()
+
+    def get(
+        self,
+        path: Path,
+        highlight: str,
+        wb: str,
+        require_guidance: bool = False,
+    ) -> PreviewEntry:
+        key, digest = _cache_identity(path, highlight, wb)
+        with self.lock:
+            cached = self.entries.get(key)
+            if cached is not None and (not require_guidance or cached.bundle.raw_guidance is not None):
+                return cached
+
+        with self.build_lock:
+            with self.lock:
+                cached = self.entries.get(key)
+                if cached is not None and (not require_guidance or cached.bundle.raw_guidance is not None):
+                    return cached
+
+            cache_path = _cache_dir() / f"{digest}.npz"
+            cached = _read_disk_entry(cache_path, path, require_guidance)
+            if cached is None:
+                source = dg.load_raw(path, highlight, scene_half_size=True, wb_mode=wb)
+                analysis, _, _ = dg.analyze(source, 4, diagnostics=False)
+                cached = build_proxy_entry(source, analysis, require_guidance)
+                _write_disk_entry(cache_path, cached)
+
+            with self.lock:
+                self.entries.clear()
+                self.entries[key] = cached
+            return cached
+
+
+PREVIEW_STORE = PreviewCache()

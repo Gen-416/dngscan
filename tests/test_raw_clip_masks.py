@@ -39,6 +39,24 @@ def test_build_clip_masks_uses_cfa_max_binning():
 class RawClipMasksTest(unittest.TestCase):
     test_build_clip_masks_uses_cfa_max_binning = staticmethod(test_build_clip_masks_uses_cfa_max_binning)
 
+    def test_direct_bayer_planes_match_generic_mask_path(self) -> None:
+        raw = np.arange(64, dtype=np.uint16).reshape(8, 8) * 16
+        colors = np.tile(
+            np.asarray([[0, 1], [3, 2]], dtype=np.uint8),
+            (4, 4),
+        )
+        kwargs = dict(
+            color_desc="RGBG",
+            white_level=1000,
+            black_levels=[0.0, 0.0, 0.0, 0.0],
+            camera_white_levels=[1000.0, 1000.0, 1000.0, 1000.0],
+            orientation_flip=0,
+            scene_shape=(4, 4),
+        )
+        generic = build_clip_masks(raw, colors, **kwargs)
+        direct = build_clip_masks(raw, colors, raw_pattern=[[0, 1], [3, 2]], **kwargs)
+        np.testing.assert_array_equal(direct, generic)
+
 
 if __name__ == "__main__":
     unittest.main()

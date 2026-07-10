@@ -5,47 +5,24 @@ from __future__ import annotations
 import base64
 import io
 import math
+import multiprocessing as mp
 import threading
-from dataclasses import dataclass, replace
+from queue import Empty
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import dngscan as dg
 from dngscan.grade import RENDER_MODE, resolve_grade_params
 
-from .constants import PROXY_LONG_EDGE, RAW_EXTS
+from .constants import RAW_EXTS
+from .preview_cache import PREVIEW_STORE, PreviewEntry, downsample_mean
 
 
-@dataclass
-class PreviewEntry:
-    bundle: dg.RawBundle
-    analysis: dg.Analysis
-    proxy_scene: object
-
-
-PREVIEW_CACHE: dict[tuple[str, int, str], PreviewEntry] = {}
-PREVIEW_CACHE_LOCK = threading.Lock()
+# Kept as aliases for callers/tests that clear the in-process proxy cache.
+PREVIEW_CACHE = PREVIEW_STORE.entries
+PREVIEW_CACHE_LOCK = PREVIEW_STORE.lock
 RENDER_LOCK = threading.Lock()
-
-def downsample_mean(image: object, max_long_edge: int = PROXY_LONG_EDGE) -> object:
-    np = dg.np
-    if np is None:
-        return image
-    arr = np.asarray(image)
-    h, w = arr.shape[:2]
-    long_edge = max(h, w)
-    if long_edge <= max_long_edge:
-        return arr
-    factor = max(1, int(math.ceil(long_edge / max_long_edge)))
-    work = arr.astype(np.float32, copy=False)
-    row_starts = np.arange(0, h, factor)
-    col_starts = np.arange(0, w, factor)
-    reduced = np.add.reduceat(work, row_starts, axis=0)
-    reduced = np.add.reduceat(reduced, col_starts, axis=1)
-    row_counts = np.diff(np.append(row_starts, h)).astype(np.float32)
-    col_counts = np.diff(np.append(col_starts, w)).astype(np.float32)
-    reduced = reduced / row_counts[:, None, None]
-    reduced = reduced / col_counts[None, :, None]
-    return reduced.astype(np.float32, copy=False)
 
 
 def make_preview_b64(path: Path, width: int | None = 1280, icc_profile: bytes | None = None) -> str:
@@ -65,10 +42,16 @@ def make_preview_b64(path: Path, width: int | None = 1280, icc_profile: bytes | 
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def preview_b64_from_u8(rgb_u8: object, icc_profile: bytes | None = None) -> str:
+def preview_b64_from_u8(
+    rgb_u8: object,
+    icc_profile: bytes | None = None,
+    width: int | None = None,
+) -> str:
     from PIL import Image
 
     im = Image.fromarray(rgb_u8, "RGB")
+    if width is not None and im.width > width:
+        im = im.resize((width, round(im.height * width / im.width)))
     buf = io.BytesIO()
     save_kwargs = {"format": "JPEG", "quality": 85}
     if icc_profile:
@@ -156,22 +139,33 @@ def preview_metrics_from_u8(rgb_u8: object, gamut: str) -> dict[str, float]:
     }
 
 
-def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, float]:
-    from PIL import Image
-
+def output_luminance_metrics_u8(encoded_u8: object, gamut: str, ev: float) -> dict[str, float]:
     np = dg.np
     if np is None:
         return {}
-    im = Image.open(path).convert("RGB")
-    encoded_u8 = np.asarray(im, dtype=np.uint8)
-    encoded = encoded_u8.astype(np.float32) / np.float32(255.0)
-    flat = encoded.reshape(-1, 3)
-    max_channel_u8 = np.max(encoded_u8.reshape(-1, 3), axis=1)
-    linear = dg.srgb_decode(flat)
+    encoded_u8 = np.asarray(encoded_u8, dtype=np.uint8)
+    flat_u8 = encoded_u8.reshape(-1, 3)
     matrix = dg.RGB_TO_XYZ[dg.output_gamut_space(gamut)]
-    y = matrix[1, 0] * linear[:, 0] + matrix[1, 1] * linear[:, 1] + matrix[1, 2] * linear[:, 2]
+    y = np.empty((flat_u8.shape[0],), dtype=np.float32)
+    max_channel = np.empty((flat_u8.shape[0],), dtype=np.float32)
+    near_count = 0
+    clipped_count = 0
+    chunk = 1_000_000
+    for start in range(0, flat_u8.shape[0], chunk):
+        end = min(start + chunk, flat_u8.shape[0])
+        piece_u8 = flat_u8[start:end]
+        encoded = piece_u8.astype(np.float32) / np.float32(255.0)
+        linear = dg.srgb_decode(encoded)
+        y[start:end] = (
+            matrix[1, 0] * linear[:, 0]
+            + matrix[1, 1] * linear[:, 1]
+            + matrix[1, 2] * linear[:, 2]
+        )
+        max_channel[start:end] = np.max(linear, axis=1)
+        max_u8 = np.max(piece_u8, axis=1)
+        near_count += int(np.count_nonzero(max_u8 >= 250))
+        clipped_count += int(np.count_nonzero(max_u8 >= 254))
     y = np.clip(np.nan_to_num(y, nan=0.0, posinf=1.0, neginf=0.0), 0.0, 1.0)
-    max_channel = np.max(linear, axis=1)
     y_p99, y_p999 = [float(v) for v in np.percentile(y, [99.0, 99.9])]
     max_p999 = float(np.percentile(max_channel, 99.9))
     headroom_luma_ev = math.log2(0.95 / max(y_p999, 1e-9))
@@ -182,12 +176,20 @@ def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, flo
         "luma_p99_pct": y_p99 * 100.0,
         "luma_p999_pct": y_p999 * 100.0,
         "max_channel_p999_pct": max_p999 * 100.0,
-        "near_white_pct": float(np.mean(max_channel_u8 >= 250) * 100.0),
-        "clipped_channel_pct": float(np.mean(max_channel_u8 >= 254) * 100.0),
+        "near_white_pct": float(near_count / max(flat_u8.shape[0], 1) * 100.0),
+        "clipped_channel_pct": float(clipped_count / max(flat_u8.shape[0], 1) * 100.0),
         "headroom_luma_ev": float(headroom_luma_ev),
         "headroom_rgb_ev": float(headroom_rgb_ev),
         "estimated_ev_before_luma_limit": float(ev + headroom_luma_ev),
     }
+
+
+def output_luminance_metrics(path: Path, gamut: str, ev: float) -> dict[str, float]:
+    from PIL import Image
+
+    with Image.open(path) as im:
+        encoded_u8 = dg.np.asarray(im.convert("RGB"), dtype=dg.np.uint8)
+    return output_luminance_metrics_u8(encoded_u8, gamut, ev)
 
 
 def output_metrics_from_linear(rgb_linear: object, gamut: str) -> dict[str, float]:
@@ -359,24 +361,14 @@ def export_preview_jpeg(
     tone_core: str = "agx",
     lum_norm: str = "y",
     agx_primaries: str = "smooth",
+    cached: PreviewEntry | None = None,
 ) -> dict:
     dg.require_dependencies()
-    stat = inp.stat()
-    key = (str(inp), int(stat.st_mtime_ns), highlight, wb)
-    with PREVIEW_CACHE_LOCK:
-        cached = PREVIEW_CACHE.get(key)
     if cached is None:
-        bundle = dg.load_raw(inp, highlight, scene_half_size=True, wb_mode=wb)
-        analysis, _, _ = dg.analyze(bundle, 4)
-        proxy_scene = downsample_mean(bundle.scene_rec2020_render, PROXY_LONG_EDGE)
-        cached = PreviewEntry(bundle=bundle, analysis=analysis, proxy_scene=proxy_scene)
-        with PREVIEW_CACHE_LOCK:
-            PREVIEW_CACHE.clear()
-            PREVIEW_CACHE[key] = cached
+        cached = PREVIEW_STORE.get(inp, highlight, wb, tone_core == "gated")
 
     proxy_bundle = replace(
         cached.bundle,
-        scene_rec2020_render=cached.proxy_scene,
         exposure_gain=dg.compute_exposure_gain(dg.exposure_mode_for_tone_core(tone_core), ev),
     )
     with RENDER_LOCK:
@@ -438,20 +430,9 @@ def run_preview(params: dict) -> dict:
     punch_scale = parse_punch(params)
     tone_core, lum_norm = parse_tone_core(params)
     agx_primaries = parse_agx_primaries(params)
+    cached = PREVIEW_STORE.get(inp, highlight, wb, tone_core == "gated")
     auto_ev_result = None
     if ev_auto:
-        stat = inp.stat()
-        key = (str(inp), int(stat.st_mtime_ns), highlight, wb)
-        with PREVIEW_CACHE_LOCK:
-            cached = PREVIEW_CACHE.get(key)
-        if cached is None:
-            bundle = dg.load_raw(inp, highlight, scene_half_size=True, wb_mode=wb)
-            analysis, _, _ = dg.analyze(bundle, 4)
-            proxy_scene = downsample_mean(bundle.scene_rec2020_render, PROXY_LONG_EDGE)
-            cached = PreviewEntry(bundle=bundle, analysis=analysis, proxy_scene=proxy_scene)
-            with PREVIEW_CACHE_LOCK:
-                PREVIEW_CACHE.clear()
-                PREVIEW_CACHE[key] = cached
         auto_ev_result = dg.compute_auto_ev(
             cached.bundle,
             cached.analysis,
@@ -486,7 +467,22 @@ def run_preview(params: dict) -> dict:
         tone_core=tone_core,
         lum_norm=lum_norm,
         agx_primaries=agx_primaries,
+        cached=cached,
     )
+
+
+def prepare_preview(params: dict) -> dict:
+    """Warm a proxy session after file selection without rendering an image."""
+    inp, highlight, _, _, _, _, _, _, _, _ = parse_job_params(params)
+    wb = str(params.get("wb", "camera"))
+    if wb not in dg.WB_CHOICES:
+        raise ValueError(f"未知白平衡模式：{wb}")
+    tone_core, _ = parse_tone_core(params)
+    # Do not compete with the full-resolution export worker for memory bandwidth.
+    with RENDER_LOCK:
+        entry = PREVIEW_STORE.get(inp, highlight, wb, tone_core == "gated")
+    height, width = entry.bundle.scene_rec2020_render.shape[:2]
+    return {"ok": True, "prepared": True, "width": int(width), "height": int(height)}
 
 
 def export_suffix_parts(
@@ -544,7 +540,12 @@ def run_export(params: dict) -> dict:
     agx_primaries = parse_agx_primaries(params)
     bundle = dg.load_raw(inp, highlight, demosaic=demosaic, wb_mode=wb)
 
-    analysis, y, ev_img = dg.analyze(bundle, 4)
+    analysis, y, ev_img = dg.analyze(
+        bundle,
+        4,
+        diagnostics=want_png,
+        gamut_names=None if want_png else (dg.output_gamut_space(gamut),),
+    )
     auto_ev_result = None
     if ev_auto:
         auto_ev_result = dg.compute_auto_ev(
@@ -595,7 +596,7 @@ def run_export(params: dict) -> dict:
     with RENDER_LOCK:
         bundle.exposure_gain = dg.compute_exposure_gain(dg.exposure_mode_for_tone_core(tone_core), ev)
         icc_profile = dg.output_icc_profile_bytes(gamut)
-        dg.export_jpeg(
+        export_result = dg.export_jpeg(
             inp,
             jpg_path,
             quality,
@@ -613,8 +614,13 @@ def run_export(params: dict) -> dict:
             filter_strength,
             scene_transform,
             scene_transform_strength,
+            return_rgb=output_format == "sdr",
         )
-        metrics = output_luminance_metrics(jpg_path, gamut, ev)
+        rendered_u8 = export_result[1] if isinstance(export_result, tuple) else None
+        if rendered_u8 is not None:
+            metrics = output_luminance_metrics_u8(rendered_u8, gamut, ev)
+        else:
+            metrics = output_luminance_metrics(jpg_path, gamut, ev)
         metrics.update(
             estimate_ev_headroom(
                 bundle,
@@ -634,14 +640,22 @@ def run_export(params: dict) -> dict:
                 agx_primaries=agx_primaries,
             )
         )
-        preview = make_preview_b64(jpg_path, icc_profile=icc_profile)
+        preview = (
+            preview_b64_from_u8(rendered_u8, icc_profile=icc_profile, width=1280)
+            if rendered_u8 is not None
+            else make_preview_b64(jpg_path, icc_profile=icc_profile)
+        )
         if auto_ev_result is not None:
-            from PIL import Image
-
             np = dg.np
-            im = Image.open(jpg_path).convert("RGB")
-            annotated = annotate_preview_rgb_u8(np.asarray(im), dg.auto_ev_overlay_lines(auto_ev_result))
-            preview = preview_b64_from_u8(annotated, icc_profile=icc_profile)
+            if rendered_u8 is None:
+                from PIL import Image
+
+                with Image.open(jpg_path) as im:
+                    rendered_u8 = np.asarray(im.convert("RGB"), dtype=np.uint8)
+            annotated = annotate_preview_rgb_u8(
+                rendered_u8, dg.auto_ev_overlay_lines(auto_ev_result)
+            )
+            preview = preview_b64_from_u8(annotated, icc_profile=icc_profile, width=1280)
         saved = [str(jpg_path)]
 
         if want_png:
@@ -667,3 +681,47 @@ def run_export(params: dict) -> dict:
         "tone_core": tone_core,
         "lum_norm": lum_norm,
     }
+
+
+def _export_worker(params: dict, result_queue: Any) -> None:
+    """Spawn target: keep full-resolution arrays out of the GUI server process."""
+    try:
+        result_queue.put(("ok", run_export(params)))
+    except Exception as exc:
+        result_queue.put(("error", str(exc)))
+
+
+def run_export_isolated(params: dict) -> dict:
+    """Run one full export in a disposable process and return its small result payload.
+
+    The process is deliberately short-lived: NumPy/libraw allocations then return to the
+    OS after every export instead of accumulating in the long-running GUI process.
+    """
+    context = mp.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_export_worker,
+        args=(dict(params), result_queue),
+        name="dngscan-export",
+    )
+    message: tuple[str, Any] | None = None
+    with RENDER_LOCK:
+        process.start()
+        while message is None:
+            try:
+                message = result_queue.get(timeout=0.25)
+            except Empty:
+                if not process.is_alive():
+                    break
+        process.join()
+    try:
+        result_queue.close()
+        result_queue.join_thread()
+    except (OSError, ValueError):
+        pass
+    if message is None:
+        raise RuntimeError(f"导出工作进程异常退出（exit code {process.exitcode}）")
+    status, payload = message
+    if status != "ok":
+        raise RuntimeError(str(payload))
+    return payload

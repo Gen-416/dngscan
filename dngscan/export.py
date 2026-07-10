@@ -428,7 +428,8 @@ def export_srgb_jpeg(
     tone_core: str = "agx",
     lum_norm: str = "y",
     agx_primaries: str = "smooth",
-) -> bool:
+    return_rgb: bool = False,
+) -> Any:
     try:
         rgb = render_output_u8(
             bundle, analysis, output_gamut, tone_plan,
@@ -436,7 +437,8 @@ def export_srgb_jpeg(
             scene_transform, scene_transform_strength,
             tone_core, lum_norm, agx_primaries,
         )
-        return save_jpeg_array(rgb, out_path, quality, output_gamut, subsampling)
+        embedded = save_jpeg_array(rgb, out_path, quality, output_gamut, subsampling)
+        return (embedded, rgb) if return_rgb else embedded
     except Exception as exc:
         raise RuntimeError(f"Cannot export 8-bit {output_gamut_label(output_gamut)} JPEG: {exc}") from exc
 
@@ -463,7 +465,8 @@ def export_jpeg(
     lum_norm: str = "y",
     agx_primaries: str = "smooth",
     punch_scale: float = 1.0,
-) -> bool:
+    return_rgb: bool = False,
+) -> Any:
     if output_format == "ultrahdr":
         if look != "none" or display_filter != "none":
             raise ValueError("成片风格暂不支持 Ultra HDR 输出（SDR/HDR 底图一致性优先）")
@@ -489,5 +492,5 @@ def export_jpeg(
         path, out_path, quality, bundle, analysis, tone_plan, output_gamut, subsampling,
         look, look_strength, display_filter, filter_strength,
         scene_transform, scene_transform_strength,
-        tone_core, lum_norm, agx_primaries,
+        tone_core, lum_norm, agx_primaries, return_rgb,
     )

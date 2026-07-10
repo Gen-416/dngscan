@@ -5,11 +5,18 @@ from __future__ import annotations
 
 import unittest
 
+from dngscan._deps import np
 from dngscan.gui.service import export_suffix_parts
+from dngscan.gui.service import downsample_mean
 from dngscan.gui.page import render_page
 
 
 class ExportSuffixTests(unittest.TestCase):
+    def test_proxy_downsample_reaches_requested_long_edge(self) -> None:
+        source = np.zeros((303, 202, 3), dtype=np.uint16)
+        proxy = downsample_mean(source, 128)
+        self.assertEqual(proxy.shape, (128, 85, 3))
+
     def test_public_gui_is_concise_and_has_no_vendor_luts(self) -> None:
         html = render_page("/tmp").decode("utf-8")
         self.assertIn("更新预览", html)

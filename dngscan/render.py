@@ -2,6 +2,7 @@
 """Scene-linear to display-linear tone mapping pipelines."""
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from typing import Any
 
@@ -16,12 +17,22 @@ from . import guidance as guidance_engine
 from . import punch as punch_engine
 from . import retreat as retreat_engine
 from . import scene_transform as scene_transform_engine
+from . import _fast as fast_backend
 from .color import (
     encode_display_linear, fit_to_output_gamut, luminance_from_rgb_space, oklab_to_output_rgb,
     rec2020_to_output, rgb_to_oklab, smoothstep,
 )
 from .models import Analysis, ColorGeometryPlan, RawBundle, RenderPlan, ToneCompressionPlan
 from .tone import build_render_plan, scene_rec2020_to_float
+
+# Streamed-export chunking. The dither RNG consumes noise in quantize-group order, so
+# render chunks must tile each quantize group exactly (quantize % render == 0) for the
+# grouped flush to stay lossless and byte-identical to the legacy single-pass path.
+# render_output_u8 validates this at runtime; keep the constants divisible.
+STREAM_QUANTIZE_CHUNK = 1_000_000
+STREAM_RENDER_CHUNK = 500_000
+STREAM_THREAD_MIN_PIXELS = 2_000_000
+
 
 def dither_quantize_u8(encoded: Any, rng: Any) -> Any:
     """Quantize display-domain [0,1] floats to uint8 with 1-LSB TPDF dither."""
@@ -127,6 +138,19 @@ def apply_agx_core(rgb_rec2020: Any, plan: ToneCompressionPlan) -> Any:
     filmic curve; the darktable-derived sigmoid supplies the curve shape, while the plan's
     black/white EV keep the log2 window anchored on the exposure we set.
     """
+    if fast_backend.supports_agx(plan):
+        arr = np.ascontiguousarray(rgb_rec2020, dtype=np.float32)
+        if arr.ndim == 2 and arr.shape[1] == 3 and np.isfinite(arr).all():
+            try:
+                native_plan = fast_backend.compile_agx_plan(plan)
+                return fast_backend.apply_agx_core_f32(arr, native_plan)
+            except fast_backend.NativeKernelError:
+                if fast_backend.strict_requested():
+                    raise
+            except Exception as exc:
+                if fast_backend.strict_requested():
+                    raise fast_backend.NativeKernelError(str(exc)) from exc
+
     inset, outset = agx_engine.formation_matrices(plan)
     mapped = agx_engine.apply_core(rgb_rec2020, plan, inset, outset)
     # Scene-driven purity compensation (dngscan/punch.py). This wrapper is the single
@@ -314,24 +338,150 @@ def render_output_u8(
         raise ValueError("色度 look 与输出滤镜不能同时启用")
     if analysis is None:
         raise ValueError("AgX 导出需要分析结果")
-    return quantize_final_output_linear_to_u8(
-        render_output_linear(
-            bundle,
-            analysis,
-            output_gamut,
-            tone_plan,
-            look,
-            look_strength,
-            display_filter,
-            filter_strength,
-            scene_transform,
-            scene_transform_strength,
-            tone_core,
-            lum_norm,
-            agx_primaries,
-        ),
+    plan = tone_plan if tone_plan is not None else build_render_plan(
+        bundle,
+        analysis,
+        "agx",
         output_gamut,
+        scene_transform,
+        scene_transform_strength,
+        tone_core=tone_core,
+        lum_norm=lum_norm,
+        agx_primaries=agx_primaries,
     )
+    effective_plan = plan_with_look_overrides(plan, look, look_strength)
+    effective_tone = effective_plan.tone if isinstance(effective_plan, RenderPlan) else effective_plan
+    color_plan = effective_plan.color if isinstance(effective_plan, RenderPlan) else None
+
+    scene = bundle.scene_rec2020_render
+    h, w = scene.shape[:2]
+    flat_scene = scene.reshape(-1, scene.shape[-1])
+    out = np.empty((flat_scene.shape[0], 3), dtype=np.uint8)
+    quantize_chunk_size = STREAM_QUANTIZE_CHUNK
+    render_chunk_size = (
+        STREAM_RENDER_CHUNK
+        if flat_scene.shape[0] >= STREAM_THREAD_MIN_PIXELS
+        else quantize_chunk_size
+    )
+    if quantize_chunk_size % render_chunk_size != 0:
+        # The grouped flush below fires on exact boundary equality; a non-divisible
+        # pairing would never flush and silently leave trailing pixels at zero.
+        raise ValueError(
+            f"stream chunking misaligned: quantize {quantize_chunk_size} "
+            f"must be a multiple of render {render_chunk_size}"
+        )
+
+    clip_masks = None
+    raw_guidance = None
+    if color_plan is not None and getattr(bundle, "clip_masks", None) is not None:
+        clip_masks = retreat_engine.clip_masks_for_shape(bundle, (h, w)).reshape(-1, 3)
+        if str(getattr(effective_tone, "tone_core", "agx")) == "gated":
+            raw_guidance = guidance_engine.raw_guidance_for_shape(bundle, (h, w), analysis)
+
+    wb_adapt = scene_transform_engine.wb_adaptation_ratios(
+        bundle.wb_mode, bundle.camera_wb, bundle.daylight_wb
+    )
+    def render_finalized_chunk(start: int, end: int) -> Any:
+        rec = scene_rec2020_to_float(
+            flat_scene[start:end, :3], bundle.scene_scale, bundle.exposure_gain
+        )
+        rec = scene_transform_engine.apply_scene_transform_rec2020(
+            rec, scene_transform, scene_transform_strength, wb_adapt
+        )
+        sample_masks = clip_masks[start:end] if clip_masks is not None else None
+        if (
+            sample_masks is not None
+            and color_plan is not None
+            and float(color_plan.raw_clip_retreat_strength) > 0.0
+        ):
+            rec = retreat_engine.apply_clip_retreat_rec2020(
+                rec, sample_masks, float(color_plan.raw_clip_retreat_strength)
+            )
+        mapped_rec = apply_tone_core(
+            rec,
+            effective_tone,
+            color_plan,
+            sample_masks,
+            guidance_engine.flatten_raw_guidance(raw_guidance, start, end)
+            if raw_guidance is not None
+            else None,
+        )
+        if display_filter != "none" and filter_strength > 0.0:
+            output_linear = filter_engine.apply_display_filter_rec2020(
+                mapped_rec,
+                output_gamut,
+                display_filter,
+                filter_strength,
+                scene_rec2020=rec,
+            )
+        else:
+            output_linear = rec2020_to_output(mapped_rec, output_gamut)
+        output_linear = np.nan_to_num(
+            output_linear, nan=0.0, posinf=1e6, neginf=-1e6
+        ).astype(np.float32, copy=False)
+        finalized = finalize_output_linear(
+            output_linear, output_gamut, look, look_strength, color_plan
+        )
+        return np.nan_to_num(
+            finalized.astype(np.float32, copy=False),
+            nan=0.0,
+            posinf=1.0,
+            neginf=0.0,
+        )
+
+    ranges = [
+        (start, min(start + render_chunk_size, flat_scene.shape[0]))
+        for start in range(0, flat_scene.shape[0], render_chunk_size)
+    ]
+    rng = np.random.default_rng(0)
+
+    def quantize_chunk(start: int, end: int, finalized: Any) -> None:
+        encoded = encode_display_linear(
+            finalized,
+            output_gamut,
+        )
+        out[start:end] = dither_quantize_u8(encoded, rng)
+
+    def consume_in_quantize_groups(results: Any) -> None:
+        group_start = 0
+        group_parts: list[Any] = []
+        for start, end, finalized in results:
+            group_parts.append(finalized)
+            group_end = min(group_start + quantize_chunk_size, flat_scene.shape[0])
+            if end == group_end:
+                merged = group_parts[0] if len(group_parts) == 1 else np.concatenate(group_parts, axis=0)
+                quantize_chunk(group_start, group_end, merged)
+                group_start = group_end
+                group_parts = []
+
+    if flat_scene.shape[0] < STREAM_THREAD_MIN_PIXELS or len(ranges) < 2:
+        consume_in_quantize_groups(
+            (start, end, render_finalized_chunk(start, end)) for start, end in ranges
+        )
+    else:
+        # Two workers give useful NumPy parallelism without multiplying the large
+        # temporary working set as aggressively as a CPU-count-sized pool.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="dngscan-render") as pool:
+            pending: dict[int, Any] = {}
+            submit_idx = 0
+            while submit_idx < min(2, len(ranges)):
+                start, end = ranges[submit_idx]
+                pending[submit_idx] = pool.submit(render_finalized_chunk, start, end)
+                submit_idx += 1
+            def ordered_results() -> Any:
+                nonlocal submit_idx
+                for idx, (start, end) in enumerate(ranges):
+                    finalized = pending.pop(idx).result()
+                    if submit_idx < len(ranges):
+                        next_start, next_end = ranges[submit_idx]
+                        pending[submit_idx] = pool.submit(
+                            render_finalized_chunk, next_start, next_end
+                        )
+                        submit_idx += 1
+                    yield start, end, finalized
+
+            consume_in_quantize_groups(ordered_results())
+    return out.reshape(h, w, 3)
 
 
 def scene_render_to_reference_linear(bundle: RawBundle, output_gamut: str = "p3") -> Any:
